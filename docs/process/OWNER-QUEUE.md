@@ -23,6 +23,12 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | D-3 | Approve the night-run workflow above (🔴 commits on a branch, your review afterwards) | taken as the default | merge to `main` |
 | D-4 | `requirements.txt` is exported with `--no-emit-project` (the plain CLAUDE.md command adds `-e .`). pip users then run `pip install -r requirements.txt && pip install -e .`. Update the CLAUDE.md command to match? | flag used; CLAUDE.md not edited (yours) | README install section (iteration 43) |
 | D-5 | Embedding limits in `config/models.yaml` (100 RPM / 1,000 RPD / 30K TPM) are placeholders marked unconfirmed | kept as placeholders | iteration 38 only |
+| D-6 | Retry count: the plan (iteration 3) says 3 retries with 1/2/4 s backoff, HLD ADR-003 says 1 retry. Which wins? | the plan (3 retries, then one fallback attempt, then force_answer); all bounded by the turn deadline | ADR-003 text |
+| D-7 | Drop `pandas` and `db-dtypes` (the spike shows `to_arrow()` and row iteration are enough; pyarrow must stay)? | kept; a lock change waits for iteration 31/40 (hot file) | nothing |
+| D-8 | Deadlines the plan does not state: light path 120 s, retry-report 180 s (8 calls, 0 SQL) | taken as set by the implementer | nothing |
+| D-9 | PII mask format: AC-08.2/AC-10.7 say `[REDACTED]`, HLD §5.4 says typed tokens (`<EMAIL>`, `<PHONE>`, `<CARD>`, `<ID>`) | HLD typed tokens; ACs to be aligned by you | AC text |
+| D-10 | Street-address regex: HLD §5.4 lists it for the regex scrubber, the plan gives addresses to 8b (NER) | 8b (NER) covers addresses | 8b |
+| D-11 | Top-level parenthesised `(SELECT ...)` in the SQL policy: reject or unwrap? | the iteration-6 implementer decides and documents it; see the 🔴 row for 6 | nothing |
 
 ## Scope questions (🟡: add now / defer to README "future work" / skip)
 
@@ -34,3 +40,8 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | Iteration | Status | Note |
 |---|---|---|
 | 1 | done | Skeleton, all deps (spaCy model pinned as wheel URL), `config/models.yaml`, startup check, socket block; 11 tests. Note: the orchestrator's CLI smoke run loaded `.env` and made **one `models.list` call** (a listing, not a generation; no RPD used). It passed, so every configured id, including `gemini-embedding-001`, is listed for your key. That is part of L0; the 4 generation calls stay yours. |
+| 2 | done | Spikes and CI (fb2b4f9). 21 sqlglot quirks documented; the scope rewrite works. Live model/embedding spike prepared as `tests/live/test_spike_models.py`, **not run** (yours, L0). |
+| 3 | review fixes in progress | T2 review: APPROVE WITH FIXES (2 MAJOR test/limiter issues, 5 MINOR); fixes being applied before commit |
+| 4 | review fixes in progress | T2 review (secrets): REQUEST CHANGES. The blocker: the log redaction filter did not cover child loggers and was never installed at startup. The fix also wires `install_log_filter`/`register_secret` into `cli.py` startup now, instead of waiting for iteration 19 |
+| 8a | second T1 review in progress | regex scrubber done, 86 tests; known gaps left to 8b NER (unseparated phones without a keyword, 7-digit local numbers, plain "name at domain.com") |
+| 5, 6 | in progress (T1 opus) | started in parallel; disjoint files |
