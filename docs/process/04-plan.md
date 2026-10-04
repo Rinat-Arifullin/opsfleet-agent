@@ -292,10 +292,10 @@ The calibration gate (30) reaches the critical path only through the owner's lab
 - `src/opsfleet_agent/guards/pii_regex.py`
 - `tests/unit/test_pii_regex.py`
 **Done criteria**:
-- [ ] `test_output_filter_redacts_email_phone_address` (the regex part: email and phone; the address part is completed by the detector in 8b)
-- [ ] An email the user types is masked before it reaches the state, a checkpoint or history (`test_user_typed_email_not_persisted`; the persistence hook is asserted again in 14a)
-- [ ] Red-team cases: an obfuscated email (`name at domain dot com`), a phone number with separators, card-like digit groups
-- [ ] [std]
+- [x] `test_output_filter_redacts_email_phone_address` (the regex part: email and phone; the address part is completed by the detector in 8b)
+- [x] An email the user types is masked before it reaches the state, a checkpoint or history (`test_user_typed_email_not_persisted`; the persistence hook is asserted again in 14a)
+- [x] Red-team cases: an obfuscated email (`name at domain dot com`), a phone number with separators, card-like digit groups
+- [x] [std]
 **Effort**: M (1) · **Depends on**: 1 · **Risk**: medium. **Rollback:** fail closed. If the scrubber is red, the output and input guards refuse free text that contains digit runs or `@`, and the owner is told.
 
 ### Mon 2026-10-05: guards complete, `run_sql`, session

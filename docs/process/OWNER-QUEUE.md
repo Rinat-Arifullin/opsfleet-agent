@@ -13,6 +13,7 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 
 | Iteration | Commit | Second T1 review | What to look at |
 |---|---|---|---|
+| 8a | fdfbf3d | APPROVE WITH FIXES (0 blockers, 4 MAJOR); all 4 MAJOR and minors m1, m3–m6 fixed, 188 tests | `guards/pii_regex.py`: the Unicode fold (`_build_fold`), separator rules, and the over-masking trade-offs pinned by `*_by_design` tests (see D-16). Open: m7 (callers must catch scrubber exceptions and refuse) is tracked in 12/14a |
 
 ## Decisions needed from you
 
@@ -33,6 +34,7 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | D-13 | AC-08.2 and AC-10.7 say `[REDACTED]`; code uses the HLD §5.4 typed tokens (`<EMAIL>`...). Amend the ACs (the same issue as D-9) | code keeps the typed tokens | AC text |
 | D-14 | Street address for HLD layer 7 (the post-tool result scrubber, `architecture.md` around line 933), which can run without NER: add a simple address regex to 8a, or have layer 7 call the full detector (regex + NER, 8b)? | layer 7 will call the full 8b detector; no address regex in 8a | 8b, 13 |
 | D-15 | AC-08.2 also asks to mask "exact matches of PII values that were present in tool results"; the 8a reviewer found no iteration in `04-plan.md` that owns it | proposed: give it to 12 (output guard) with a named test; to be confirmed by you | 12 |
+| D-16 | 8a over-masking trade-offs, each pinned by a `*_by_design` test: a one-column list of 3-3-4 digits and `100 - 200 - 3000` become `<PHONE>`; "Cell phones 2023 2024" becomes "Cell phones <PHONE>"; any 3-2-4 group with spaces or dots ("100 20 2024") becomes `<ID>`; the optional `jane.doe at example.com` rule also masks `orders.status at thelook.com`. Keep them? | kept (safer to over-mask); the optional dotted "at" rule (`_EMAIL_AT_DOTTED`) can be removed cleanly if you prefer | nothing |
 
 ## Scope questions (🟡: add now / defer to README "future work" / skip)
 
@@ -47,7 +49,7 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | 2 | done | Spikes and CI (fb2b4f9). 21 sqlglot quirks documented; the scope rewrite works. Live model/embedding spike prepared as `tests/live/test_spike_models.py`, **not run** (yours, L0). |
 | 3 | done | T2 review APPROVE WITH FIXES; all 7 findings fixed (limiter timeout goes straight to fallback, deadline re-checked, `ForceAnswer(template_only=True)` when even force_answer is out of budget); 30 tests |
 | 4 | done | T2 review (secrets) REQUEST CHANGES; all 11 findings fixed (af864fa). Log redaction is installed via the log-record factory at startup in `cli.py`; pattern scrubs for API keys and bearer tokens; SQL literals in traces replaced by `?` (fails closed to a hash); trace and DB files are owner-only; secure-delete byte-residue test; 47 tests |
-| 8a | security fixes in progress | second T1 review: APPROVE WITH FIXES, 0 blockers, 4 MAJOR (international phones with long groups, an incomplete invisible-character fold, line breaks inside values, defanged `[.]`/`[@]` emails). All 4 plus the cheap minors are being fixed before commit. Open owner items are D-12..D-15 |
+| 8a | done, owner review pending | second T1 review: APPROVE WITH FIXES, 0 blockers, 4 MAJOR (international phones with long groups, an incomplete invisible-character fold, line breaks inside values, defanged `[.]`/`[@]` emails). All 4 plus minors m1, m3–m6 fixed (fdfbf3d, 188 tests). Owner items D-12..D-16 |
 | 5, 6 | in progress (T1 opus) | started in parallel; disjoint files |
 | 25 | done | 25a50f4. `render_trace` and `metrics_summary` are plain functions, wired into the command table in 19. Allowlisted fields only, printed text re-scrubbed. AC gaps: `user_id` and `finish_reason` are not in the tracer allowlist, the AC-16.2 "message exchange" is not shown (traces hold no message text, by design) and feedback counts wait for 32. Low risk, so no separate T2 review; the orchestrator checked it |
 | 16 | done | 8b90866. `--user` selects a profile from `config/profiles.yaml` (synthetic users `analyst_a`, `analyst_b`, `ceo_demo`; the brands are placeholders until the A-38 dry-run count). An unknown user fails before any network call. TR-18 writability checks are in `session.local_startup_check`. Data dir is `./data`, override `OPSFLEET_DATA_DIR`. The check against `products.brand` (AC-20.3) is a pure function, wired once the BQ client lands. A missing `--user` is still a plain argparse error; listing the valid ids is left to 19. Scope is a risk area, so please glance at `session.py` (no separate review run overnight) |
