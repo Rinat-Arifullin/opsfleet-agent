@@ -12,11 +12,16 @@ Pipeline (each step sees the output of the previous one)
    Result: **block** (``unexpected_action``).
    A draft longer than :data:`MAX_DRAFT_CHARS` is **blocked** (``output_too_long``).
 2. **Normalise.** HTML entities (``&#47;``, ``&lt;``) and Markdown backslash escapes
-   (``\\/``) are decoded, then NFKC, then invisible format characters (Unicode ``Cf``:
-   zero-width spaces, bidi controls) are removed; repeated until stable (at most
-   :data:`_MAX_DECODE_PASSES` passes), so ``h​ttp``, ``https:&#47;&#47;`` or full-width
-   dots cannot hide a URL or a phrase from the regexes below. The emitted text is the
-   decoded one.
+   (``\\/``) are decoded, terminal control is dropped (ESC/C1 sequences such as OSC 8
+   hyperlinks, OSC 52 clipboard writes and CSI, with their payload, then every C0/C1
+   control and DEL except newline and tab; ``control_stripped``), then NFKC, then
+   invisible format characters (Unicode ``Cf``: zero-width spaces, bidi controls) are
+   removed; repeated until stable, so ``h​ttp``, ``https:&#47;&#47;`` or full-width dots
+   cannot hide a URL or a phrase from the regexes below. A draft not stable after
+   :data:`_MAX_DECODE_PASSES` passes is **blocked** (``output_encoding``): the renderer
+   would decode the layer no check saw. The emitted text is the decoded one; at the end
+   any ``&`` opening a character reference and any ``\\`` before punctuation are escaped
+   again, so nothing can decode downstream.
 3. **Injection scan** (AC-10.5/10.6): "ignore previous instructions"-style text, requests
    for the user's credentials or personal data, system-prompt leakage (disclosure phrasing
    plus the caller's protected snippets, matched punctuation-insensitively and per
@@ -34,9 +39,9 @@ Pipeline (each step sees the output of the previous one)
 5. **PII before URLs** (re-review N2): exact values from this turn's tool results (and any
    ``known_pii_values``), emails with an IP domain, and the 8a regex scrubber run first,
    so ``name@www.example.org`` becomes ``<EMAIL>``, not ``name@<URL>``.
-6. **URLs**: any URL left (scheme URLs including ``hxxp``, ``http[:]//``, ``http:/host``
-   and a scheme split across a line break, protocol-relative ``//host``, ``///host`` and
-   ``\\\\host``, autolinks,
+6. **URLs**: any URL left (scheme URLs including ``hxxp``, ``http[:]//``, ``http:/host``,
+   ``http:host`` and a scheme split across a line break, protocol-relative ``//host``,
+   ``///host`` and ``\\\\host``, autolinks,
    ``mailto:``/``javascript:``/``data:`` URIs, ``www.``, IPv4 hosts, bare ``domain.tld``
    with ``[.]``/``(dot)`` obfuscation, and any ``label.tld`` followed by a path, port,
    query or fragment) becomes ``<URL>`` unless it is allowed. Host patterns are atomic and
@@ -113,6 +118,8 @@ OUTPUT_TOO_LONG: Final = "output_too_long"
 HTML_STRIPPED: Final = "html_stripped"
 UNEXPECTED_ACTION: Final = "unexpected_action"
 OUTPUT_INJECTION: Final = "output_injection"
+OUTPUT_ENCODING: Final = "output_encoding"  # still encoded after the decode cap (P1)
+CONTROL_STRIPPED: Final = "control_stripped"  # terminal control characters removed (T1)
 OUTPUT_GUARD_ERROR: Final = "output_guard_error"
 PII_REDACTED: Final = "pii_redacted"
 URL_STRIPPED: Final = "url_stripped"
@@ -263,6 +270,8 @@ _URL_PATTERNS: Final = (
     ),
     # "http:/host": browsers resolve one slash after a special scheme to a host (N1)
     re.compile(rf"\b(?:h[tx]{{2}}ps?|ftps?|wss?|file)(?::|\[:\])[/\\](?=\w){_URL_TAIL}", _I),
+    # "http:evil.bank" with no slash at all: browsers resolve it too (re-review L2)
+    re.compile(rf"\b(?:h[tx]{{2}}ps?|ftps?|wss?|file)(?::|\[:\])(?=\w){_URL_TAIL}", _I),
     # protocol-relative //host, ///host, \\host (review HIGH-2, N1)
     re.compile(rf"(?<![\w:/\\])[/\\]{{2,}}{_HOST}(?::\d{{1,5}})?{_URL_TAIL}", _I),
     re.compile(rf"\b(?:mailto|javascript|vbscript)\s{{0,3}}:{_URL_TAIL}", _I),
@@ -417,7 +426,10 @@ def _check(
         logger.warning("output guard: %s role=%s label=%s", UNEXPECTED_ACTION, role, label)
         return _block(*unexpected)
 
-    text = _normalise(draft)
+    text, stable, n_controls = _decode(draft)
+    if not stable:
+        logger.warning("output guard: %s passes=%d", OUTPUT_ENCODING, _MAX_DECODE_PASSES)
+        return _block(OutputEvent(OUTPUT_ENCODING, f"max_passes={_MAX_DECODE_PASSES}"))
     if len(text) > MAX_DRAFT_CHARS:  # NFKC can expand; the scrubbers must not truncate
         logger.warning("output guard: %s chars=%d", OUTPUT_TOO_LONG, len(text))
         return _block(OutputEvent(OUTPUT_TOO_LONG, f"max={MAX_DRAFT_CHARS}"))
@@ -427,6 +439,8 @@ def _check(
         return _block(*(OutputEvent(OUTPUT_INJECTION, kind) for kind in hits))
 
     events: list[OutputEvent] = []
+    if n_controls:
+        events.append(OutputEvent(CONTROL_STRIPPED, f"count={n_controls}"))
     text, n_images, n_tags, n_links = _strip_images_html_links(text, _url_allowed)
     if n_images:
         events.append(OutputEvent(IMAGE_STRIPPED, f"count={n_images}"))
@@ -469,6 +483,11 @@ def _check(
 
     if n_urls:
         events.append(OutputEvent(URL_STRIPPED, f"count={n_urls}"))
+    # Nothing the renderer could still decode survives (re-review P1, defence in depth).
+    text = _RENDER_DECODABLE.sub(lambda m: "&amp;" if m.group() == "&" else "\\\\", text)
+    if len(text) > MAX_DRAFT_CHARS:
+        logger.warning("output guard: %s chars=%d", OUTPUT_TOO_LONG, len(text))
+        return _block(OutputEvent(OUTPUT_TOO_LONG, f"max={MAX_DRAFT_CHARS}"))
     if events:
         logger.info("output guard redacted: %s", ",".join(sorted({e.code for e in events})))
     return OutputVerdict(allowed=True, text=text, events=tuple(events))
@@ -506,19 +525,45 @@ def _unexpected_actions(role: str, label: str, tool_calls: Sequence[str]) -> lis
 # --- step 2/3: normalise and scan --------------------------------------------------------
 
 
-def _normalise(text: str) -> str:
+# Terminal control (re-review T1): ESC/C1 string sequences (OSC 8 hyperlinks, OSC 52
+# clipboard writes, DCS/PM/APC/SOS) are dropped with their payload, CSI and other ESC
+# sequences with their parameters, then every remaining C0/C1 control and DEL except
+# "\n" and "\t". Each pattern is a single run of a negated class: linear.
+_TERMINAL_CONTROL: Final = re.compile(
+    r"(?:\x1b[\]PX^_]|[\x90\x98\x9d\x9e\x9f])[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)?"
+    r"|(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]?"
+    r"|\x1b[ -/]*[0-~]?"
+    r"|[\x00-\x08\x0b-\x1f\x7f-\x9f]"
+)
+# What a Markdown renderer would still decode after the fixpoint (re-review P1, defence in
+# depth): "&" opening a character reference and "\" before ASCII punctuation. A plain
+# "Outerwear & Coats" or "AT&T" is left alone.
+_RENDER_DECODABLE: Final = re.compile(r"&(?=#|[a-z][a-z0-9]{0,31};)|\\(?=[!-/:-@\[-`{-~])", _I)
+
+
+def _decode(text: str) -> tuple[str, bool, int]:
+    """Normalised text, whether decoding reached a fixpoint, controls removed (count)."""
     # HTML entities and Markdown backslash escapes are decoded (a renderer decodes them
     # too: "https:&#47;&#47;" and "\\/\\/" are links, re-review N1), then NFKC and the
     # scrubber's own fold (drops Cf, folds spaces, dashes and full-width forms, decodes
     # %40/%2e-style "@" and "."), so every step sees what the scrubber and the renderer
-    # see. Repeated until stable ("&amp;#47;"), at most a few linear passes.
-    for _ in range(_MAX_DECODE_PASSES):
+    # see. Repeated until stable ("&amp;#47;"): at most _MAX_DECODE_PASSES decoding passes
+    # plus one that must change nothing. A draft still encoded after that is refused by the
+    # caller (re-review P1): the renderer would decode the last layer the checks never saw.
+    n_controls = 0
+    for _ in range(_MAX_DECODE_PASSES + 1):
         decoded = _MD_ESCAPE.sub(r"\1", html.unescape(text))
+        decoded, n = _TERMINAL_CONTROL.subn("", decoded)  # "&#27;" decodes to ESC
+        n_controls += n
         decoded = pii_regex._normalise(unicodedata.normalize("NFKC", decoded))
         if decoded == text:
-            break
+            return text, True, n_controls
         text = decoded
-    return text
+    return text, False, n_controls
+
+
+def _normalise(text: str) -> str:
+    return _decode(text)[0]
 
 
 def _collapse(text: str) -> str:

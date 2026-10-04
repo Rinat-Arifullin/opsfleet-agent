@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sys
 from collections.abc import Sequence
 
@@ -26,6 +27,19 @@ from opsfleet_agent.session import (
 )
 
 log = logging.getLogger(__name__)
+
+# C0 (except tab and newline), DEL and C1 controls. ESC is in C0, so every ANSI/OSC
+# sequence loses its introducer and prints as inert text.
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def terminal_safe(text: str) -> str:
+    """Strip terminal control characters before anything reaches stdout.
+
+    Second layer behind the output guard: every agent answer (wired in 19) and every
+    echo goes through this, so no model or data text can drive the terminal.
+    """
+    return _CONTROL.sub("", text)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -74,5 +88,5 @@ def main(argv: Sequence[str] | None = None, *, lister: ModelLister | None = None
         if line.strip().lower() in ("exit", "quit"):
             break
         if line.strip():
-            print(line)
+            print(terminal_safe(line))
     return 0

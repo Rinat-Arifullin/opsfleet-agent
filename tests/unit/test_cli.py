@@ -118,3 +118,16 @@ def test_cli_installs_detector_with_profile_brands(monkeypatch):
     detector = pii.default_detector()
     brands = {b for p in cli.load_profiles().values() for b in p.brands}
     assert brands and all(detector.allowlist.covers(b, 0, len(b)) for b in brands)
+
+
+def test_terminal_safe_strips_control_sequences() -> None:
+    from opsfleet_agent.cli import terminal_safe
+
+    hostile = (
+        "\x1b]8;;https://evil.example\x1b\\click\x1b]8;;\x1b\\"
+        "\x1b]52;c;ZXZpbA==\x07\x1b[2J\x9b31m42\x08\x0812\r"
+    )
+    out = terminal_safe(hostile)
+    assert not any(ord(c) < 0x20 and c not in "\n\t" for c in out)
+    assert not any(0x7F <= ord(c) <= 0x9F for c in out)
+    assert terminal_safe("a\tb\nc — ü") == "a\tb\nc — ü"
