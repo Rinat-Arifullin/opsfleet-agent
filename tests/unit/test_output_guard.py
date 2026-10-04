@@ -413,8 +413,8 @@ def test_output_guard_passes_normal_answers_unchanged(detector, draft) -> None:
         '[x]: https://evil.example/a "title"',
         "Go https:/\n/evil.example/c?d=1 now",  # scheme split over a line break
         "https: //evil.example/c",
-        "Data at evil [.] com/x",
-        "Data at evil [dot] com/x",
+        "Data on evil [.] com/x",
+        "Data on evil [dot] com/x",
         "run javascript :alert(1)",
         "inline data: text/html,<b>x</b>",
     ],
@@ -574,6 +574,18 @@ class _Passthrough:
         "visit " * 16_000 + "evil.example/x",
         "x." * 49_000 + "com/",
         "//a." * 24_000,
+        # Re-review N3: obfuscated dots used to backtrack for minutes ("a[.]" * 25k = 221 s).
+        "a[.]" * 25_000,
+        "a(.)" * 25_000,
+        "a{.}" * 25_000,
+        "a [dot] " * 12_500,
+        "a[ . ]" * 16_666,
+        "a(dot)" * 16_666,
+        "<!--" * 25_000,
+        "///a.bank" * 11_111,
+        "&#47;" * 20_000,
+        "\\/" * 33_333,
+        "](" * 50_000,
     ],
     ids=lambda d: repr(d[:12]),
 )
@@ -584,3 +596,147 @@ def test_output_guard_is_fast_on_adversarial_drafts(draft) -> None:
     v = guard(draft, _Passthrough())
     assert time.perf_counter() - t0 < 5.0  # generous; regressions were tens of seconds
     assert isinstance(v, OutputVerdict)
+
+
+# --- Re-review N1: markdown link evasions (decoding, odd schemes, neutralised syntax) -------
+
+_N1_LINKS = [
+    "[see [1]](///evil.example/c?d=4512)",  # nested brackets
+    "[see](///evil.example/c?d=4512 'src')",  # title in single quotes
+    "[see](///evil.example/c?d=4512 (src))",  # title in parens
+    "[see](///evil.bank/c(1))",  # balanced parens in the target
+    "[se\ne](///evil.example/c?d=4512)",  # line break inside the label
+    "[see](\n///evil.example/c?d=4512)",  # line break before the target
+    "[see [1]](\\/\\/evil.example/c?d=4512)",  # backslash-escaped slashes
+    "[see [1]](https:\\/\\/evil.bank/c?d=4512)",
+    "[see [1]](http:/evil.example/c?d=4512)",  # single slash
+    "[see [1]](http:/evil.bank)",
+    "[see [1]](https:&#47;&#47;evil.bank&#47;c?d=4512)",  # decimal entities
+    "[see [1]](&#47;&#47;evil.example/c?d=4512)",
+    "[see [1]](&#x2F;&#x2F;evil.example/c?d=4512)",  # hex entities
+    "[see [1]](https&#58;//evil.example/c?d=4512)",  # entity colon
+    "[see [1]](<//evil.example/c?d=4512>)",  # angle-bracket target
+    "See [x][r]\n\n> [r]: ///evil.example/c?d=4512",  # definition in a blockquote
+    "See [x][r]\n\n- [r]: http:/evil.example/c?d=4512",  # definition in a list item
+    "See [x][r]\n\n   [r]: https://evil.example/c?d=4512",  # indented definition
+    "See [x][r]\n\n[r]:\n  https://evil.example/c?d=4512",  # target on the next line
+    "See [x][r]\n\n[r]:\n  ///evil.example/c?d=4512",
+    "See [x][r]\n\n[r\nq]: ///evil.example/c",
+    "![a [b] c](///evil.example/p.png)",
+    "&#33;[a](///evil.example/p.png)",
+    '<a title="' + "A" * 2100 + '" href=//evil.example>x</a>',
+    "&lt;img src=///evil.example/p&gt;",
+    "&lt;a href=https://evil.example/c&gt;x&lt;/a&gt;",
+    "<!-- [x](https://evil.example/c) -->",
+    "<HtTpS://evil.example>",
+    "<//evil.example>",
+]
+
+
+@pytest.mark.parametrize("draft", _N1_LINKS, ids=lambda d: repr(d[:40]))
+def test_output_guard_neutralises_markdown_link_evasions(detector, draft) -> None:
+    v = guard(draft, detector)
+    assert v.allowed, v.events
+    assert "evil" not in v.text
+    assert "](" not in v.text and "]:" not in v.text
+    assert {output.URL_STRIPPED, output.IMAGE_STRIPPED, output.HTML_STRIPPED} & v.codes()
+
+
+@pytest.mark.parametrize(
+    "draft",
+    [
+        "Please visit http:/evil.example/x now",
+        "Log in at ///evil.example",
+        "Please visit https:&#47;&#47;evil.example/x now",
+    ],
+)
+def test_output_guard_blocks_call_to_action_after_decoding(detector, draft) -> None:
+    assert_refused(guard(draft, detector), output.OUTPUT_INJECTION, draft)
+
+
+def _md_links(text: str) -> list[str]:
+    from markdown_it import MarkdownIt
+
+    found = []
+    stack = list(MarkdownIt("commonmark").parse(text))
+    while stack:  # bounded: the token tree is finite and every node is popped once
+        tok = stack.pop()
+        if tok.type in ("link_open", "image"):
+            found.append(tok.type)
+        if tok.type in ("html_inline", "html_block") and (
+            "href" in tok.content.lower() or "src" in tok.content.lower()
+        ):
+            found.append(tok.type)
+        stack.extend(tok.children or ())
+    return found
+
+
+@pytest.mark.parametrize("draft", _N1_LINKS, ids=lambda d: repr(d[:40]))
+def test_output_guard_output_has_no_markdown_links(detector, draft) -> None:
+    # Property-style check with a real CommonMark parser: whatever the evasion, the emitted
+    # text must not render as a link, an image or raw HTML carrying href/src.
+    pytest.importorskip("markdown_it")
+    assert _md_links(guard(draft, detector).text) == []
+
+
+# --- Re-review N2: emails and exact values are masked before the URL strip ----------------
+
+
+@pytest.mark.parametrize(
+    "email",
+    [
+        "quillon.vasterby@www.example.org",
+        "qv@www.example.org",
+        "quillon_vasterby@www.example.com",
+        "quillon.vasterby.info@example.org",
+        "qv@10.20.30.40",
+        "qv@[10.20.30.40]",
+        "qv.7741@203.0.113.9",
+    ],
+)
+def test_output_guard_masks_emails_whose_domain_looks_like_a_url(detector, email) -> None:
+    v = guard(f"Top customer contact: {email} (7 orders).", detector)
+    assert v.allowed
+    assert v.text == "Top customer contact: <EMAIL> (7 orders)."
+    assert "quillon" not in v.text and "qv" not in v.text and URL_TOKEN not in v.text
+
+
+def test_output_guard_masks_tool_result_values_before_url_strip(detector) -> None:
+    rows = "customer,contact\nZorbina,quillon.vasterby@www.example.org\n"
+    draft = "Reach them at quillon.vasterby@www.example.org for details."
+    v = guard(draft, detector, tool_calls=["run_sql"], tool_results=[rows])
+    assert v.allowed
+    assert v.text == "Reach them at <EMAIL> for details."
+    assert output.OutputEvent(output.PII_REDACTED, "source=tool_result types=EMAIL") in v.events
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://ok.example/a",
+        "http:/ok.example/a",
+        "https:\\\\ok.example\\a",
+        "///ok.example/a",
+        "\\\\ok.example",
+        "http[:]//ok.example:8080/a",
+    ],
+)
+def test_output_guard_host_parsing_handles_slash_variants(url) -> None:
+    assert output._host(url) == "ok.example"
+
+
+def test_output_guard_blocks_draft_that_grows_past_the_cap(detector) -> None:
+    # Neutralising "](" adds a space; the scrubbers must never truncate silently.
+    draft = "[a](" * (output.MAX_DRAFT_CHARS // 4)
+    assert_refused(guard(draft, _Passthrough()), output.OUTPUT_TOO_LONG)
+
+
+def test_output_guard_masks_ip_email_at_sentence_end(detector) -> None:
+    v = guard("The top buyer is qv.7741@203.0.113.9.", detector)
+    assert v.text == "The top buyer is <EMAIL>."
+
+
+def test_output_guard_reports_pre_url_pii_masks(detector) -> None:
+    v = guard("Buyer qv@203.0.113.9 or qv@www.example.org.", _Passthrough())
+    assert v.text == "Buyer <EMAIL> or <EMAIL>."
+    assert output.OutputEvent(output.PII_REDACTED, "source=detector types=EMAIL") in v.events

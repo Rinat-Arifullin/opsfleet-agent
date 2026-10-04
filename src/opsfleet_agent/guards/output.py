@@ -11,9 +11,12 @@ Pipeline (each step sees the output of the previous one)
    tools of the roles on that route. Unknown role, label or tool fails closed.
    Result: **block** (``unexpected_action``).
    A draft longer than :data:`MAX_DRAFT_CHARS` is **blocked** (``output_too_long``).
-2. **Normalise.** NFKC, then invisible format characters (Unicode ``Cf``: zero-width
-   spaces, bidi controls) are removed, so ``h​ttp`` or full-width dots cannot hide a
-   URL or a phrase from the regexes below.
+2. **Normalise.** HTML entities (``&#47;``, ``&lt;``) and Markdown backslash escapes
+   (``\\/``) are decoded, then NFKC, then invisible format characters (Unicode ``Cf``:
+   zero-width spaces, bidi controls) are removed; repeated until stable (at most
+   :data:`_MAX_DECODE_PASSES` passes), so ``h​ttp``, ``https:&#47;&#47;`` or full-width
+   dots cannot hide a URL or a phrase from the regexes below. The emitted text is the
+   decoded one.
 3. **Injection scan** (AC-10.5/10.6): "ignore previous instructions"-style text, requests
    for the user's credentials or personal data, system-prompt leakage (disclosure phrasing
    plus the caller's protected snippets, matched punctuation-insensitively and per
@@ -23,19 +26,26 @@ Pipeline (each step sees the output of the previous one)
 4. **Images, links and HTML** (layer 8): Markdown images (inline, reference and shortcut)
    and ``<img>`` tags become ``<IMAGE>``. Markdown links keep their label, and the target
    is dropped unless it is allowed; reference definitions with a disallowed target are
-   removed. Every other HTML tag is removed (``html_stripped``), whatever the renderer
-   does with HTML. Result: **redact** (``image_stripped``, ``url_stripped``).
-5. **URLs**: any URL left (scheme URLs including ``hxxp``, ``http[:]//`` and a scheme split
-   across a line break, protocol-relative ``//host``, autolinks,
+   removed. Every other HTML tag (and comment marker) is removed (``html_stripped``),
+   whatever the renderer does with HTML. Finally every remaining ``](`` and ``]:`` is
+   neutralised with a space, so no Markdown link or reference definition the regexes
+   missed (nested brackets, titles, a definition in a quote or list) can still render.
+   Result: **redact** (``image_stripped``, ``url_stripped``).
+5. **PII before URLs** (re-review N2): exact values from this turn's tool results (and any
+   ``known_pii_values``), emails with an IP domain, and the 8a regex scrubber run first,
+   so ``name@www.example.org`` becomes ``<EMAIL>``, not ``name@<URL>``.
+6. **URLs**: any URL left (scheme URLs including ``hxxp``, ``http[:]//``, ``http:/host``
+   and a scheme split across a line break, protocol-relative ``//host``, ``///host`` and
+   ``\\\\host``, autolinks,
    ``mailto:``/``javascript:``/``data:`` URIs, ``www.``, IPv4 hosts, bare ``domain.tld``
    with ``[.]``/``(dot)`` obfuscation, and any ``label.tld`` followed by a path, port,
-   query or fragment) becomes ``<URL>`` unless it is allowed. URLs go before PII so the NER
-   never sees them. Result: **redact** (``url_stripped``).
-6. **PII** (layer 8, AC-08.2): exact values found by the detector in this turn's tool
-   results (and any ``known_pii_values``) are masked first with typed tokens (D-9/D-13),
-   so a value the detector would miss in the answer's context is still caught. Then
-   :func:`opsfleet_agent.guards.pii.scrub_output` runs (8a regex scrubber, then 8b typed
-   detector). Result: **redact** (``pii_redacted``).
+   query or fragment) becomes ``<URL>`` unless it is allowed. Host patterns are atomic and
+   capped at :data:`_MAX_LABELS` labels, so obfuscated-dot runs stay linear (N3). URLs go
+   before the NER so it never sees them (review L4). Result: **redact** (``url_stripped``).
+7. **PII detector** (layer 8, AC-08.2): the exact-value masks of step 5 use typed tokens
+   (D-9/D-13), so a value the detector would miss in the answer's context is still caught.
+   Then :func:`opsfleet_agent.guards.pii.scrub_output` runs (8a regex scrubber again, then
+   8b typed detector). Result: **redact** (``pii_redacted``).
 
 Block vs. redact (owner decision pending)
 -----------------------------------------
@@ -68,6 +78,7 @@ graph node, audit record and alert wiring land in iteration 14a.
 
 from __future__ import annotations
 
+import html
 import logging
 import re
 import unicodedata
@@ -237,21 +248,30 @@ _TLDS = (
 # query or fragment follows (review M1); "zip", "mov" and "sh" are only caught this way.
 _LABEL = r"[^\W_](?:[\w\-]{0,62}[^\W_])?"
 _ANY_TLD = r"(?:[^\W\d_]{2,24}|xn--[\w\-]{1,59})"
-_HOST = rf"(?:{_LABEL}{_DOT})+{_ANY_TLD}"
+# Label repetition is capped and atomic: "a[.]a[.]..." no longer backtracks across the
+# whole run from every start position (review N3, quadratic before).
+_MAX_LABELS = 10
+_HOST = rf"(?>{_LABEL}{_DOT}){{1,{_MAX_LABELS}}}{_ANY_TLD}"
 _URL_TAIL = r"[^\s<>\"'`]*"
 _URL_PATTERNS: Final = (
     # autolink <scheme:...> / <www...> (whole, brackets included)
     re.compile(rf"<(?:[a-z][a-z0-9+.\-]{{1,15}}:|www{_DOT})[^\s<>]*>", _I),
-    # scheme://..., including hxxp://, http[:]// and a scheme split across a line break
-    re.compile(rf"\b[a-z][a-z0-9+.\-]{{1,15}}(?::|\[:\])\s{{0,3}}/\s{{0,3}}/{_URL_TAIL}", _I),
-    # protocol-relative //host (review HIGH-2)
-    re.compile(rf"(?<![\w:/\\])//{_HOST}(?::\d{{1,5}})?{_URL_TAIL}", _I),
+    # scheme://..., including hxxp://, http[:]//, a scheme split across a line break and
+    # backslashes (browsers read "\" as "/" in http URLs)
+    re.compile(
+        rf"\b[a-z][a-z0-9+.\-]{{1,15}}(?::|\[:\])\s{{0,3}}[/\\]\s{{0,3}}[/\\]{_URL_TAIL}", _I
+    ),
+    # "http:/host": browsers resolve one slash after a special scheme to a host (N1)
+    re.compile(rf"\b(?:h[tx]{{2}}ps?|ftps?|wss?|file)(?::|\[:\])[/\\](?=\w){_URL_TAIL}", _I),
+    # protocol-relative //host, ///host, \\host (review HIGH-2, N1)
+    re.compile(rf"(?<![\w:/\\])[/\\]{{2,}}{_HOST}(?::\d{{1,5}})?{_URL_TAIL}", _I),
     re.compile(rf"\b(?:mailto|javascript|vbscript)\s{{0,3}}:{_URL_TAIL}", _I),
     re.compile(rf"\bdata\s{{0,3}}:\s{{0,3}}[a-z]+/{_URL_TAIL}", _I),
     re.compile(rf"\bwww{_DOT}{_URL_TAIL}", _I),
     re.compile(r"(?<![\w.])\d{1,3}(?:\.\d{1,3}){3}(?![\w.])(?::\d{1,5})?(?:/[^\s<>\"'`]*)?"),
     re.compile(
-        rf"(?<![@\w.\-/])(?:[a-z0-9](?:[a-z0-9\-]{{0,62}}[a-z0-9])?{_DOT})+(?:{_TLDS})\b"
+        rf"(?<![@\w.\-/])(?>[a-z0-9](?:[a-z0-9\-]{{0,62}}[a-z0-9])?{_DOT}){{1,{_MAX_LABELS}}}"
+        rf"(?:{_TLDS})\b"
         rf"(?::\d{{1,5}})?(?:/{_URL_TAIL})?",
         _I,
     ),
@@ -269,12 +289,28 @@ _MD_IMAGES: Final = (
     re.compile(r"!\[[^\]\n]{0,500}\]\([^)\n]{0,2000}\)"),  # ![alt](url)
     re.compile(r"!\[[^\]\n]{0,500}\]\[[^\]\n]{0,200}\]"),  # ![alt][ref]
     re.compile(r"!\[[^\]\n]{0,500}\]"),  # ![ref] shortcut
-    re.compile(r"<img\b[^>]{0,2000}>", _I),
+    re.compile(r"<img\b[^<>]*>", _I),
 )
 # HTML tags other than <img> (already an image) and autolinks (<scheme:...>, <www....>):
-# a tag name followed by whitespace, "/" or ">" (review HIGH-2, OD-8). Comments too.
+# a tag name followed by whitespace, "/" or ">" (review HIGH-2, OD-8). No length cap on the
+# attributes (a long title must not hide an href, re-review N1); "[^<>]*" stops at the next
+# "<", so the scan stays linear. Comment, CDATA and declaration markers are removed on
+# their own: an unclosed "<!--" would otherwise hide the rest of the answer, and matching
+# open to close is quadratic on "<!--" runs.
 _HTML_TAG: Final = re.compile(
-    r"<!--.{0,5000}?-->|</?[a-z][a-z0-9\-]{0,30}(?=[\s/>])[^<>]{0,2000}>", _I | re.S
+    r"<!--|--!?>|<!\[CDATA\[|\]\]>|<[!?][^<>]*>|</?[a-z][a-z0-9\-]{0,30}(?=[\s/>])[^<>]*>", _I
+)
+# Whatever link syntax survives the two patterns below (nested brackets, titles,
+# balanced parens, a definition in a quote or list, a target on the next line) is
+# neutralised structurally: CommonMark needs "](" for an inline link and "]:" for a
+# definition, with nothing in between (re-review N1).
+_MD_LINK_OPENER: Final = re.compile(r"\](?=[(:])")
+# Backslash escapes CommonMark honours (any ASCII punctuation).
+_MD_ESCAPE: Final = re.compile(r"\\([!-/:-@\[-`{-~])")
+_MAX_DECODE_PASSES: Final = 4
+# "local@1.2.3.4": the regex scrubber needs a letter TLD, so an IP-host email is masked here.
+_EMAIL_IP: Final = re.compile(
+    r"(?<![\w.+%-])[\w.+%-]{1,64}@\[?\d{1,3}(?:\.\d{1,3}){3}\]?(?!\w|\.\d)"
 )
 # CommonMark reference definition: [label]: target
 _MD_REF_DEF: Final = re.compile(
@@ -382,6 +418,9 @@ def _check(
         return _block(*unexpected)
 
     text = _normalise(draft)
+    if len(text) > MAX_DRAFT_CHARS:  # NFKC can expand; the scrubbers must not truncate
+        logger.warning("output guard: %s chars=%d", OUTPUT_TOO_LONG, len(text))
+        return _block(OutputEvent(OUTPUT_TOO_LONG, f"max={MAX_DRAFT_CHARS}"))
     hits = _injection_hits(text, _snippets(protected_snippets))
     if hits:
         logger.warning("output guard: %s kinds=%s", OUTPUT_INJECTION, ",".join(hits))
@@ -394,10 +433,9 @@ def _check(
     if n_tags:
         events.append(OutputEvent(HTML_STRIPPED, f"count={n_tags}"))
 
-    # URLs go before PII so the NER never sees (and splits) a URL (review L4).
-    text, n_urls = _strip_urls(text, _url_allowed)
-    n_urls += n_links
-
+    # Exact values and the regex scrubber run before the URL strip, so the host of an
+    # e-mail is not taken for a URL and its local part left behind (re-review N2). The NER
+    # runs after it, so it never sees (and splits) a URL (review L4).
     detector = detector or pii.default_detector()
     values = _tool_result_pii(results, detector)
     for value, kind in known_pii_values.items():
@@ -405,9 +443,26 @@ def _check(
             raise ValueError("unknown PII type in known_pii_values")
         values.setdefault(_value_key(_require_str(value, "known_pii_values")), kind)
     text, exact_types = _mask_exact(text, values)
+    text, n_ip_emails = _EMAIL_IP.subn(pii.TOKENS[pii.EMAIL], text)
+    if len(text) > MAX_DRAFT_CHARS:  # neutralising "](" adds a space; never truncate
+        logger.warning("output guard: %s chars=%d", OUTPUT_TOO_LONG, len(text))
+        return _block(OutputEvent(OUTPUT_TOO_LONG, f"max={MAX_DRAFT_CHARS}"))
+    scrubbed = pii_regex.scrub(text)
+    text = scrubbed.text
+    # 8a hits found here are reported with the detector's (scrub_output = 8a + 8b).
+    regex_types = {k for k, n in scrubbed.findings.items() if n and k in pii.ENTITY_TYPES}
+    if n_ip_emails:
+        regex_types.add(pii.EMAIL)
+
+    text, n_urls = _strip_urls(text, _url_allowed)
+    n_urls += n_links
+    if len(text) > MAX_DRAFT_CHARS:  # pragma: no cover - tokens are not longer than URLs
+        raise ValueError("draft would be truncated by the scrubber")
+
     masked = pii.scrub_output(text, detector)
     text = masked.text
-    for source, types in (("tool_result", exact_types), ("detector", masked.types())):
+    detector_types = set(masked.types()) | regex_types
+    for source, types in (("tool_result", exact_types), ("detector", detector_types)):
         if types:
             detail = f"source={source} types={','.join(sorted(types))}"
             events.append(OutputEvent(PII_REDACTED, detail))
@@ -452,9 +507,18 @@ def _unexpected_actions(role: str, label: str, tool_calls: Sequence[str]) -> lis
 
 
 def _normalise(text: str) -> str:
-    # NFKC, then the scrubber's own fold (drops Cf, folds spaces, dashes and full-width
-    # forms, decodes %40/%2e-style "@" and "."), so every step sees what the scrubber sees.
-    return pii_regex._normalise(unicodedata.normalize("NFKC", text))
+    # HTML entities and Markdown backslash escapes are decoded (a renderer decodes them
+    # too: "https:&#47;&#47;" and "\\/\\/" are links, re-review N1), then NFKC and the
+    # scrubber's own fold (drops Cf, folds spaces, dashes and full-width forms, decodes
+    # %40/%2e-style "@" and "."), so every step sees what the scrubber and the renderer
+    # see. Repeated until stable ("&amp;#47;"), at most a few linear passes.
+    for _ in range(_MAX_DECODE_PASSES):
+        decoded = _MD_ESCAPE.sub(r"\1", html.unescape(text))
+        decoded = pii_regex._normalise(unicodedata.normalize("NFKC", decoded))
+        if decoded == text:
+            break
+        text = decoded
+    return text
 
 
 def _collapse(text: str) -> str:
@@ -535,8 +599,9 @@ def _url_key(url: str) -> str:
 
 
 def _host(url: str) -> str:
-    rest = re.sub(r"^[a-z][a-z0-9+.\-]*(?::|\[:\])\s*/\s*/", "", _url_key(url), flags=_I)
-    return re.split(r"[/:?#\s]", rest.lstrip("/"), maxsplit=1)[0]
+    # Scheme with one or two slashes or backslashes ("http:/h", "http:\\h"), then "//h".
+    rest = re.sub(r"^[a-z][a-z0-9+.\-]*(?::|\[:\])\s*[/\\]", "", _url_key(url), flags=_I)
+    return re.split(r"[/\\:?#\s]", rest.lstrip("/\\ "), maxsplit=1)[0]
 
 
 def _url_allowed(url: str) -> bool:
@@ -584,7 +649,8 @@ def _strip_images_html_links(
 
     text = _MD_REF_DEF.sub(ref_def, text)
     text = _MD_LINK.sub(link, text)
-    return text, n_images, n_tags, n_links
+    text, n = _MD_LINK_OPENER.subn("] ", text)  # fail closed: no link syntax survives
+    return text, n_images, n_tags, n_links + n
 
 
 def _strip_urls(text: str, is_allowed: Callable[[str], bool]) -> tuple[str, int]:
