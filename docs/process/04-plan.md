@@ -310,16 +310,16 @@ The calibration gate (30) reaches the critical path only through the owner's lab
 - `tests/unit/test_scope_rewrite.py`
 - `tests/unit/test_scope_redteam.py`
 **Done criteria**:
-- [ ] Named tests: `test_scope_filter_cannot_be_bypassed`, `test_nested_cte_scope_resolution`, `test_rewrite_invariant_fail_closed`, `test_all_scope_counts_non_buyers`
-- [ ] An empty brand list fails closed: no query runs (parametrized in `test_rewrite_invariant_fail_closed`)
-- [ ] Red-team cases:
+- [x] Named tests: `test_scope_filter_cannot_be_bypassed`, `test_nested_cte_scope_resolution`, `test_rewrite_invariant_fail_closed`, `test_all_scope_counts_non_buyers`
+- [x] An empty brand list fails closed: no query runs (parametrized in `test_rewrite_invariant_fail_closed`)
+- [x] Red-team cases:
   - other-brand requests;
   - a brand named in a `UNION`;
   - a subquery on a raw table;
   - comment-injected table names;
   - a table behind an alias;
   - a user CTE named like a scoped CTE.
-- [ ] [std]
+- [x] [std]
 **Effort**: XL (3) · **Depends on**: 6 · **Risk**: high. **Rollback (M-4):** ADR-008 has no fallback form. If the invariant cannot be proven, `run_sql` stays unwired, and the owner is told (🔴). A partial rewrite is never shipped.
 
 ## Iteration 8b: Typed-PII detector and brand allowlist 🔴 `[PARALLEL OK with 7]`
