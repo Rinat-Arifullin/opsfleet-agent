@@ -398,9 +398,9 @@ The calibration gate (30) reaches the critical path only through the owner's lab
 - `prompts/router.md`
 - `tests/unit/test_input_guard_router.py`
 **Done criteria**:
-- [ ] Named tests: `test_light_path_no_sql_no_embedding`, `test_light_path_runs_guards`, `test_router_sees_user_messages_only`
-- [ ] Off-topic, prompt-exfiltration and non-English rephrase inputs are refused by code with a fixed message (offline fakes; live cases in 28a)
-- [ ] [std]
+- [x] Named tests: `test_light_path_no_sql_no_embedding`, `test_light_path_runs_guards`, `test_router_sees_user_messages_only`
+- [x] Off-topic, prompt-exfiltration and non-English rephrase inputs are refused by code with a fixed message (offline fakes; live cases in 28a)
+- [x] [std]
 **Effort**: M+ (1.5) · **Depends on**: 3, 8b, 12 · **Risk**: high. **Rollback:** if a case is red, the input is refused, and the owner is told.
 
 ## Iteration 13: `run_sql` and read tools 🔴
