@@ -197,9 +197,20 @@ def test_policy_rejects_id_literal_with_qi(sql: str) -> None:
         ("SELECT ANY_VALUE(state) AS s FROM users", "qi_position"),
         ("SELECT COUNT(IF(age > 90, 1, NULL)) AS n FROM users", "qi_position"),
         ("SELECT SUM(CASE WHEN gender = 'F' THEN 1 ELSE 0 END) AS n FROM users", "qi_position"),
-        ("SELECT state, COUNT(*) OVER (PARTITION BY state) AS n FROM users GROUP BY state",
-         "qi_position"),
+        (
+            "SELECT state, COUNT(*) OVER (PARTITION BY state) AS n FROM users GROUP BY state",
+            "qi_position",
+        ),
         ("SELECT COUNTIF(id = 5) AS n FROM users", "qi_position"),
+        # review B1: a QI expression inside any counting aggregate counts a hidden cell
+        (
+            "SELECT traffic_source, COUNTIF(state = 'Texas') AS tx FROM users GROUP BY 1",
+            "qi_position",
+        ),
+        ("SELECT country, COUNT(state = 'CC' OR NULL) AS m FROM users GROUP BY 1", "qi_position"),
+        ("SELECT COUNT(DISTINCT age = 32 OR NULL) AS m FROM users", "qi_position"),
+        ("SELECT COUNT(NULLIF(state, 'CC')) AS m FROM users", "qi_position"),
+        ("SELECT COUNT(city) AS m FROM users", "qi_position"),
     ],
 )
 def test_policy_denies_scalar_functions_on_qi(sql: str, code: str) -> None:
@@ -215,8 +226,10 @@ def test_policy_denies_scalar_functions_on_qi(sql: str, code: str) -> None:
         ("SELECT table_name FROM thelook_ecommerce.INFORMATION_SCHEMA.TABLES", SNA),
         ("SELECT table_name FROM `region-us`.INFORMATION_SCHEMA.TABLES", "source_not_allowed"),
         ("SELECT x FROM EXTERNAL_QUERY('c', 'SELECT 1')", "source_not_allowed"),
-        ("SELECT brand FROM products FOR SYSTEM_TIME AS OF CURRENT_TIMESTAMP()",
-         "source_not_allowed"),
+        (
+            "SELECT brand FROM products FOR SYSTEM_TIME AS OF CURRENT_TIMESTAMP()",
+            "source_not_allowed",
+        ),
         ("SELECT brand FROM products TABLESAMPLE SYSTEM (10 PERCENT)", "source_not_allowed"),
         ("SELECT x FROM UNNEST([1, 2]) AS x", "source_not_allowed"),
         ("SELECT @@project_id AS p", "source_not_allowed"),
@@ -292,7 +305,14 @@ def test_reason_never_contains_sql(sql: str) -> None:
     assert not decision.allowed
     text = f"{decision.reason_code} {decision.hint} {decision.error_code} {decision.rule}"
     for fragment in (
-        "secret", "zz_", "987654321", "example.invalid", "xyz", "email", "brand", sql,
+        "secret",
+        "zz_",
+        "987654321",
+        "example.invalid",
+        "xyz",
+        "email",
+        "brand",
+        sql,
     ):
         assert fragment.lower() not in text.lower()
     assert decision.reason_code.value in {r.value for r in Rule}
@@ -331,8 +351,8 @@ def test_every_rule_has_a_static_hint() -> None:
         "SELECT u.country, u.gender, COUNT(DISTINCT o.order_id) AS orders "
         "FROM orders o JOIN users u ON u.id = o.user_id WHERE u.age BETWEEN 18 AND 30 "
         "GROUP BY u.country, u.gender HAVING COUNT(*) > 50",
-        # COUNTIF over a QI condition is a count
-        "SELECT traffic_source, COUNTIF(state = 'Texas') AS tx FROM users GROUP BY 1",
+        # a QI counted as a bare distinct column
+        "SELECT traffic_source, COUNT(DISTINCT state) AS states FROM users GROUP BY 1",
         # union of aggregates
         "SELECT 'orders' AS k, COUNT(*) AS n FROM orders UNION ALL "
         "SELECT 'items' AS k, COUNT(*) AS n FROM order_items",
@@ -349,11 +369,8 @@ def test_allowed_positive_controls(sql: str) -> None:
 # ------------------------------------------------------------------ second T1 review
 
 
-@pytest.mark.xfail(strict=True, reason="created_at QI rule lands in iteration 9")
 def test_raw_created_at_grouped_on_users_denied() -> None:
-    assert not check_sql(
-        "SELECT created_at, COUNT(*) AS n FROM users GROUP BY created_at"
-    ).allowed
+    assert not check_sql("SELECT created_at, COUNT(*) AS n FROM users GROUP BY created_at").allowed
 
 
 @pytest.mark.parametrize(

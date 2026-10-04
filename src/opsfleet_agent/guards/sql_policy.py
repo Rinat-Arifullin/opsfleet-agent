@@ -80,9 +80,14 @@ Checks, in order (the first failing check decides the reason code):
       every id of a group in one cell, QI or not); ``CAST``/``SAFE_CAST`` over a QI;
       ``REGEXP_*`` or ``PARSE_*`` over a QI; a string function that combines a QI with
       a literal outside a ``GROUP BY`` key.
-    * ``qi_position``: a QI inside any aggregate other than ``COUNT``/``COUNTIF``, inside
+    * ``qi_position``: a QI inside any aggregate other than ``COUNT``, inside
       ``IF``/``CASE`` within any aggregate, or anywhere in a window function; and a
-      conditional inside an aggregate that compares an id key with a literal.
+      conditional inside an aggregate that compares an id key with a literal. Inside
+      ``COUNT`` a QI is allowed only as ``COUNT(DISTINCT <column>)`` where the column is
+      a bare pass-through of a QI column (iteration 9, review B1): any QI expression
+      (comparison, ``OR NULL``, ``LIKE``, ``IN``, ``NULLIF``, ``COALESCE``,
+      ``SAFE_DIVIDE``, ``GREATEST``, arithmetic, a CTE column computed from a QI...) or a
+      QI in ``COUNTIF`` counts an arbitrary sub-population the threshold does not see.
     * ``small_cell_unplaceable``: an id key (``users.id``, any ``user_id``, any
       ``order_id``, ``order_items.id``, ``inventory_item_id``) compared with a literal in
       a statement that references any QI.
@@ -91,6 +96,12 @@ Checks, in order (the first failing check decides the reason code):
       or an output column still carries an id (``MIN(id)``, ``ANY_VALUE(user_id)``...),
       and the statement references a QI anywhere; also a scalar or ``IN`` subquery that
       returns a QI at row grain.
+    * ``qi_position`` (iteration 9, D-29): ``users.created_at`` (a signup timestamp,
+      near-unique) is only allowed inside ``DATE_TRUNC``/``TIMESTAMP_TRUNC``/
+      ``DATETIME_TRUNC`` to MONTH, QUARTER or YEAR (optionally over ``DATE(...)``), or in
+      a ``WHERE`` filter. Raw use anywhere else, ``EXTRACT``, WEEK/DAY/ISOYEAR
+      truncation, or a CTE that passes it through untruncated is rejected (fail closed).
+      This check runs last, so it never changes an earlier reason code.
 
     The HAVING injection, the population check and the rest of the small-cell rule run in
     iteration 9 on the rewritten AST (§5.3 step 9).
@@ -207,6 +218,13 @@ _ID_KEYS: Final[MappingProxyType[str, frozenset[str]]] = MappingProxyType(
 _QI: Final = "qi"
 _IDKEY: Final = "idkey"
 _PII: Final = "pii"
+#: Raw (untruncated) ``users.created_at`` lineage: a signup timestamp is near-unique.
+_RAWTS: Final = "rawts"
+#: A value computed from a QI (anything but a bare pass-through of a QI column).
+_QIEXPR: Final = "qiexpr"
+#: ``DATE_TRUNC``/``TIMESTAMP_TRUNC``/``DATETIME_TRUNC`` units coarse enough for a signup
+#: timestamp (MONTH or coarser). WEEK, DAY and ISOYEAR are not allowed (fail closed).
+_COARSE_TS_UNITS: Final = frozenset({"MONTH", "QUARTER", "YEAR"})
 _EMPTY: Final[frozenset[str]] = frozenset()
 
 
@@ -238,6 +256,7 @@ class Rule(StrEnum):
     QI_POSITION = "qi_position"
     QI_AT_ID_GRAIN = "qi_at_id_grain"
     SMALL_CELL_UNPLACEABLE = "small_cell_unplaceable"
+    QI_DIFFERENCING = "qi_differencing"
 
 
 _HINTS: Final[MappingProxyType[Rule, str]] = MappingProxyType(
@@ -279,8 +298,9 @@ _HINTS: Final[MappingProxyType[Rule, str]] = MappingProxyType(
         Rule.PII_REFERENCE: "personal data columns cannot be used anywhere in a query",
         Rule.FUNCTION_DENIED: "this function is not allowed here",
         Rule.QI_POSITION: (
-            "customer attributes may only be grouped by, counted, or used in a filter "
-            "of an aggregate"
+            "customer attributes may only be grouped by, used in a filter of an "
+            "aggregate, or counted as COUNT(DISTINCT column); do not compare or "
+            "transform them inside an aggregate"
         ),
         Rule.QI_AT_ID_GRAIN: (
             "customer attributes cannot be used in a query that returns individual "
@@ -288,6 +308,10 @@ _HINTS: Final[MappingProxyType[Rule, str]] = MappingProxyType(
         ),
         Rule.SMALL_CELL_UNPLACEABLE: (
             "use a coarser grouping or aggregate over the whole population"
+        ),
+        Rule.QI_DIFFERENCING: (
+            "compute one aggregate per query when grouping or filtering by customer "
+            "attributes; do not combine, subtract or union several groupings or totals"
         ),
     }
 )
@@ -681,6 +705,7 @@ class _Analyzer:
         self._check_positions()
         self._check_id_literals()
         self._check_grain(scopes)
+        self._check_timestamps()
 
     # -- scope analysis
 
@@ -830,6 +855,8 @@ class _Analyzer:
                 tags.add(_QI)
             if name in _ID_KEYS.get(table, _EMPTY):
                 tags.add(_IDKEY)
+            if table == "users" and name == "created_at":
+                tags.add(_RAWTS)
             return frozenset(tags)
         if isinstance(source, Scope):
             return self._analyze(source).outputs.get(name)
@@ -849,6 +876,10 @@ class _Analyzer:
         if isinstance(node, _COUNTING) or isinstance(node, _WINDOW_ONLY):
             return _EMPTY
         children = frozenset().union(*(self.taint(c) for c in node.iter_expressions()))
+        if _QI in children and not isinstance(node, (exp.Alias, exp.Paren)):
+            children = children | {_QIEXPR}
+        if _coarse_truncation(node):
+            return children - {_RAWTS}
         if isinstance(node, _AGGREGATES) and not isinstance(node, _ID_PRESERVING_AGGS):
             return children - {_IDKEY}
         return children
@@ -914,6 +945,8 @@ class _Analyzer:
                 continue
             if not isinstance(node, _COUNTING) and _QI in self._raw_taint(node):
                 raise _Reject(Rule.QI_POSITION)
+            if isinstance(node, _COUNTING) and not self._qi_count_allowed(node):
+                raise _Reject(Rule.QI_POSITION)
             for inner in _iter_nodes(node):
                 if inner is node:
                     continue
@@ -925,6 +958,20 @@ class _Analyzer:
                     raise _Reject(Rule.QI_POSITION)
             if isinstance(node, exp.CountIf) and self._has_id_literal(node):
                 raise _Reject(Rule.QI_POSITION)
+
+    def _qi_count_allowed(self, node: exp.Expression) -> bool:
+        """Review B1: a QI inside ``COUNT`` only as ``COUNT(DISTINCT <bare QI column>)``."""
+        if _QI not in self._raw_taint(node):
+            return True
+        if isinstance(node, exp.CountIf):
+            return False
+        arg = node.this
+        if not isinstance(arg, exp.Distinct) or len(arg.expressions) != 1:
+            return False
+        col = arg.expressions[0]
+        if not isinstance(col, exp.Column):
+            return False
+        return _QIEXPR not in self.col_taint.get(id(col), _EMPTY)
 
     def _has_id_literal(self, node: exp.Expression) -> bool:
         return any(self._is_id_literal_cmp(n) for n in _iter_nodes(node))
@@ -956,6 +1003,23 @@ class _Analyzer:
             return
         if any(self._is_id_literal_cmp(n) for n in _iter_nodes(self.root)):
             raise _Reject(Rule.SMALL_CELL_UNPLACEABLE)
+
+    def _check_timestamps(self) -> None:
+        """``users.created_at`` (iteration 9, D-29): a raw signup timestamp may only be
+        used inside ``DATE_TRUNC``/``TIMESTAMP_TRUNC``/``DATETIME_TRUNC`` to MONTH,
+        QUARTER or YEAR (optionally through ``DATE(...)``), or in a ``WHERE`` filter.
+        Anything else (grouping or projecting it raw, ``EXTRACT``, WEEK/DAY truncation,
+        ``JOIN ... ON``, ``HAVING``, ``ORDER BY``, ``COUNT(created_at)``, a CTE that
+        passes it through untruncated) is ``qi_position``. Code CTEs (names starting with
+        ``__``, which ``check_sql`` never accepts from the model) are exempt."""
+        for node in _iter_nodes(self.root):
+            if not isinstance(node, exp.Column):
+                continue
+            if _RAWTS not in self.col_taint.get(id(node), _EMPTY):
+                continue
+            if _in_code_cte(node) or _ts_use_allowed(node):
+                continue
+            raise _Reject(Rule.QI_POSITION)
 
     def _row_grain(self, scope: Scope, output_list: list[frozenset[str]]) -> bool:
         select = scope.expression
@@ -993,6 +1057,48 @@ class _Analyzer:
 
 
 # --------------------------------------------------------------------------- helpers
+
+
+_TRUNCS: Final = _classes("DateTrunc", "TimestampTrunc", "DatetimeTrunc")
+_TS_WRAPPERS: Final = (exp.Paren, *_classes("Date", "TsOrDsToDate"))
+
+
+def _coarse_truncation(node: exp.Expression) -> bool:
+    if not isinstance(node, _TRUNCS):
+        return False
+    unit = node.args.get("unit")
+    if not isinstance(unit, (exp.Literal, exp.Var)):
+        return False
+    return str(unit.this).upper() in _COARSE_TS_UNITS
+
+
+def _ts_use_allowed(col: exp.Column) -> bool:
+    """A coarse truncation reached through only ``DATE()``/parentheses, via ``this``;
+    or a position inside the nearest SELECT's WHERE."""
+    child: exp.Expression = col
+    node = col.parent
+    while node is not None and not isinstance(node, _QUERY_NODES):
+        if isinstance(node, _TS_WRAPPERS) and child is node.this:
+            child, node = node, node.parent
+            continue
+        if _coarse_truncation(node) and child is node.this:
+            return True
+        break
+    node = col.parent
+    while node is not None and not isinstance(node, _QUERY_NODES):
+        if isinstance(node, exp.Where):
+            return True
+        node = node.parent
+    return False
+
+
+def _in_code_cte(node: exp.Expression) -> bool:
+    current: exp.Expression | None = node
+    while current is not None:
+        if isinstance(current, exp.CTE) and current.alias.startswith("__"):
+            return True
+        current = current.parent
+    return False
 
 
 def _branch_selects(node: exp.Expression) -> Iterator[exp.Select]:
