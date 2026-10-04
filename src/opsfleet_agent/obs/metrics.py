@@ -85,8 +85,30 @@ def _pct(n: int, d: int) -> str:
     return f"{(100.0 * n / d):.1f}%" if d else "n/a"
 
 
-def metrics_summary(trace_dir: str | Path, session_id: str | None = None) -> str:
-    """Text summary for one session (`session_id`) or all sessions in `trace_dir`."""
+def _feedback_lines(store: Any, session_id: str | None) -> list[str]:
+    """Feedback counts, thumbs-down rate and thumbs-down turns with trace ids (AC-25.3)."""
+    c = store.counts(session_id)
+    rate = f"{100.0 * c['down_rate']:.1f}%" if c["down_rate"] is not None else "n/a"
+    out = [f"Feedback: up={c['up']}, down={c['down']}, thumbs-down rate {rate}"]
+    for r in store.list_down(session_id, limit=20):
+        why = f" reason={r.reason}" if r.reason else ""
+        out.append(f"  down: turn {tr.scrub_text(r.turn_id, 80)}, trace {r.trace_id or 'n/a'}{why}")
+    return out
+
+
+def metrics_summary(
+    trace_dir: str | Path, session_id: str | None = None, feedback: Any = None
+) -> str:
+    """Text summary for one session (`session_id`) or all sessions in `trace_dir`.
+
+    `feedback` is an optional `FeedbackStore`; its counts are appended (AC-25.3).
+    """
+    fb = _feedback_lines(feedback, session_id) if feedback is not None else []
+    text = _spans_summary(trace_dir, session_id)
+    return "\n".join([text, *fb]) if fb else text
+
+
+def _spans_summary(trace_dir: str | Path, session_id: str | None) -> str:
     res = load_spans(trace_dir, session_id)
     spans = res.spans
     scope = f"session {_safe_session(session_id)}" if session_id else "all sessions"
