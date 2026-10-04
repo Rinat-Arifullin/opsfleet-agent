@@ -202,20 +202,20 @@ The calibration gate (30) reaches the critical path only through the owner's lab
 - `tests/unit/test_budget.py`
 - `tests/unit/test_llm_wrapper.py`
 **Done criteria (M-8)**:
-- [ ] Budgets are enforced by code, and exceeding one returns a typed "budget exhausted" (`test_turn_caps_enforced`, `test_turn_deadline`):
+- [x] Budgets are enforced by code, and exceeding one returns a typed "budget exhausted" (`test_turn_caps_enforced`, `test_turn_deadline`):
   - Q&A: 10 LLM calls and 120 s;
   - report: 14 calls, 6 executed SQL queries and 180 s;
   - light path: 3 calls;
   - per-role sub-cap of 6.
-- [ ] Retries are bounded, and a fake clock proves it (`test_retry_wrapper_bounded`, `test_retry_then_fallback`):
+- [x] Retries are bounded, and a fake clock proves it (`test_retry_wrapper_bounded`, `test_retry_then_fallback`):
   - at most 3 retries, with backoff 1 s, 2 s and 4 s plus jitter;
   - then the fallback model gets exactly one attempt;
   - then `force_answer`.
-- [ ] The SDK's own retries are disabled, so each wrapper attempt is one HTTP attempt (`test_sdk_single_attempt`).
-- [ ] Retries and fallback attempts count against the role sub-cap (`test_role_subcap_counts_retries_and_fallback`).
-- [ ] The Quick → Deep escalation happens at most once per turn (`test_escalation_once`). A `recursion_limit` hit is caught and turned into a typed partial answer (`test_recursion_limit_caught`).
-- [ ] Usage per turn (calls, tokens, limiter wait recorded apart from latency) goes to the trace (`test_trace_records_turn_usage`).
-- [ ] [std]
+- [x] The SDK's own retries are disabled, so each wrapper attempt is one HTTP attempt (`test_sdk_single_attempt`).
+- [x] Retries and fallback attempts count against the role sub-cap (`test_role_subcap_counts_retries_and_fallback`).
+- [x] The Quick → Deep escalation happens at most once per turn (`test_escalation_once`). A `recursion_limit` hit is caught and turned into a typed partial answer (`test_recursion_limit_caught`).
+- [x] Usage per turn (calls, tokens, limiter wait recorded apart from latency) goes to the trace (`test_trace_records_turn_usage`).
+- [x] [std]
 **Effort**: M+ (1.5) · **Depends on**: 1 · **Risk**: medium
 
 ## Iteration 4: JSONL tracer, redaction, SQLite store base

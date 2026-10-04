@@ -41,7 +41,7 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 |---|---|---|
 | 1 | done | Skeleton, all deps (spaCy model pinned as wheel URL), `config/models.yaml`, startup check, socket block; 11 tests. Note: the orchestrator's CLI smoke run loaded `.env` and made **one `models.list` call** (a listing, not a generation; no RPD used). It passed, so every configured id, including `gemini-embedding-001`, is listed for your key. That is part of L0; the 4 generation calls stay yours. |
 | 2 | done | Spikes and CI (fb2b4f9). 21 sqlglot quirks documented; the scope rewrite works. Live model/embedding spike prepared as `tests/live/test_spike_models.py`, **not run** (yours, L0). |
-| 3 | review fixes in progress | T2 review: APPROVE WITH FIXES (2 MAJOR test/limiter issues, 5 MINOR); fixes being applied before commit |
+| 3 | done | T2 review APPROVE WITH FIXES; all 7 findings fixed (limiter timeout goes straight to fallback, deadline re-checked, `ForceAnswer(template_only=True)` when even force_answer is out of budget); 30 tests |
 | 4 | review fixes in progress | T2 review (secrets): REQUEST CHANGES. The blocker: the log redaction filter did not cover child loggers and was never installed at startup. The fix also wires `install_log_filter`/`register_secret` into `cli.py` startup now, instead of waiting for iteration 19 |
 | 8a | second T1 review in progress | regex scrubber done, 86 tests; known gaps left to 8b NER (unseparated phones without a keyword, 7-digit local numbers, plain "name at domain.com") |
 | 5, 6 | in progress (T1 opus) | started in parallel; disjoint files |
