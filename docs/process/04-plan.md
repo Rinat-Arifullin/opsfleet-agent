@@ -383,9 +383,9 @@ The calibration gate (30) reaches the critical path only through the owner's lab
 - `src/opsfleet_agent/guards/output.py`
 - `tests/unit/test_output_guard.py`
 **Done criteria**:
-- [ ] Named tests: `test_output_guard_allowlist_fail_closed`, `test_output_injection_scan`, `test_output_guard_strips_markdown_images_and_urls`
-- [ ] Every output first passes PII guards 8a and 8b
-- [ ] [std]
+- [x] Named tests: `test_output_guard_allowlist_fail_closed`, `test_output_injection_scan`, `test_output_guard_strips_markdown_images_and_urls`
+- [x] Every output first passes PII guards 8a and 8b
+- [x] [std]
 **Effort**: M (1) · **Depends on**: 8a, 8b · **Risk**: high. **Rollback:** fail closed (the answer is replaced by a fixed refusal), and the owner is told.
 
 ## Iteration 11: Input guard, router, light path 🔴
