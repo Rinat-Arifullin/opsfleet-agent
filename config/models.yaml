@@ -1,0 +1,29 @@
+# Model ids per role. Every id is verified against the API model list at startup.
+# A role sets either thinking_level or thinking_budget, never both (validation rejects both).
+#
+# gemini-3.1-flash-lite: shutdown 2027 per provider deprecation page; successor: see provider page.
+# gemini-3.8-flash is used only for deep_analyst and report_writer (HLD 4.0).
+roles:
+  router:          {model: gemini-3.1-flash-lite, fallback: gemini-3.1-flash-lite}
+  light_path:      {model: gemini-3.1-flash-lite, fallback: gemini-3.1-flash-lite}
+  quick_analyst:   {model: gemini-3.1-flash-lite, fallback: gemini-3.1-flash-lite}
+  deep_analyst:    {model: gemini-3.8-flash, fallback: gemini-3.1-flash-lite}
+  report_writer:   {model: gemini-3.8-flash, fallback: gemini-3.1-flash-lite}
+  report_verifier: {model: gemini-3.1-flash-lite, fallback: gemini-3.1-flash-lite}
+  library_agent:   {model: gemini-3.1-flash-lite, fallback: gemini-3.1-flash-lite}
+  summary:         {model: gemini-3.1-flash-lite, fallback: gemini-3.1-flash-lite}
+  judge:           {model: gemini-3.1-flash-lite, fallback: gemini-3.1-flash-lite}
+  fallback:        {model: gemini-3.1-flash-lite}
+
+embedding:
+  model: gemini-embedding-001
+  output_dimensionality: 768
+
+# Free-tier limits read from the AI Studio dashboard on 2026-10-04.
+limits:
+  limiter_fraction: 0.8
+  models:
+    gemini-3.8-flash:      {rpm: 5,  rpd: 20,  tpm: 250000}
+    gemini-3.1-flash-lite: {rpm: 15, rpd: 500, tpm: 250000}
+    # Embedding limits are an assumption, unconfirmed (Q-5); the iteration-2 spike confirms.
+    gemini-embedding-001:  {rpm: 100, rpd: 1000, tpm: 30000}

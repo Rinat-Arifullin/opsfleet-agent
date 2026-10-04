@@ -157,10 +157,10 @@ The calibration gate (30) reaches the critical path only through the owner's lab
 - `config/models.yaml` (roles, ids, assumed RPM/RPD per model, shutdown-date comments)
 - `tests/unit/conftest.py` (autouse socket block), `tests/unit/test_config.py`
 **Done criteria**:
-- [ ] A missing or unlisted model id, a missing `GOOGLE_CLOUD_PROJECT` or a missing `GEMINI_API_KEY` exits with one actionable line and no traceback. The value is never printed: config is logged by an **allowlist** of non-secret keys (M-7) (`test_startup_check_reports_missing_env_without_values`).
-- [ ] `tests/unit` fails any test that opens a socket (`test_socket_block_fixture_active`).
-- [ ] `.gitignore` covers `.env`, `*.db`, `*.db-wal`, `traces/` and `evals/results/raw/` (`test_gitignore_covers_secrets_and_stores`).
-- [ ] [std]
+- [x] A missing or unlisted model id, a missing `GOOGLE_CLOUD_PROJECT` or a missing `GEMINI_API_KEY` exits with one actionable line and no traceback. The value is never printed: config is logged by an **allowlist** of non-secret keys (M-7) (`test_startup_check_reports_missing_env_without_values`).
+- [x] `tests/unit` fails any test that opens a socket (`test_socket_block_fixture_active`).
+- [x] `.gitignore` covers `.env`, `*.db`, `*.db-wal`, `traces/` and `evals/results/raw/` (`test_gitignore_covers_secrets_and_stores`).
+- [x] [std]
 **Effort**: M+ (1.5) · **Depends on**: none · **Risk**: low
 
 ## Iteration 2: Spikes (sqlglot, interrupt, embedding, model ids) and CI
