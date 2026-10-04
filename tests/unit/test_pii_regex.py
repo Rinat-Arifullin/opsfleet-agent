@@ -293,10 +293,66 @@ def test_international_phone_over_15_digits_left_to_other_patterns():
     assert "<PHONE>" not in result.text
 
 
-def test_space_separated_luhn_invalid_groups_are_kept_by_design():
-    # Documented trade-off: a space-separated non-Luhn sequence is treated as a number list.
-    text = "4242 4242 4242 4241"
+def test_space_separated_luhn_invalid_4x4_groups_are_masked():
+    # Iter 8b review: 4-4-4-4 is card layout, so it is masked even when Luhn-invalid.
+    result = scrub("card 4242 4242 4242 4241")
+    assert "4241" not in result.text
+    assert result.text == "card <ID>"
+
+
+def test_space_separated_year_groups_are_kept_by_design():
+    # Four year-like groups stay a number list; other non-4x4 Luhn-invalid lists too.
+    for text in ("2021 2022 2023 2024", "1999 2000 2001 2002", "4242 4242 4242 425"):
+        assert scrub(text).text == text
+
+
+# --- iter 8b review: regex leaks -----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "value", "expected"),
+    [
+        ("Call 5551234567 today", "5551234567", "Call <PHONE> today"),
+        ("text me at 5550104477", "5550104477", "text me at <PHONE>"),
+        ("call me on 555 123 4567 ext. 89", "ext", "call me on <PHONE>"),
+        ("phone 555-123-4567 x123", "x123", "phone <PHONE>"),
+        ("desk (555) 010-4477 extension 2041.", "2041", "desk <PHONE>."),
+        ("IBAN DE89 3704 0044 0532 0130 00", "DE89", "IBAN <ID>"),
+        ("IBAN DE89370400440532013000.", "DE89", "IBAN <ID>."),
+        ("pay GB82 WEST 1234 5698 7654 32 now", "GB82", "pay <ID> now"),
+        ("zed . quux @ example . com", "quux", "<EMAIL>"),
+        ("mail zed.quux @ example . com", "zed", "mail <EMAIL>"),
+        ("SSN 123456789", "123456789", "SSN <ID>"),
+        ("social security number: 123 45 6789", "6789", "social security number: <ID>"),
+        ("passport X12345678 on file", "X12345678", "passport <ID> on file"),
+        ("Passport no. AB1234567", "1234567", "Passport no. <ID>"),
+    ],
+)
+def test_iter8b_regex_leaks_are_masked(text, value, expected):
+    result = scrub(text)
+    assert value not in result.text
+    assert result.text == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Call center handled 1,234,567 calls in 2024.",
+        "We will call it Q4 2024; 12 SKUs.",
+        "Text ads drove 1234567 impressions.",
+        "Passport holders: 40% of users.",
+        "IBAN-like code DE12 is not one.",
+        "Plan US12 3456 7890 grew.",
+    ],
+)
+def test_iter8b_regex_fixes_keep_analytics_text(text):
     assert scrub(text).text == text
+
+
+def test_word_at_plain_domain_is_not_masked_by_design():
+    """Skipped review probe: "zed at example.com" is indistinguishable from
+    "Revenue at thelook.com", so a plain "at" with an undotted local part stays."""
+    assert scrub("zed at example.com").text == "zed at example.com"
 
 
 # --- properties ---------------------------------------------------------------------

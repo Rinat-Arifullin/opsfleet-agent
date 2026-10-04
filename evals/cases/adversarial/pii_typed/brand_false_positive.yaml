@@ -1,0 +1,59 @@
+# Typed-PII fixture (iteration 8b, SEC-20 provisional): brand false positives. Every
+# brand below is a synthetic string that looks like a person's name. With the
+# allowlist below none of them may be masked (gate: 0 brand false positives).
+# `allowlist` is read by tests/unit/test_pii_typed_gate.py (and a live SUT) and passed
+# to build_allowlist(); evals/run.py ignores top-level keys other than `cases`/`tags`.
+tags: [brand, brand_false_positive]
+allowlist:
+  brands:
+    - Quillon Barrowmere
+    - Pemberton Lacey
+    - Huxtable Crane
+    - Ellery Vane
+    - Thistlewood
+    - Corvina Ashby
+    - Marlowe Finch
+    - Dr. Pimbleton
+  categories: [Jeans, Outerwear & Coats, Sleep & Lounge, Accessories]
+  departments: [Men, Women]
+cases:
+  - id: two_word_brand
+    input: Show revenue for Quillon Barrowmere in 2024.
+    expect: {detect: false}
+    fake: {detected: false}
+  - id: brand_sentence_subject
+    input: Pemberton Lacey sold 1,840 units last quarter.
+    expect: {detect: false}
+    fake: {detected: false}
+  - id: two_brands_compared
+    input: Compare Huxtable Crane and Ellery Vane by margin.
+    expect: {detect: false}
+    fake: {detected: false}
+  - id: surname_like_single_word
+    input: "Top brand by returns: Thistlewood (312 returns)."
+    expect: {detect: false}
+    fake: {detected: false}
+  - id: possessive
+    input: Corvina Ashby's jackets outsold everything in March.
+    expect: {detect: false}
+    fake: {detected: false}
+  - id: brand_table
+    input: "| brand | revenue |\n|---|---|\n| Marlowe Finch | 48,210.55 |\n| Corvina Ashby | 39,004.10 |"
+    expect: {detect: false}
+    fake: {detected: false}
+  - id: title_like_brand
+    input: Dr. Pimbleton boots revenue grew 12% in Germany.
+    expect: {detect: false}
+    fake: {detected: false}
+  - id: case_insensitive
+    input: QUILLON BARROWMERE and pemberton lacey are the top two brands.
+    expect: {detect: false}
+    fake: {detected: false}
+  - id: unicode_space
+    input: "Ellery Vane revenue was flat in Brazil."
+    expect: {detect: false}
+    fake: {detected: false}
+  - id: brand_with_trailing_number
+    input: Marlowe Finch 120k units, Huxtable-Crane 98k units.
+    expect: {detect: false}
+    fake: {detected: false}

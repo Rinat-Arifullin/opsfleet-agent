@@ -1,0 +1,96 @@
+# Typed-PII fixture (iteration 8b, SEC-20 provisional): person names. All names are
+# obviously fictional. `fake.detected` is the real detector verdict.
+tags: [pii_positive, person]
+cases:
+  - id: free_text_full_name
+    input: Zorbina Quandleworth bought three coats last week.
+    expect: {detect: true, must_not_contain: ["Zorbina", "Quandleworth"]}
+    fake: {detected: true}
+  - id: free_text_mid_sentence
+    input: The refund for Bartholomew Fizzlewick is still pending.
+    expect: {detect: true, must_not_contain: ["Bartholomew", "Fizzlewick"]}
+    fake: {detected: true}
+  - id: split_across_lines
+    input: "Please contact Zorbina\nQuandleworth about the order."
+    expect: {detect: true, must_not_contain: ["Zorbina", "Quandleworth"]}
+    fake: {detected: true}
+  - id: split_name_label
+    input: "Name: Gertrude\nPlumbottom"
+    expect: {detect: true, must_not_contain: ["Gertrude", "Plumbottom"]}
+    fake: {detected: true}
+  - id: table_row_name_columns
+    input: "| first_name | last_name | orders |\n|---|---|---|\n| Ophelia | Wobblesworth | 3 |"
+    expect: {detect: true, must_not_contain: ["Ophelia", "Wobblesworth"]}
+    fake: {detected: true}
+  - id: csv_customer_column
+    input: "customer,orders\nMortimer Plinkett,4\nHortensia Bramblewick,2"
+    expect: {detect: true, must_not_contain: ["Mortimer", "Plinkett", "Hortensia", "Bramblewick"]}
+    fake: {detected: true}
+  - id: lowercase_self_intro
+    input: my name is jebediah crumplehorn and I need help with a refund
+    expect: {detect: true, must_not_contain: ["jebediah", "crumplehorn"]}
+    fake: {detected: true}
+  - id: titled_name
+    input: Dr. Wilhelmina Pfefferkorn asked about returns.
+    expect: {detect: true, must_not_contain: ["Wilhelmina", "Pfefferkorn"]}
+    fake: {detected: true}
+  - id: greeting_first_name
+    input: Hey Thaddeus, the report is ready.
+    expect: {detect: true, must_not_contain: ["Thaddeus"]}
+    fake: {detected: true}
+  - id: title_mrs
+    input: Mrs Ermintrude Snodgrass placed 5 orders.
+    expect: {detect: true, must_not_contain: ["Ermintrude", "Snodgrass"]}
+    fake: {detected: true}
+  - id: role_word_and_hyphenated_surname
+    input: Customer Barnaby Wigglesworth-Toot has 3 open returns.
+    expect: {detect: true, must_not_contain: ["Barnaby", "Wigglesworth"]}
+    fake: {detected: true}
+  - id: name_next_to_brand
+    input: Thaddeus Grimblewick, a Thistlewood loyalty member, complained about sizing.
+    expect: {detect: true, must_not_contain: ["Thaddeus", "Grimblewick"]}
+    fake: {detected: true}
+  - id: glued_digit_surname
+    input: Mortimer Plinkett2 ordered twice.
+    expect: {detect: true, must_not_contain: ["Plinkett"]}
+    fake: {detected: true}
+  - id: csv_surname_before_count
+    input: "customer,orders\nZorbina Quandleworth,4"
+    expect: {detect: true, must_not_contain: ["Quandleworth"]}
+    fake: {detected: true}
+  - id: json_name_key
+    input: '{"name": "Zorbina Quandleworth", "orders": 3}'
+    expect: {detect: true, must_not_contain: ["Zorbina", "Quandleworth"]}
+    fake: {detected: true}
+  - id: json_customer_key
+    input: '{"customer":"Bartholomew Fizzlewick"}'
+    expect: {detect: true, must_not_contain: ["Bartholomew", "Fizzlewick"]}
+    fake: {detected: true}
+  - id: all_caps_name
+    input: ZORBINA QUANDLEWORTH bought coats.
+    expect: {detect: true, must_not_contain: ["Zorbina", "Quandleworth"]}
+    fake: {detected: true}
+  - id: lowercase_after_role
+    input: the buyer was bartholomew fizzlewick
+    expect: {detect: true, must_not_contain: ["bartholomew", "fizzlewick"]}
+    fake: {detected: true}
+  - id: backticked_name
+    input: "Top buyer: `Ophelia Wobblesworth`"
+    expect: {detect: true, must_not_contain: ["Ophelia", "Wobblesworth"]}
+    fake: {detected: true}
+  - id: month_word_name
+    input: my name is April May
+    expect: {detect: true, must_not_contain: ["April May"]}
+    fake: {detected: true}
+  - id: greeting_month_name
+    input: Hey June, your order shipped.
+    expect: {detect: true, must_not_contain: ["June"]}
+    fake: {detected: true}
+  - id: label_overrides_allowlist
+    input: "Name: Marlowe Finch"
+    expect: {detect: true, must_not_contain: ["Marlowe", "Finch"]}
+    fake: {detected: true}
+  - id: allowlisted_words_combined
+    input: Thistlewood Marlowe Finch Bramble wrote in.
+    expect: {detect: true, must_not_contain: ["Thistlewood", "Marlowe Finch", "Bramble"]}
+    fake: {detected: true}

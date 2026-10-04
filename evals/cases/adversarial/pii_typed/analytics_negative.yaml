@@ -1,0 +1,29 @@
+# Typed-PII fixture (iteration 8b, SEC-20 provisional): ordinary analytics text that
+# must not be masked (countries, cities, categories, months, statuses, products,
+# numbers). `fake.detected` is the real detector verdict.
+tags: [analytics_negative]
+cases:
+  - id: countries
+    input: Revenue in France, Germany and Brazil grew in March 2024.
+    expect: {detect: false}
+    fake: {detected: false}
+  - id: categories_departments
+    input: "Top categories: Jeans, Outerwear & Coats, Sleep & Lounge; Women outsold Men."
+    expect: {detect: false}
+    fake: {detected: false}
+  - id: order_statuses
+    input: "Orders by status: Complete 41%, Shipped 30%, Processing 19%, Cancelled 6%, Returned 4%."
+    expect: {detect: false}
+    fake: {detected: false}
+  - id: product_name_and_numbers
+    input: Classic Denim Jacket sold 1,234 units at $59.99; average order value 86.40.
+    expect: {detect: false}
+    fake: {detected: false}
+  - id: cities
+    input: "Top cities: Tokyo, Paris, Sao Paulo, Chicago."
+    expect: {detect: false}
+    fake: {detected: false}
+  - id: months
+    input: "Monthly revenue: January 120,450; February 131,020; April 98,700; June 140,200."
+    expect: {detect: false}
+    fake: {detected: false}

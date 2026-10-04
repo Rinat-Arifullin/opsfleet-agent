@@ -1,0 +1,48 @@
+# Typed-PII fixture (iteration 8b, SEC-20 provisional): street addresses. Fictional
+# streets and towns only. `fake.detected` is the real detector verdict.
+tags: [pii_positive, address]
+cases:
+  - id: house_number_street
+    input: Ship to 742 Evergreen Terrace, Springfield.
+    expect: {detect: true, must_not_contain: ["742", "Evergreen"]}
+    fake: {detected: true}
+  - id: full_us_style
+    input: 1234 Imaginary Lane, Apt 5B, Faketown, ZZ 99999
+    expect: {detect: true, must_not_contain: ["1234", "Imaginary", "99999"]}
+    fake: {detected: true}
+  - id: address_label
+    input: "Address: 12 Nowhere Rd, Fakeville"
+    expect: {detect: true, must_not_contain: ["Nowhere"]}
+    fake: {detected: true}
+  - id: avenue_in_sentence
+    input: Deliver to 88 Gumdrop Avenue tomorrow.
+    expect: {detect: true, must_not_contain: ["Gumdrop"]}
+    fake: {detected: true}
+  - id: po_box
+    input: Returns go to PO Box 4471, Notaplace.
+    expect: {detect: true, must_not_contain: ["4471"]}
+    fake: {detected: true}
+  - id: way_and_town
+    input: Her parcel went to 17 Marzipan Way, Toffeeville by mistake.
+    expect: {detect: true, must_not_contain: ["Marzipan"]}
+    fake: {detected: true}
+  - id: lowercase_street
+    input: lives at 742 evergreen terrace
+    expect: {detect: true, must_not_contain: ["evergreen"]}
+    fake: {detected: true}
+  - id: all_caps_street
+    input: SHIP TO 742 EVERGREEN TERRACE
+    expect: {detect: true, must_not_contain: ["EVERGREEN"]}
+    fake: {detected: true}
+  - id: abbreviated_suffix
+    input: Send it to 742 Evergreen Terr. please.
+    expect: {detect: true, must_not_contain: ["Evergreen"]}
+    fake: {detected: true}
+  - id: uk_postcode
+    input: 10 Downing Street, London SW1A 2AA
+    expect: {detect: true, must_not_contain: ["Downing", "SW1A"]}
+    fake: {detected: true}
+  - id: zip_after_street
+    input: 742 Evergreen Terrace, Springfield, IL 62704
+    expect: {detect: true, must_not_contain: ["Evergreen", "62704"]}
+    fake: {detected: true}

@@ -23,25 +23,34 @@ aggregate does not take:
 * **Card-shaped groups** (a 4-digit group followed by 2-4 groups of 3-6 digits) with 13+
   digits in total are masked: ``<CARD>`` when Luhn-valid; ``<ID>`` when hyphen/dot
   separated but not Luhn-valid. A whitespace-separated sequence that fails Luhn is
-  **kept**, because it is far more likely a list of numbers
-  (``2021 2022 2023 2024``) than a card; a Luhn-invalid number is not a usable PAN.
+  **kept**, because it is far more likely a list of numbers, with one exception (8b
+  review): exactly four groups of four digits (card layout) is masked as ``<ID>`` unless
+  every group is a year (``2021 2022 2023 2024`` stays).
 * **Phones** need a shape: an international prefix (``+`` or ``00``) with 7-15 digits in
   groups of up to 8 (``+49 30 1234567``), North-American ``3-3-4`` grouping, a
   leading-zero national ``0xx xxxx xxxx`` grouping,
-  or a phone keyword (``phone``, ``tel``, ``cell``, ``mobile``, ``contact number``...)
-  before the number, with at most one line break in between. Unseparated
+  or a phone keyword (``phone``, ``tel``, ``cell``, ``mobile``, ``contact number``,
+  ``call``, ``sms``, ``dial``, ``text me``, ``reach me``...) before the number, with at
+  most one line break in between. An extension after a masked phone (``ext. 89``,
+  ``x123``, ``#12``) is absorbed into the same ``<PHONE>``. Unseparated
   10-12 digit runs without a keyword and 7-digit local numbers (``555-0123``) are **not**
   masked here, because they collide with aggregates and ranges (``250-1000``); the NER
   layer (8b) is the second line for those.
 * ``ddd-dd-dddd`` (SSN shape, also with one consistent space or dot separator) is masked
-  as ``<ID>``.
+  as ``<ID>``. After an id keyword (``SSN``, ``social security number``, ``passport``,
+  ``national id``, ``tax id``, ``driver's license``) any id with 6+ digits is ``<ID>``
+  (``SSN 123456789``, ``passport X12345678``).
+* An IBAN (compact or in groups of four) that passes the mod-97 check is one ``<ID>``.
 
 Ordinary analytics text is left alone: years, ISO dates, prices (``$1,234.56``),
 percentages, counts and short SKUs.
 
 E-mail forms: plain, spaced or line-broken around ``@`` and ``.`` (``jane @ example . com``),
 bracketed/defanged (``[at]``, ``[@]``, ``[dot]``, ``[.]``, ``(.)``), word forms
-(``at``/``dot``), and ``jane.doe at example.com`` when the local part is dotted.
+(``at``/``dot``), ``jane.doe at example.com`` when the local part is dotted, and a local
+part with spaced dots (``zed . quux @ example . com``). Not masked by design:
+``zed at example.com`` (undotted local, plain ``at``, literal dot), which cannot be told
+apart from ``Revenue at thelook.com``.
 
 Normalisation: every format character (``Cf``: zero-width, bidi controls, invisible
 separators, soft hyphen...) is removed, every space separator (``Zs``) becomes an ASCII
@@ -159,6 +168,8 @@ def _normalise(text: str) -> str:
 # --- patterns -----------------------------------------------------------------------
 
 _LOCAL = r"(?<![\w.+%-])[\w.+%-]{1,64}"
+# Local part with spaced dots ("zed . quux @ example . com"): up to four dotted pieces.
+_LOCAL_SPACED = r"(?<![\w.+%-])[\w+%-]{1,64}(?:[ \t]{0,3}\.[ \t]{0,3}[\w+%-]{1,64}){0,4}"
 _LABEL = r"[\w-]{1,63}"
 _TLD = r"[^\W\d_]{2,24}(?![\w-]|\.[\w-])"
 _BR_OPEN = r"[\[({<]"
@@ -181,7 +192,7 @@ _DOT_ANY = rf"(?:\s{{0,3}}\.(?:\s{{1,3}}(?=[^\W\dA-Z_]))?|{_DOT_WORD})"
 # 1. Standard, spaced, line-broken and bracket-obfuscated e-mail: a@b.com, a @ b . com,
 #    a [at] b [dot] com, a@b dot com, a [@] b [.] com, a@b(.)com.
 _EMAIL_STRONG = re.compile(
-    rf"{_LOCAL}{_AT_STRONG}{_LABEL}(?:{_DOT_ANY}{_LABEL}){{0,8}}{_DOT_ANY}{_TLD}"
+    rf"(?:{_LOCAL_SPACED}|{_LOCAL}){_AT_STRONG}{_LABEL}(?:{_DOT_ANY}{_LABEL}){{0,8}}{_DOT_ANY}{_TLD}"
 )
 
 # 2. Plain-word "at" needs a word-form "dot" too ("name at domain dot com"). A plain "at"
@@ -210,7 +221,7 @@ _WS_ONLY = frozenset(" \t\r\n\v\f\x1c\x1d\x1e\x1f\x85")
 #    At most one line break between the keyword and the number.
 _PHONE_KEYWORD = re.compile(
     r"(?i:\b(?:phone|telephone|tel|cellphone|cell|mobile|whatsapp|fax"
-    r"|contact\s{1,3}number)\b)"
+    r"|contact\s{1,3}number|call(?:ed)?|sms|dial|text[ \t]+me|reach[ \t]+me)\b)"
     r"(?:[^\d\n]{0,20}?\n)?[^\d\n]{0,20}?"
     r"(\+?\d[\d \-.()]{5,20}\d)(?!\d)"
 )
@@ -239,8 +250,30 @@ _PHONE_NANP = re.compile(
 # 9. Leading-zero national: 020 7946 0958.
 _PHONE_NATIONAL = re.compile(rf"(?<![\w.,])0\d{{2,4}}{_SEP}\d{{3,4}}{_SEP}\d{{3,4}}(?![\w])")
 
+# 9b. Extension after a masked phone: "<PHONE> ext. 89", "<PHONE> x123", "<PHONE> #12".
+_PHONE_EXT = re.compile(
+    r"<PHONE>[ \t]{0,2},?[ \t]{0,2}(?i:ext(?:ension)?\.?|x|#)[ \t]{0,2}\d{1,6}(?!\w)"
+)
+
+# 9c. IBAN: two letters, two check digits, then 11-30 alphanumerics, compact or in groups
+#     of four ("DE89 3704 0044 0532 0130 00"). Masked as one <ID> when the mod-97 check
+#     passes, so the country prefix does not survive next to a partial mask.
+_IBAN = re.compile(r"(?<![\w])[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]{4}){2,7}(?:[ ]?[A-Z0-9]{1,4})?(?![\w])")
+
+# 9d. Government id after a keyword: "SSN 123456789", "passport X12345678",
+#     "social security number: 123 45 6789". The id needs 6+ digits.
+_ID_KEYWORD = re.compile(
+    r"(?i:\b(?:ssn|social[ \t]+security(?:[ \t]+(?:number|no))?|passport(?:[ \t]+(?:number|no))?"
+    r"|national[ \t]+id|tax[ \t]+id|driver'?s?[ \t]+licen[cs]e(?:[ \t]+(?:number|no))?)\b)"
+    r"[^\w\n]{0,4}(?:(?i:is|was|number|no)[^\w\n]{0,4})?"
+    r"([A-Za-z]{0,3}\d[\d \-]{4,14}\d[A-Za-z]?)(?![\w])"
+)
+
 # 10. SSN shape with one consistent separator: 123-45-6789, 123 45 6789, 123.45.6789.
 _SSN = re.compile(r"(?<![\w.-])\d{3}([-. ])\d{2}\1\d{4}(?![\w-]|\.\d)")
+
+
+_YEAR = re.compile(r"(?:19|20)\d\d")
 
 
 def _digits(s: str) -> str:
@@ -289,8 +322,28 @@ class _Scrubber:
         if 13 <= len(digits) <= 19 and _luhn_ok(digits):
             return self.mask(CARD)
         if set(raw) - set(digits) <= _WS_ONLY:
+            groups = raw.split()
+            if len(groups) == 4 and all(len(g) == 4 for g in groups):
+                if not all(_YEAR.fullmatch(g) for g in groups):
+                    return self.mask(ID)  # 4-4-4-4 is card layout, even if Luhn-invalid
             return raw  # whitespace-separated, not a valid PAN: most likely a list of numbers
         return self.mask(ID)
+
+    def iban(self, m: re.Match[str]) -> str:
+        raw = m.group(0).replace(" ", "")
+        if not 15 <= len(raw) <= 34:
+            return m.group(0)
+        moved = raw[4:] + raw[:4]
+        number = "".join(str(int(c, 36)) for c in moved)
+        return self.mask(ID) if int(number) % 97 == 1 else m.group(0)
+
+    def id_keyword(self, m: re.Match[str]) -> str:
+        if len(_digits(m.group(1))) < 6:
+            return m.group(0)
+        return m.group(0)[: m.start(1) - m.start(0)] + self.mask(ID)
+
+    def phone_ext(self, _m: re.Match[str]) -> str:
+        return TOKENS[PHONE]  # same finding, the extension joins the masked phone
 
     def long_run(self, m: re.Match[str]) -> str:
         digits = m.group(0)
@@ -323,6 +376,8 @@ def scrub(text: str) -> ScrubResult:
     out = _EMAIL_STRONG.sub(s.email, out)
     out = _EMAIL_WORD.sub(s.email, out)
     out = _EMAIL_AT_DOTTED.sub(s.email, out)
+    out = _IBAN.sub(s.iban, out)
+    out = _ID_KEYWORD.sub(s.id_keyword, out)
     out = _PHONE_KEYWORD.sub(s.phone_keyword, out)
     out = _PHONE_INTL.sub(s.phone_min7, out)
     out = _CARD_GROUPED.sub(s.card_grouped, out)
@@ -330,6 +385,7 @@ def scrub(text: str) -> ScrubResult:
     out = _PHONE_NANP.sub(s.phone, out)
     out = _PHONE_NATIONAL.sub(s.phone, out)
     out = _SSN.sub(s.ssn, out)
+    out = _PHONE_EXT.sub(s.phone_ext, out)
     if truncated:
         out += TRUNCATION_MARKER
     return ScrubResult(text=out, findings=MappingProxyType(dict(s.counts)), truncated=truncated)

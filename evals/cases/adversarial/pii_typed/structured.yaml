@@ -1,0 +1,62 @@
+# Typed-PII fixture (iteration 8b, SEC-20 provisional). Synthetic values only:
+# example.com e-mails, 555 phones, a public test card number, a made-up SSN shape.
+# `fake.detected` is the real detector verdict; tests/unit/test_pii_typed_gate.py
+# checks that it matches.
+tags: [pii_positive, structured]
+cases:
+  - id: email_plain
+    input: Email zed.quux@example.com about the order.
+    expect: {detect: true, must_not_contain: ["zed.quux", "example.com"]}
+    fake: {detected: true}
+  - id: email_obfuscated
+    input: reach me at jane [at] example [dot] com
+    expect: {detect: true, must_not_contain: ["jane", "example"]}
+    fake: {detected: true}
+  - id: phone_nanp
+    input: Call 555-123-4567 for delivery.
+    expect: {detect: true, must_not_contain: ["555-123-4567", "4567"]}
+    fake: {detected: true}
+  - id: phone_keyword_intl
+    input: "phone: +1 555 010 0199"
+    expect: {detect: true, must_not_contain: ["0199"]}
+    fake: {detected: true}
+  - id: card_test_number
+    input: Card 4242 4242 4242 4242 was charged twice.
+    expect: {detect: true, must_not_contain: ["4242"]}
+    fake: {detected: true}
+  - id: id_ssn_shape
+    input: Customer id 123-45-6789 is on file.
+    expect: {detect: true, must_not_contain: ["6789"]}
+    fake: {detected: true}
+  - id: phone_call_unseparated
+    input: Call 5551234567 today.
+    expect: {detect: true, must_not_contain: ["5551234567"]}
+    fake: {detected: true}
+  - id: phone_extension
+    input: phone 555-123-4567 ext. 89
+    expect: {detect: true, must_not_contain: ["4567", "89"]}
+    fake: {detected: true}
+  - id: iban_spaced
+    input: IBAN DE89 3704 0044 0532 0130 00 for refunds.
+    expect: {detect: true, must_not_contain: ["DE89", "3704"]}
+    fake: {detected: true}
+  - id: iban_compact
+    input: IBAN DE89370400440532013000 for refunds.
+    expect: {detect: true, must_not_contain: ["DE89"]}
+    fake: {detected: true}
+  - id: email_spaced_local
+    input: zed . quux @ example . com
+    expect: {detect: true, must_not_contain: ["quux", "example"]}
+    fake: {detected: true}
+  - id: ssn_keyword
+    input: SSN 123456789 on file.
+    expect: {detect: true, must_not_contain: ["123456789"]}
+    fake: {detected: true}
+  - id: passport_keyword
+    input: passport X12345678 on file.
+    expect: {detect: true, must_not_contain: ["X12345678"]}
+    fake: {detected: true}
+  - id: card_luhn_invalid_4x4
+    input: Card 4242 4242 4242 4241 was declined.
+    expect: {detect: true, must_not_contain: ["4241"]}
+    fake: {detected: true}
