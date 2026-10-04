@@ -62,6 +62,8 @@ class Settings:
     embedding_dimensionality: int
     limits: dict[str, ModelLimits]
     limiter_fraction: float
+    small_cell_k: int = 5
+    bq_unavailable_retry_delay_s: float = 2.0
 
     def configured_model_ids(self) -> list[str]:
         ids: list[str] = []
@@ -138,6 +140,37 @@ def parse_models_yaml(
         ) from None
 
 
+SMALL_CELL_K_RANGE = (2, 1_000)
+RETRY_DELAY_RANGE_S = (0.0, 30.0)
+
+
+def parse_tunables(path: Path) -> tuple[int, float]:
+    """Optional `policy.small_cell_k` and `bq.unavailable_retry_delay_s` (HLD 4.0.7)."""
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        raise ConfigError(
+            f"{path.name} cannot be read or is not valid YAML. Fix it or restore it from git."
+        ) from None
+    policy = (raw or {}).get("policy") or {}
+    bq = (raw or {}).get("bq") or {}
+    if not isinstance(policy, dict) or not isinstance(bq, dict):
+        raise ConfigError(f"{path.name} is invalid: 'policy' and 'bq' must be mappings.")
+    k = policy.get("small_cell_k", 5)
+    lo, hi = SMALL_CELL_K_RANGE
+    if isinstance(k, bool) or not isinstance(k, int) or not lo <= k <= hi:
+        raise ConfigError(
+            f"{path.name} is invalid: policy.small_cell_k must be an integer {lo}..{hi}."
+        )
+    delay = bq.get("unavailable_retry_delay_s", 2.0)
+    dlo, dhi = RETRY_DELAY_RANGE_S
+    if isinstance(delay, bool) or not isinstance(delay, (int, float)) or not dlo <= delay <= dhi:
+        raise ConfigError(
+            f"{path.name} is invalid: bq.unavailable_retry_delay_s must be a number {dlo}..{dhi}."
+        )
+    return k, float(delay)
+
+
 def load_settings(models_path: Path | None = None, *, dotenv: bool = True) -> Settings:
     """Load settings. Raises ConfigError (one line, no secret values) on the first failure."""
     if dotenv:
@@ -150,6 +183,7 @@ def load_settings(models_path: Path | None = None, *, dotenv: bool = True) -> Se
         raise ConfigError("GEMINI_API_KEY is not set. See README → Setup.")
     path = models_path or default_models_path()
     roles, emb_model, emb_dim, limits, fraction = parse_models_yaml(path)
+    small_cell_k, retry_delay_s = parse_tunables(path)
     return Settings(
         google_cloud_project=project,
         gemini_api_key=key,
@@ -159,6 +193,8 @@ def load_settings(models_path: Path | None = None, *, dotenv: bool = True) -> Se
         embedding_dimensionality=emb_dim,
         limits=limits,
         limiter_fraction=fraction,
+        small_cell_k=small_cell_k,
+        bq_unavailable_retry_delay_s=retry_delay_s,
     )
 
 

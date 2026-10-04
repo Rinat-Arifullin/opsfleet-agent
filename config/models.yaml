@@ -27,3 +27,9 @@ limits:
     gemini-3.1-flash-lite: {rpm: 15, rpd: 500, tpm: 250000}
     # Embedding limits are an assumption, unconfirmed (Q-5); the iteration-2 spike confirms.
     gemini-embedding-001:  {rpm: 100, rpd: 1000, tpm: 30000}
+
+# Policy and BigQuery tunables (HLD 4.0.7). Both keys are optional; these are the defaults.
+policy:
+  small_cell_k: 5        # 2..1000
+bq:
+  unavailable_retry_delay_s: 2.0   # 0..30, one bounded retry on a BigQuery 503

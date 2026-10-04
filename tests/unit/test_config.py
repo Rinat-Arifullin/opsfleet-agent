@@ -105,3 +105,39 @@ def test_safe_config_view_excludes_secrets(env):
     assert set(view) == set(config.SAFE_KEYS)
     assert SENTINEL not in repr(view)
     assert SENTINEL not in repr(s)
+
+
+def test_tunables_defaults_from_repo_config(env):
+    s = load_settings(dotenv=False)
+    assert s.small_cell_k == 5
+    assert s.bq_unavailable_retry_delay_s == 2.0
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value"),
+    [
+        ("policy", "small_cell_k", 1),
+        ("policy", "small_cell_k", 1001),
+        ("policy", "small_cell_k", True),
+        ("policy", "small_cell_k", "5"),
+        ("bq", "unavailable_retry_delay_s", -1),
+        ("bq", "unavailable_retry_delay_s", 31),
+        ("bq", "unavailable_retry_delay_s", "2"),
+    ],
+)
+def test_tunables_out_of_range_rejected(env, tmp_path, section, key, value):
+    raw = yaml.safe_load((ROOT / "config" / "models.yaml").read_text())
+    raw[section][key] = value
+    p = tmp_path / "models.yaml"
+    p.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ConfigError, match=f"{section}.{key}"):
+        load_settings(p, dotenv=False)
+
+
+def test_tunables_optional(env, tmp_path):
+    raw = yaml.safe_load((ROOT / "config" / "models.yaml").read_text())
+    del raw["policy"], raw["bq"]
+    p = tmp_path / "models.yaml"
+    p.write_text(yaml.safe_dump(raw))
+    s = load_settings(p, dotenv=False)
+    assert (s.small_cell_k, s.bq_unavailable_retry_delay_s) == (5, 2.0)
