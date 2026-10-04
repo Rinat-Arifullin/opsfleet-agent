@@ -31,7 +31,7 @@ from opsfleet_agent.guards.small_cell import apply_small_cell
 from opsfleet_agent.roles import router as rt
 from opsfleet_agent.store import audit as A
 from opsfleet_agent.store.audit_schema import AUDIT_MARKER_SQL, AUDIT_MIGRATION
-from opsfleet_agent.store.db import MIGRATIONS, checkpoint_truncate, migrate, open_store
+from opsfleet_agent.store.db import MIGRATIONS, checkpoint_truncate, connect, migrate, open_store
 from opsfleet_agent.store.fingerprints import FingerprintStore
 from opsfleet_agent.tools import registry
 from tests.unit.test_differencing import BY_STATE, Clock, ask, plan_for, refused, where
@@ -65,6 +65,13 @@ def conn(db_path: Path) -> sqlite3.Connection:
     c = open_store(db_path)
     yield c
     c.close()
+
+
+def pre_audit_store(path: Path) -> sqlite3.Connection:
+    """A store migrated only to version 1, as it was before the audit migration existed."""
+    c = connect(path)
+    migrate(c, MIGRATIONS[:1])
+    return c
 
 
 @pytest.fixture
@@ -1155,7 +1162,8 @@ def test_audit_store_refuses_to_recreate_dropped_table(conn: sqlite3.Connection)
     assert not A._has_table(conn, "audit_event")
 
 
-def test_audit_store_refuses_populated_store_without_flag(conn: sqlite3.Connection) -> None:
+def test_audit_store_refuses_populated_store_without_flag(tmp_path: Path) -> None:
+    conn = pre_audit_store(tmp_path / "pre.db")
     make_reports(conn, [R1])  # a pre-audit store that already holds user data
     with pytest.raises(A.AuditError, match="populated"):
         A.AuditLog(conn)
@@ -1163,6 +1171,7 @@ def test_audit_store_refuses_populated_store_without_flag(conn: sqlite3.Connecti
     log = A.AuditLog(conn, allow_create_on_populated=True)  # explicit one-off upgrade
     assert log.events() == []
     A.AuditLog(conn)  # afterwards the marker and exact schema are enough
+    conn.close()
 
 
 def test_audit_store_needs_migrated_store(tmp_path: Path) -> None:
@@ -1173,7 +1182,7 @@ def test_audit_store_needs_migrated_store(tmp_path: Path) -> None:
 
 
 def test_audit_store_rejects_foreign_table(tmp_path: Path) -> None:
-    c = open_store(tmp_path / "x.db")
+    c = pre_audit_store(tmp_path / "x.db")
     c.execute("CREATE TABLE audit_event (seq INTEGER PRIMARY KEY, note TEXT)")
     with pytest.raises(A.AuditError):
         A.AuditLog(c)
@@ -1198,7 +1207,7 @@ def test_audit_seq_must_be_positive(log: A.AuditLog, conn: sqlite3.Connection) -
 def test_audit_store_rejects_table_without_seq_check(tmp_path: Path) -> None:
     """M3: the round-2 DDL (no CHECK on seq) is a layout mismatch, not silently accepted."""
     assert "CHECK (seq > 0)" in AUDIT_MIGRATION[0]
-    c = open_store(tmp_path / "old.db")
+    c = pre_audit_store(tmp_path / "old.db")
     old = (AUDIT_MIGRATION[0].replace(" CHECK (seq > 0)", ""), *AUDIT_MIGRATION[1:])
     for stmt in (*old, AUDIT_MARKER_SQL):
         c.execute(stmt)
@@ -1210,8 +1219,9 @@ def test_audit_store_rejects_table_without_seq_check(tmp_path: Path) -> None:
 def test_audit_migration_fold_is_accepted(tmp_path: Path) -> None:
     """L4: the integration fold (AUDIT_MIGRATION + marker as migration 2, imported verbatim
     from the leaf module) produces exactly the layout AuditLog verifies."""
+    assert MIGRATIONS[1] == (2, (*AUDIT_MIGRATION, AUDIT_MARKER_SQL))  # folded verbatim
     c = open_store(tmp_path / "fold.db")
-    assert migrate(c, (*MIGRATIONS, (2, (*AUDIT_MIGRATION, AUDIT_MARKER_SQL)))) == 2
+    assert migrate(c) == 2
     make_reports(c, [R1])  # populated afterwards: the marker means no flag is needed
     log = A.AuditLog(c)
     assert log.record(A.GUARDRAIL_REFUSED, actor_user_id=USER, session_id=SESSION,

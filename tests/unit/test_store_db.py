@@ -18,9 +18,20 @@ def test_secure_delete_on_every_connection(tmp_path):
 def test_migration_v1_and_idempotent(tmp_path):
     p = tmp_path / "app.db"
     c = db.open_store(p)
-    assert db.current_version(c) == 1
-    assert db.migrate(c) == 1
-    assert c.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 1
+    latest = max(v for v, _ in db.MIGRATIONS)
+    assert db.current_version(c) == latest
+    assert db.migrate(c) == latest
+    assert c.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == len(db.MIGRATIONS)
+    c.close()
+
+
+def test_audit_log_is_a_migration(tmp_path):
+    """Iteration 21 fold: the audit table and its marker come from migration 2."""
+    c = db.open_store(tmp_path / "app.db")
+    assert c.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='audit_event'"
+    ).fetchone()
+    assert c.execute("SELECT COUNT(*) FROM meta WHERE key='audit_event.created'").fetchone()[0] == 1
     c.close()
 
 
@@ -32,7 +43,7 @@ def test_write_tx_rolls_back_on_error(tmp_path):
             raise RuntimeError("boom")
     except RuntimeError:
         pass
-    assert c.execute("SELECT COUNT(*) FROM meta").fetchone()[0] == 0
+    assert c.execute("SELECT COUNT(*) FROM meta WHERE key='a'").fetchone()[0] == 0
     c.close()
 
 
@@ -59,7 +70,7 @@ def test_two_concurrent_writers_do_not_corrupt(tmp_path):
     assert not errors
     c = db.connect(p)
     assert c.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-    assert c.execute("SELECT COUNT(*) FROM meta").fetchone()[0] == 100
+    assert c.execute("SELECT COUNT(*) FROM meta WHERE value='x'").fetchone()[0] == 100
     c.close()
 
 

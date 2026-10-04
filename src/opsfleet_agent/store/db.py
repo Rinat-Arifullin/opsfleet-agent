@@ -11,11 +11,15 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
+from opsfleet_agent.store.audit_schema import AUDIT_MARKER_SQL, AUDIT_MIGRATION
+
 BUSY_TIMEOUT_MS = 5000
 
-# Version 1 is the meta/version table only; feature tables arrive in later iterations.
+# Version 1 is the meta/version table; version 2 is the audit log (DDL imported verbatim from
+# store.audit_schema, never re-typed: audit.ensure_schema verifies the exact SQL).
 MIGRATIONS: Sequence[tuple[int, Sequence[str]]] = (
     (1, ("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",)),
+    (2, (*AUDIT_MIGRATION, AUDIT_MARKER_SQL)),
 )
 
 
