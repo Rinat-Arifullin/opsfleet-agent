@@ -8,7 +8,8 @@ logs/
 traces/
 .DS_Store
 .idea/
-evals/results/
+evals/results/*
+!evals/results/.gitkeep
 *.sqlite3
 *.db-wal
 *.db-shm

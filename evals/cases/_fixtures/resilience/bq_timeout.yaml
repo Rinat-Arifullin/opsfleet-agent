@@ -1,0 +1,8 @@
+input: Total revenue by month.
+expect:
+  outcome: degraded
+  max_llm_calls: 10
+fake:
+  outcome: degraded
+  text: The query timed out; here is what I know so far.
+  llm_calls: {gemini-3.1-flash-lite: 3}

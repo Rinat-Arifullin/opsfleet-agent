@@ -1,0 +1,9 @@
+cases:
+  - id: a
+    input: Hi there
+    expect: {label: chitchat}
+    fake: {label: chitchat}
+  - id: b
+    input: "Revenue by country?"
+    expect: {label: data}
+    fake: {label: data}

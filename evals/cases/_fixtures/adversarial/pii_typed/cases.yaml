@@ -1,0 +1,14 @@
+cases:
+  - id: email_positive
+    input: Contact synthetic.user@example.com about the order.
+    expect: {detect: true}
+    fake: {detected: true}
+  - id: phone_positive
+    input: Call 555-0100 for the order.
+    expect: {detect: true}
+    fake: {detected: true}
+  - id: brand_negative
+    tags: [brand]
+    input: Show sales for the brand Calvin Klein.
+    expect: {detect: false}
+    fake: {detected: false}

@@ -1,0 +1,13 @@
+input: Which product category had the most orders last year?
+tags: [quick]
+expect:
+  outcome: answered
+  must_contain: [Jeans]
+  numbers:
+    - {name: orders, value: 1000, tolerance_pct: 1}
+fake:
+  outcome: answered
+  text: Jeans led with 1000 orders.
+  facts: {orders: 1000}
+  llm_calls: {gemini-3.1-flash-lite: 2}
+  bq_queries: 1
