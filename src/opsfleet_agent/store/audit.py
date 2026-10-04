@@ -236,6 +236,7 @@ _HASH_RE: Final = re.compile(r"[0-9a-f]{64}")
 _PY_NAME_RE: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 _SQL_NAME_RE: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 KIND_NAME_RE: Final = re.compile(r"[a-z][a-z0-9_]{0,31}")  # registered deletable kinds
+VERSION_RE: Final = re.compile(r"[A-Za-z0-9._-]{1,48}")  # persona "<file version>-<hash8>"
 
 
 class AuditError(StoreError):
@@ -304,6 +305,41 @@ def _pii_types(name: str, value: object) -> list[str]:
     return sorted({check(name, v) for v in value})
 
 
+MAX_SCOPE_BRANDS: Final = 200
+# C0, DEL, C1, zero-width/bidi marks (U+200B-200F, 202A-202E, 2066-2069), U+2028/2029
+_SCOPE_BAD: Final = r"\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2066-\u2069"
+_SCOPE_BRAND_RE: Final = re.compile(
+    rf"[^{_SCOPE_BAD}\s](?:[^{_SCOPE_BAD}]{{0,98}}[^{_SCOPE_BAD}\s])?"
+)
+SCOPE_INVALID: Final = "invalid"  # old_scope marker: the stored scope was no longer valid
+
+
+def _scope(name: str, value: object) -> str | list[str]:
+    """``scope.changed`` old/new scope: the literal ``"all"`` or a bounded list of brand names."""
+    if value == "all" and isinstance(value, str):
+        return "all"
+    if name.endswith("old_scope") and value == SCOPE_INVALID and isinstance(value, str):
+        return SCOPE_INVALID
+    if not isinstance(value, list | tuple) or not 0 < len(value) <= MAX_SCOPE_BRANDS:
+        raise AuditError(f"{name} must be 'all' or a non-empty brand list")
+    out = []
+    for b in value:
+        if not isinstance(b, str) or _SCOPE_BRAND_RE.fullmatch(b) is None:
+            raise AuditError(f"{name} has a malformed brand")
+        out.append(b)
+    return out
+
+
+# persona.changed reason codes: PersonaInvalid codes plus the change workflow's own (iteration 41)
+PERSONA_REASONS: Final = frozenset(
+    {
+        "forbidden_directive", "too_large", "bad_encoding", "control_characters",
+        "missing_fields", "unknown_fields", "unknown_heading", "missing_headings",
+        "markup_not_allowed", "unreadable", "unchanged", "smoke_failed", "no_history",
+        "write_failed",
+    }
+)  # fmt: skip
+
 DETAIL_FIELDS: Final[Mapping[str, Callable[[str, object], Any]]] = {
     "code": _member(CODES),
     "class": _member(frozenset(c.value for c in BqErrorClass)),
@@ -319,6 +355,13 @@ DETAIL_FIELDS: Final[Mapping[str, Callable[[str, object], Any]]] = {
     "requested": _count,
     "matched": _count,
     "kind": _id(KIND_NAME_RE),
+    "target_user": _id(ACTOR_ID_RE),
+    "old_scope": _scope,
+    "new_scope": _scope,
+    "from_version": _id(VERSION_RE),
+    "to_version": _id(VERSION_RE),
+    "smoke": _member(frozenset({"pass", "fail", "skipped"})),
+    "reason": _member(PERSONA_REASONS),
 }
 
 

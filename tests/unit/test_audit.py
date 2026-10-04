@@ -1535,3 +1535,54 @@ def test_audit_tool_call_fails_the_turn(role: str, call_name: str) -> None:
         v = check_output("Revenue rose 4%.", role=role, label=label, tool_calls=[call_name])
         assert v.allowed is False and output_guard.UNEXPECTED_ACTION in v.codes()
         assert all(call_name not in e.detail for e in v.events)
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["analyst_a", "a", "A.b-c_9", "x" * 64],
+)
+def test_scope_changed_accepts_valid_details(log: A.AuditLog, target: str) -> None:
+    log.record(
+        "scope.changed", actor_user_id="admin_x", session_id=uuid.uuid4().hex,
+        turn_id=uuid.uuid4().hex[:12], outcome="ok",
+        details={"target_user": target, "old_scope": "all", "new_scope": ["Acme", "Levi's"]},
+    )  # fmt: skip
+
+
+@pytest.mark.parametrize("old", ["all", "invalid", ["Calvin Klein"], ["a b", "Levi's"]])
+def test_scope_changed_old_scope_valid(log: A.AuditLog, old: object) -> None:
+    log.record(
+        "scope.changed", actor_user_id="admin_x", session_id=uuid.uuid4().hex,
+        turn_id=uuid.uuid4().hex[:12], outcome="ok",
+        details={"target_user": "u1", "old_scope": old, "new_scope": ["Acme"]},
+    )  # fmt: skip
+
+
+_BAD_BRANDS = [
+    "", " a", "a ", "a\nb", "a\x00", "a\x85b", "a\x9fb", "a\u200bb", "a\u200fb",
+    "a\u202eb", "a\u2066b", "a\u2069b", "a\u2028b", "a\u2029b", "x" * 101, 5, None,
+]  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("target_user", t) for t in ("", "a@b.c", "a b", "-x", "x" * 65, "a\nb", 5)]
+    + [("old_scope", [b]) for b in _BAD_BRANDS]
+    + [("new_scope", [b]) for b in _BAD_BRANDS]
+    + [
+        ("new_scope", "invalid"),  # the marker is for old_scope only
+        ("new_scope", "ALL"),
+        ("old_scope", "INVALID"),
+        ("old_scope", []),
+        ("new_scope", ["a"] * 201),
+        ("old_scope", 5),
+    ],
+)
+def test_scope_changed_rejects_bad_details(log: A.AuditLog, field: str, value: object) -> None:
+    details: dict[str, Any] = {"target_user": "u1", "old_scope": "all", "new_scope": ["Acme"]}
+    details[field] = value
+    with pytest.raises(A.AuditError):
+        log.record(
+            "scope.changed", actor_user_id="admin_x", session_id=uuid.uuid4().hex,
+            turn_id=uuid.uuid4().hex[:12], outcome="ok", details=details,
+        )  # fmt: skip
