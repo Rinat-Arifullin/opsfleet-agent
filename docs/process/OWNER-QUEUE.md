@@ -29,6 +29,10 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | D-9 | PII mask format: AC-08.2/AC-10.7 say `[REDACTED]`, HLD §5.4 says typed tokens (`<EMAIL>`, `<PHONE>`, `<CARD>`, `<ID>`) | HLD typed tokens; ACs to be aligned by you | AC text |
 | D-10 | Street-address regex: HLD §5.4 lists it for the regex scrubber, the plan gives addresses to 8b (NER) | 8b (NER) covers addresses | 8b |
 | D-11 | Top-level parenthesised `(SELECT ...)` in the SQL policy: reject or unwrap? | the iteration-6 implementer decides and documents it; see the 🔴 row for 6 | nothing |
+| D-12 | Input-guard mode (8a review): should *user messages* also mask unseparated 10–12 digit runs and national phone formats (`07700900123`, `8 (495) 010-44-77`)? That would need a stricter `mode` for input than for output | not done; the same rules apply to input and output | nothing (a later addition to 8a/11) |
+| D-13 | AC-08.2 and AC-10.7 say `[REDACTED]`; code uses the HLD §5.4 typed tokens (`<EMAIL>`...). Amend the ACs (the same issue as D-9) | code keeps the typed tokens | AC text |
+| D-14 | Street address for HLD layer 7 (the post-tool result scrubber, `architecture.md` around line 933), which can run without NER: add a simple address regex to 8a, or have layer 7 call the full detector (regex + NER, 8b)? | layer 7 will call the full 8b detector; no address regex in 8a | 8b, 13 |
+| D-15 | AC-08.2 also asks to mask "exact matches of PII values that were present in tool results"; the 8a reviewer found no iteration in `04-plan.md` that owns it | proposed: give it to 12 (output guard) with a named test; to be confirmed by you | 12 |
 
 ## Scope questions (🟡: add now / defer to README "future work" / skip)
 
@@ -42,6 +46,7 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | 1 | done | Skeleton, all deps (spaCy model pinned as wheel URL), `config/models.yaml`, startup check, socket block; 11 tests. Note: the orchestrator's CLI smoke run loaded `.env` and made **one `models.list` call** (a listing, not a generation; no RPD used). It passed, so every configured id, including `gemini-embedding-001`, is listed for your key. That is part of L0; the 4 generation calls stay yours. |
 | 2 | done | Spikes and CI (fb2b4f9). 21 sqlglot quirks documented; the scope rewrite works. Live model/embedding spike prepared as `tests/live/test_spike_models.py`, **not run** (yours, L0). |
 | 3 | done | T2 review APPROVE WITH FIXES; all 7 findings fixed (limiter timeout goes straight to fallback, deadline re-checked, `ForceAnswer(template_only=True)` when even force_answer is out of budget); 30 tests |
-| 4 | review fixes in progress | T2 review (secrets): REQUEST CHANGES. The blocker: the log redaction filter did not cover child loggers and was never installed at startup. The fix also wires `install_log_filter`/`register_secret` into `cli.py` startup now, instead of waiting for iteration 19 |
-| 8a | second T1 review in progress | regex scrubber done, 86 tests; known gaps left to 8b NER (unseparated phones without a keyword, 7-digit local numbers, plain "name at domain.com") |
+| 4 | done | T2 review (secrets) REQUEST CHANGES; all 11 findings fixed (af864fa). Log redaction is installed via the log-record factory at startup in `cli.py`; pattern scrubs for API keys and bearer tokens; SQL literals in traces replaced by `?` (fails closed to a hash); trace and DB files are owner-only; secure-delete byte-residue test; 47 tests |
+| 8a | security fixes in progress | second T1 review: APPROVE WITH FIXES, 0 blockers, 4 MAJOR (international phones with long groups, an incomplete invisible-character fold, line breaks inside values, defanged `[.]`/`[@]` emails). All 4 plus the cheap minors are being fixed before commit. Open owner items are D-12..D-15 |
 | 5, 6 | in progress (T1 opus) | started in parallel; disjoint files |
+| 16, 25, 27 | in progress (T2 sonnet) | started after 4; 16 gets a minimal `cli.py` edit (`--user`, banner); 25 exposes functions only (wired into the command table in 19) |

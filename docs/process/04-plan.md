@@ -228,16 +228,16 @@ The calibration gate (30) reaches the critical path only through the owner's lab
 - `tests/unit/test_tracer.py`
 - `tests/unit/test_store_db.py`
 **Done criteria**:
-- [ ] Only allowlisted fields reach the JSONL. Emails, names and the free text of results never do (`test_trace_redaction`, `test_trace_spans_carry_no_pii`).
-- [ ] With sentinel values, none of these appears in a trace, a log line or an error string (`test_secrets_never_in_traces_logs_or_errors`):
+- [x] Only allowlisted fields reach the JSONL. Emails, names and the free text of results never do (`test_trace_redaction`, `test_trace_spans_carry_no_pii`).
+- [x] With sentinel values, none of these appears in a trace, a log line or an error string (`test_secrets_never_in_traces_logs_or_errors`):
   - the API key;
   - `LANGGRAPH_AES_KEY`;
   - `K_delete`;
   - a delete token and a delete proof.
-- [ ] LLM prompt and response text is not captured unless the dev flag is on (`test_llm_text_capture_off_by_default_in_prod`).
-- [ ] The span types are defined: turn, router, role, llm, tool, guard, sql, delete and error (`test_trace_has_all_span_types`).
-- [ ] `PRAGMA secure_delete` reads back ON on every connection, and two concurrent writers do not corrupt the file (descriptive tests).
-- [ ] [std]
+- [x] LLM prompt and response text is not captured unless the dev flag is on (`test_llm_text_capture_off_by_default_in_prod`).
+- [x] The span types are defined: turn, router, role, llm, tool, guard, sql, delete and error (`test_trace_has_all_span_types`).
+- [x] `PRAGMA secure_delete` reads back ON on every connection, and two concurrent writers do not corrupt the file (descriptive tests).
+- [x] [std]
 **Effort**: M+ (1.5) · **Depends on**: 1 · **Risk**: medium
 
 ## Iteration 5: BigQuery client wrapper and caches 🔴
