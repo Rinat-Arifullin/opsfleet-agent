@@ -351,13 +351,13 @@ The calibration gate (30) reaches the critical path only through the owner's lab
 - `tests/unit/test_small_cell.py`
 - `tests/unit/test_small_cell_redteam.py`
 **Done criteria**:
-- [ ] Named tests: `test_small_cell_group_by_qi`, `test_small_cell_after_brand_scope`, `test_small_cell_counts_in_scope_population`, `test_small_cell_rejects_qi_in_value_aggregate`, `test_small_cell_rejects_window_over_qi`, `test_signup_timestamp_is_qi`, `test_qi_lineage_through_cte`, `test_qi_filter_aggregate_population_check`, `test_user_grain_rejects_qi_projection`, `test_product_only_group_not_suppressed`, `test_top_customers_by_spend_allowed`
-- [ ] ADR-004 cases (b) and (c):
+- [x] Named tests: `test_small_cell_group_by_qi`, `test_small_cell_after_brand_scope`, `test_small_cell_counts_in_scope_population`, `test_small_cell_rejects_qi_in_value_aggregate`, `test_small_cell_rejects_window_over_qi`, `test_signup_timestamp_is_qi`, `test_qi_lineage_through_cte`, `test_qi_filter_aggregate_population_check`, `test_user_grain_rejects_qi_projection`, `test_product_only_group_not_suppressed`, `test_top_customers_by_spend_allowed`
+- [x] ADR-004 cases (b) and (c):
   - a QI filter with a value aggregate gets a population query, which is dry-run, capped and counted in the SQL budget;
   - an unplaceable `HAVING` is rejected with `small_cell_unplaceable`;
   - the other reason codes are `qi_position` and `qi_at_id_grain`.
-- [ ] The count is taken **after** the brand scope (inside `__u` joined to the scoped CTEs).
-- [ ] [std]
+- [x] The count is taken **after** the brand scope (inside `__u` joined to the scoped CTEs).
+- [x] [std]
 **Effort**: L (2) · **Depends on**: 5, 6, 7 · **Risk**: high. **Rollback (M-4):** if a case is red, every aggregate that touches a QI is refused (cross-customer aggregates refused), and the owner is told (🔴).
 
 ## Iteration 10: Differencing guard, session and cross-session 🔴
