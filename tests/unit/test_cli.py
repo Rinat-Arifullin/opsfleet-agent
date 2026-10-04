@@ -131,3 +131,9 @@ def test_terminal_safe_strips_control_sequences() -> None:
     assert not any(ord(c) < 0x20 and c not in "\n\t" for c in out)
     assert not any(0x7F <= ord(c) <= 0x9F for c in out)
     assert terminal_safe("a\tb\nc — ü") == "a\tb\nc — ü"
+
+
+def test_terminal_safe_strips_bidi_and_separators() -> None:
+    from opsfleet_agent.cli import terminal_safe
+
+    assert terminal_safe("a‮b⁦c​d e﻿") == "abcde"

@@ -29,8 +29,11 @@ from opsfleet_agent.session import (
 log = logging.getLogger(__name__)
 
 # C0 (except tab and newline), DEL and C1 controls. ESC is in C0, so every ANSI/OSC
-# sequence loses its introducer and prints as inert text.
-_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+# sequence loses its introducer and prints as inert text. Also bidi controls, zero-width
+# characters and the Unicode line/paragraph separators, which can reorder or hide text.
+_CONTROL = re.compile(
+    "[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]"
+)
 
 
 def terminal_safe(text: str) -> str:
