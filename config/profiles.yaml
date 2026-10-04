@@ -1,0 +1,14 @@
+# Demo profiles (synthetic users only). The brand scope of a session comes ONLY from here.
+# Brands are matched exactly (case-sensitive) against products.brand.
+# `all_products: true` is the only way to get an all-products scope; it is never a default.
+# Brand names are placeholders to be confirmed by a dry-run count query (HLD A-38).
+profiles:
+  - id: analyst_a
+    display_name: Analyst A
+    brands: [Calvin Klein]
+  - id: analyst_b
+    display_name: Analyst B
+    brands: [Carhartt, Levi's]
+  - id: ceo_demo
+    display_name: CEO Demo
+    all_products: true
