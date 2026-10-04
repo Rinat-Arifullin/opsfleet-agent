@@ -445,9 +445,9 @@ The calibration gate (30) reaches the critical path only through the owner's lab
 - `config/profiles.yaml` (synthetic users only)
 - `tests/unit/test_session.py`
 **Done criteria**:
-- [ ] Named tests: `test_scope_from_profile_only`, `test_cli_banner_shows_user_scope_session`, `test_cli_rejects_unknown_user`, `test_profile_scope_validation`, `test_startup_config_check`
-- [ ] The startup check also validates the profiles file and that the app DB, the checkpoint DB and the trace directory are writable (TR-18)
-- [ ] [std]
+- [x] Named tests: `test_scope_from_profile_only`, `test_cli_banner_shows_user_scope_session`, `test_cli_rejects_unknown_user`, `test_profile_scope_validation`, `test_startup_config_check`
+- [x] The startup check also validates the profiles file and that the app DB, the checkpoint DB and the trace directory are writable (TR-18)
+- [x] [std]
 **Effort**: M (1) · **Depends on**: 1, 4 · **Risk**: medium
 
 ## Iteration 20: Calibration set draft (30 synthetic cases) `[PARALLEL OK with any]`
