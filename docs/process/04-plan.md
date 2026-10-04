@@ -803,8 +803,8 @@ The reply that follows is routed to the input guard as a new turn. This takes ov
 - `src/opsfleet_agent/store/feedback.py`
 - `tests/unit/test_feedback.py`
 **Done criteria**:
-- [ ] Named tests: `test_feedback_linked_to_trace`, `test_feedback_comment_redacted`, `test_metrics_summary_includes_feedback`
-- [ ] [std]
+- [x] Named tests: `test_feedback_linked_to_trace`, `test_feedback_comment_redacted`, `test_metrics_summary_includes_feedback`
+- [x] [std]
 **Effort**: M (1) · **Depends on**: 4, 25 · **Risk**: low
 
 ### Wed 2026-10-07, if time allows: the drop-order iterations
