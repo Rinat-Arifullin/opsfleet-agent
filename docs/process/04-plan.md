@@ -369,10 +369,10 @@ The calibration gate (30) reaches the critical path only through the owner's lab
 - `src/opsfleet_agent/store/fingerprints.py`
 - `tests/unit/test_differencing.py`
 **Done criteria**:
-- [ ] Named tests: `test_differencing_guard_session`, `test_differencing_guard_across_sessions`, `test_fingerprint_retention_30_days`, `test_fingerprint_store_has_no_values`
-- [ ] If the fingerprint store is unavailable or a write fails, the query is refused (SEC-12; parametrized in `test_differencing_guard_across_sessions`)
-- [ ] Red-team cases: complement queries (all minus one brand), a stepwise range narrowing, the same pair split across two sessions
-- [ ] [std]
+- [x] Named tests: `test_differencing_guard_session`, `test_differencing_guard_across_sessions`, `test_fingerprint_retention_30_days`, `test_fingerprint_store_has_no_values`
+- [x] If the fingerprint store is unavailable or a write fails, the query is refused (SEC-12; parametrized in `test_differencing_guard_across_sessions`)
+- [x] Red-team cases: complement queries (all minus one brand), a stepwise range narrowing, the same pair split across two sessions
+- [x] [std]
 **Effort**: M+ (1.5) · **Depends on**: 4, 9 · **Risk**: high. **Rollback (M-4):** there is no session-only fallback. If cross-session is red, QI-filtered aggregates are refused, and the owner is told (🔴).
 
 ## Iteration 12: Output guard 🔴
@@ -430,10 +430,10 @@ The calibration gate (30) reaches the critical path only through the owner's lab
 - `tests/unit/test_run_sql_order.py`
 - `tests/unit/test_schema_tool.py`
 **Done criteria**:
-- [ ] Named tests: `test_run_sql_order_matches_hld_5_1`, `test_run_sql_small_cell_and_differencing_before_execute`, `test_schema_tool_hides_pii_columns`, `test_large_result_truncation_flagged`, `test_empty_result_handling`
-- [ ] A spy on the fake client asserts that nothing executes before steps 1-7 pass, and that a memo hit still calls differencing
-- [ ] Mapped BigQuery errors appear in the trace and audit legs as reason codes only (M-1)
-- [ ] [std]
+- [x] Named tests: `test_run_sql_order_matches_hld_5_1`, `test_run_sql_small_cell_and_differencing_before_execute`, `test_schema_tool_hides_pii_columns`, `test_large_result_truncation_flagged`, `test_empty_result_handling`
+- [x] A spy on the fake client asserts that nothing executes before steps 1-7 pass, and that a memo hit still calls differencing
+- [x] Mapped BigQuery errors appear in the trace and audit legs as reason codes only (M-1)
+- [x] [std]
 **Effort**: L (2) · **Depends on**: 5, 6, 7, 8b, 9, 10 · **Risk**: high. **Rollback:** the tool stays unregistered until every named test is green, and the owner is told.
 
 ## Iteration 16: Session start, profiles, scope validation `[PARALLEL OK with 13]`
