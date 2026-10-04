@@ -692,8 +692,8 @@ The reply that follows is routed to the input guard as a new turn. This takes ov
 - `src/opsfleet_agent/obs/metrics.py`
 - `tests/unit/test_trace_viewer.py`
 **Done criteria**:
-- [ ] Named tests: `test_trace_viewer_renders_failed_span`, `test_metrics_summary`
-- [ ] [std]
+- [x] Named tests: `test_trace_viewer_renders_failed_span`, `test_metrics_summary`
+- [x] [std]
 **Effort**: M (1) · **Depends on**: 4 · **Risk**: low
 
 ## Iteration 26: Persona mechanism and hot reload
