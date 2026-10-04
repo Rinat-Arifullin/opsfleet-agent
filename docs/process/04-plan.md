@@ -575,10 +575,10 @@ The checkpointer exists **before** 17 (M-3). Role subgraphs are compiled with `c
 - `src/opsfleet_agent/commands/audit.py`
 - `tests/unit/test_audit.py`
 **Done criteria**:
-- [ ] Named tests: `test_audit_delete_lifecycle`, `test_audit_guardrail_refusal_no_pii`, `test_audit_append_only`, `test_audit_viewer`, `test_audit_unique_pending_action_event`, `test_delete_aborts_when_audit_write_fails`
-- [ ] Refusals from 6, 7, 9, 10, 11 and 12 are recorded with their reason codes
-- [ ] `/audit` is not in any role's tool registry (SEC-17)
-- [ ] [std]
+- [x] Named tests: `test_audit_delete_lifecycle`, `test_audit_guardrail_refusal_no_pii`, `test_audit_append_only`, `test_audit_viewer`, `test_audit_unique_pending_action_event`, `test_delete_aborts_when_audit_write_fails`
+- [x] Refusals from 6, 7, 9, 10, 11 and 12 are recorded with their reason codes
+- [x] `/audit` is not in any role's tool registry (SEC-17)
+- [x] [std]
 **Effort**: M (1) · **Depends on**: 4, 6-12, 16 · **Risk**: high. **Rollback:** the delete tool (22a) is not registered until 21 is green, and the owner is told.
 
 ## Iteration 27: Eval runner, gates, request estimator `[PARALLEL OK with 17-21]`
