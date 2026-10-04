@@ -177,13 +177,13 @@ The calibration gate (30) reaches the critical path only through the owner's lab
   - ruff, offline pytest
   - the `requirements.txt` **sync check**: re-export and `git diff --exit-code` (M-12)
 **Done criteria**:
-- [ ] The model ids in `config/models.yaml` answer on the owner's key (live spike, run once by the owner, 4 calls).
+- [ ] (owner, L0) The model ids in `config/models.yaml` answer on the owner's key (live spike, run once by the owner, 4 calls).
 - [ ] The embedding result is recorded (assumption C):
   - if `gemini-embedding-001` fails on a free key, the G2 amendment goes to the owner the same day;
   - no code depends on the embedding model before 31.
-- [ ] The sqlglot spike documents in a docstring every dialect quirk that 6, 7 and 9 must handle.
-- [ ] BigQuery result handling uses `result.to_arrow()` or row iteration, not `to_dataframe`.
-- [ ] [std]. CI runs ruff, offline pytest and the sync check.
+- [x] The sqlglot spike documents in a docstring every dialect quirk that 6, 7 and 9 must handle.
+- [x] BigQuery result handling uses `result.to_arrow()` or row iteration, not `to_dataframe`.
+- [x] [std]. CI runs ruff, offline pytest and the sync check.
 **Effort**: M (1) · **Depends on**: 1 · **Risk**: medium. If sqlglot cannot express the scope rewrite, 7 stops and escalates (no fallback form; see 7).
 
 ## Iteration 3: TurnBudget, retry wrapper, limiter
