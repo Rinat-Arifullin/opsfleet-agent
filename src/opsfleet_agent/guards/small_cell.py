@@ -7,15 +7,14 @@ returns one of:
 
 * :class:`SmallCellRewrite` (variant a). Every **cell** (see below) that has a ``GROUP BY``
   gets ``HAVING COUNT(DISTINCT <user key>) >= k`` (``k`` a literal integer, ANDed with any
-  existing ``HAVING``), so it is applied before the outer ``ORDER BY`` / ``LIMIT``. The
-  companion ``suppressed_query`` returns one row with one boolean ``has_suppressed_groups``:
-  the same code CTEs, model CTEs and parameters, and the cell copied **without** the
-  model's ``HAVING``, ``QUALIFY``, ``ORDER BY``, ``LIMIT`` and ``OFFSET`` and with only
-  ``HAVING COUNT(DISTINCT <user key>) < k`` (review B2: a model ``HAVING COUNT(*) = n`` or
-  ``SUM(x) > t`` must not turn the companion into a probe of the suppressed cell; and only
-  a boolean, not a count, is released, pending owner O2). A query that references no QI is
-  returned unchanged (``suppressed_query is None``): product-only groups and "top customers
-  by spend".
+  existing ``HAVING``), so it is applied before the outer ``ORDER BY`` / ``LIMIT``. No
+  companion query is produced (re-review N2): any per-query "were groups suppressed?" bit
+  is a one-person oracle, because the model's ``WHERE`` can isolate one customer by QI
+  and add a value threshold, so each query would leak one bit of that customer's value.
+  The answer layer may only add a **generic, static** note that groups with fewer than
+  ``k`` customers are never shown; it must never say whether this particular answer hid
+  any group. A query that references no QI is returned unchanged: product-only groups
+  and "top customers by spend".
 * :class:`PopulationCheck` (variant b). One cell **without** ``GROUP BY`` (a single row over
   a QI-filtered population): ``query`` is ``SELECT COUNT(DISTINCT <user key>) AS population``
   over the cell's own ``FROM``/``JOIN``/``WHERE``, under the same ``WITH`` and parameters.
@@ -105,7 +104,6 @@ __all__ = [
 DEFAULT_K: Final = 5
 MAX_K: Final = 1_000
 _USERS_CTE: Final = CODE_CTE_FOR_TABLE["users"]
-_SUPPRESSED: Final = "has_suppressed_groups"
 _POPULATION: Final = "population"
 
 Path = tuple[str, ...]
@@ -116,11 +114,11 @@ Path = tuple[str, ...]
 
 @dataclass(frozen=True, slots=True)
 class SmallCellRewrite:
-    """Variant (a): run ``query``; ``suppressed_query`` (if any) returns one row with one
-    boolean ``has_suppressed_groups``. ``suppressed_query is None`` means no QI."""
+    """Variant (a): run ``query``. There is no data-dependent companion (re-review N2):
+    the answer layer may only add a generic, static note that groups with fewer than
+    ``k`` customers are hidden, never one that depends on whether any group was hidden."""
 
     query: ScopedQuery
-    suppressed_query: ScopedQuery | None
     k: int
 
     @property
@@ -194,7 +192,7 @@ def apply_small_cell(
         analyzer = _Analyzer(root)
         analyzer.run()
         if not analyzer.references_qi:
-            return SmallCellRewrite(query=scoped, suppressed_query=None, k=k)
+            return SmallCellRewrite(query=scoped, k=k)
         return _Planner(root, analyzer, scoped, scope, k).plan()
     except _Reject as rej:
         return _refuse(rej.rule)
@@ -480,26 +478,6 @@ class _Planner:
         )
 
     def _rewrite(self, cells: list[_Cell]) -> SmallCellRewrite:
-        root_with = self.root.args.get("with_")
-        original_with = root_with.copy() if isinstance(root_with, exp.With) else None
-        parts = []
-        for i, cell in enumerate(cells):
-            copy = self._bare(cell.scope.expression)
-            copy.set("having", None)  # review B2: the model's HAVING must not filter the probe
-            copy.set("qualify", None)
-            self._with_having(copy, self._threshold(cell.key, exp.LT))
-            parts.append(
-                exp.select(exp.Count(this=exp.Star()))
-                .from_(
-                    exp.Subquery(this=copy, alias=exp.TableAlias(this=exp.to_identifier(f"sg{i}")))
-                )
-                .subquery()
-            )
-        total: exp.Expression = parts[0]
-        for part in parts[1:]:
-            total = exp.Add(this=total, expression=part)
-        flag = exp.GT(this=total, expression=exp.Literal.number(0))
-        companion = exp.select(exp.alias_(flag, _SUPPRESSED))
         for cell in cells:
             self._with_having(cell.scope.expression, self._threshold(cell.key, exp.GTE))
         main_sql = self.root.sql(dialect="bigquery", comments=False)
@@ -507,17 +485,8 @@ class _Planner:
             verify_scoped(main_sql, self.scope)
         except ScopeInvariantError as err:
             raise _Unplaceable() from err
-        if original_with is not None:
-            companion.set("with_", original_with)
-            self.root.set("with_", None)  # _wrap must not replace the original WITH
-        sql = companion.sql(dialect="bigquery", comments=False)
-        try:
-            verify_scoped(sql, self.scope)
-        except ScopeInvariantError as err:
-            raise _Unplaceable() from err
         main = ScopedQuery(main_sql, self.scoped.parameters, self.scoped.scope_key)
-        suppressed = ScopedQuery(sql, self.scoped.parameters, self.scoped.scope_key)
-        return SmallCellRewrite(query=main, suppressed_query=suppressed, k=self.k)
+        return SmallCellRewrite(query=main, k=self.k)
 
     def _population_check(self, cell: _Cell) -> PopulationCheck:
         body = self._bare(cell.scope.expression)

@@ -191,12 +191,9 @@ def test_small_cell_group_by_qi() -> None:
     # k is a literal, the parameters are unchanged, and the result is still fully scoped.
     assert result.query.parameters == scoped(sql).parameters
     verify_scoped(result.query.sql, ACME)
-    assert result.suppressed_query is not None
-    verify_scoped(result.suppressed_query.sql, ACME)
-    assert havings(result.suppressed_query.sql) == ["HAVING COUNT(DISTINCT u.id) < 5"]
-    sup_root = sqlglot.parse_one(result.suppressed_query.sql, read="bigquery")
-    assert [p.alias_or_name for p in sup_root.expressions] == ["has_suppressed_groups"]
-    assert sup_root.find(exp.Limit) is None and sup_root.find(exp.Order) is None
+    # Re-review N2: no data-dependent companion ("were groups hidden?") is produced.
+    assert not hasattr(result, "suppressed_query")
+    assert havings(result.query.sql) == ["HAVING COUNT(DISTINCT u.id) >= 5"]
 
 
 def test_small_cell_after_brand_scope() -> None:
@@ -215,12 +212,8 @@ def test_small_cell_counts_in_scope_population() -> None:
     everyone = rewrite(BY_STATE, ALL)
     # Acme: AA has 3 buyers (< k), BB has 5 (= k).
     assert run_local(acme.query) == [("BB", 5)]
-    assert acme.suppressed_query is not None
-    assert run_local(acme.suppressed_query) == [(True,)]
     # Whole population: AA 6 and BB 5 are kept; CC (1 user) is suppressed.
     assert run_local(everyone.query) == [("AA", 6), ("BB", 5)]
-    assert everyone.suppressed_query is not None
-    assert run_local(everyone.suppressed_query) == [(True,)]
     # Without the rule the in-scope AA cell would have been released.
     assert ("AA", 3) in run_local(scoped(BY_STATE, ACME))
 
@@ -289,7 +282,9 @@ def test_signup_timestamp_is_qi() -> None:
     product_only = rewrite(
         f"SELECT DATE(oi.created_at) AS d, COUNT(*) AS n FROM {OI} oi GROUP BY d"
     )
-    assert product_only.suppressed_query is None
+    assert product_only.query == scoped(
+        f"SELECT DATE(oi.created_at) AS d, COUNT(*) AS n FROM {OI} oi GROUP BY d"
+    )
 
 
 def test_qi_lineage_through_cte() -> None:
@@ -374,7 +369,6 @@ def test_product_only_group_not_suppressed() -> None:
     for scope in (ACME, ALL):
         result = rewrite(sql, scope)
         assert result.query == scoped(sql, scope)
-        assert result.suppressed_query is None
         assert havings(result.query.sql) == []
 
 
@@ -385,7 +379,6 @@ def test_top_customers_by_spend_allowed() -> None:
     )
     result = rewrite(sql)
     assert result.query == scoped(sql)
-    assert result.suppressed_query is None
 
 
 # --------------------------------------------------------------------------- ADR-004 layer 5
@@ -397,7 +390,7 @@ def test_adr004_case_b_id_grain_without_qi_allowed() -> None:
         "ORDER BY o.order_id LIMIT 10"
     )
     result = rewrite(sql)
-    assert result.suppressed_query is None
+    assert result.query == scoped(sql)
 
 
 def test_adr004_case_c_unplaceable() -> None:

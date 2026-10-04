@@ -88,6 +88,9 @@ Checks, in order (the first failing check decides the reason code):
       (comparison, ``OR NULL``, ``LIKE``, ``IN``, ``NULLIF``, ``COALESCE``,
       ``SAFE_DIVIDE``, ``GREATEST``, arithmetic, a CTE column computed from a QI...) or a
       QI in ``COUNTIF`` counts an arbitrary sub-population the threshold does not see.
+      Also any QI reference in the ``ON`` condition of a ``LEFT``/``RIGHT``/``FULL``
+      join, at any depth (re-review N1): it narrows the other join side without tainting
+      that side's columns. ``INNER`` joins with a QI in ``ON`` are unaffected.
     * ``small_cell_unplaceable``: an id key (``users.id``, any ``user_id``, any
       ``order_id``, ``order_items.id``, ``inventory_item_id``) compared with a literal in
       a statement that references any QI.
@@ -300,7 +303,8 @@ _HINTS: Final[MappingProxyType[Rule, str]] = MappingProxyType(
         Rule.QI_POSITION: (
             "customer attributes may only be grouped by, used in a filter of an "
             "aggregate, or counted as COUNT(DISTINCT column); do not compare or "
-            "transform them inside an aggregate"
+            "transform them inside an aggregate, and filter on them in WHERE rather "
+            "than in an outer join's ON condition"
         ),
         Rule.QI_AT_ID_GRAIN: (
             "customer attributes cannot be used in a query that returns individual "
@@ -941,6 +945,8 @@ class _Analyzer:
         for node in _iter_nodes(self.root):
             if isinstance(node, exp.Window) and _QI in self._raw_taint(node):
                 raise _Reject(Rule.QI_POSITION)
+            if self._qi_in_outer_join_on(node):
+                raise _Reject(Rule.QI_POSITION)
             if not isinstance(node, _AGGREGATES):
                 continue
             if not isinstance(node, _COUNTING) and _QI in self._raw_taint(node):
@@ -958,6 +964,19 @@ class _Analyzer:
                     raise _Reject(Rule.QI_POSITION)
             if isinstance(node, exp.CountIf) and self._has_id_literal(node):
                 raise _Reject(Rule.QI_POSITION)
+
+    def _qi_in_outer_join_on(self, node: exp.Expression) -> bool:
+        """Re-review N1: a QI in the ``ON`` of a ``LEFT``/``RIGHT``/``FULL`` join narrows
+        the other side (for example down to one person) without tainting that side's
+        columns, so counting or summing them would launder the QI past the cell key.
+        Refused at any depth (chained joins, joins to derived tables); ``INNER`` joins
+        filter both sides like a ``WHERE`` and are unaffected. Code CTEs are exempt."""
+        if not isinstance(node, exp.Join) or not node.side:
+            return False
+        on = node.args.get("on")
+        if on is None or _in_code_cte(node):
+            return False
+        return _QI in self._raw_taint(on)
 
     def _qi_count_allowed(self, node: exp.Expression) -> bool:
         """Review B1: a QI inside ``COUNT`` only as ``COUNT(DISTINCT <bare QI column>)``."""

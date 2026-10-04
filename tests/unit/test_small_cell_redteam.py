@@ -10,7 +10,6 @@ import pytest
 import sqlglot
 from sqlglot import exp
 
-from opsfleet_agent.guards.scope import verify_scoped
 from tests.unit.test_small_cell import (
     ACME,
     ALL,
@@ -34,6 +33,87 @@ EARLY = {"unresolved_value", "function_denied", "unsupported_syntax", "select_st
 JOIN_UOI = f"FROM {OI} oi JOIN {U} u ON u.id = oi.user_id JOIN {P} p ON p.id = oi.product_id"
 
 REFUSED: list[tuple[str, str, set[str]]] = [
+    # Re-review N1: a QI in an outer join's ON narrows the other side without tainting it.
+    (
+        "n1_r1_left_join_on_age_count_joined_user",
+        f"SELECT u.country, COUNT(DISTINCT u.id) AS n, COUNT(DISTINCT oi.user_id) AS m "
+        f"FROM {U} u LEFT JOIN {OI} oi ON oi.user_id = u.id AND u.age = 21 GROUP BY u.country",
+        POSITION,
+    ),
+    (
+        "n1_r2_left_join_on_state_age_count_item",
+        f"SELECT u.country, COUNT(oi.id) AS m FROM {U} u LEFT JOIN {OI} oi "
+        "ON oi.user_id = u.id AND u.state = 'AA' AND u.age = 22 GROUP BY u.country",
+        POSITION,
+    ),
+    (
+        "n1_r3_left_join_on_age_sum_spend",
+        f"SELECT u.country, SUM(oi.sale_price) AS s FROM {U} u LEFT JOIN {OI} oi "
+        "ON oi.user_id = u.id AND u.age = 21 GROUP BY u.country",
+        POSITION,
+    ),
+    (
+        "n1_r4_left_join_on_state",
+        f"SELECT u.country, COUNT(DISTINCT oi.user_id) AS m FROM {U} u LEFT JOIN {OI} oi "
+        "ON oi.user_id = u.id AND u.state = 'AA' GROUP BY u.country",
+        POSITION,
+    ),
+    (
+        "n1_r5_ungrouped",
+        f"SELECT COUNT(DISTINCT oi.user_id) AS m FROM {U} u LEFT JOIN {OI} oi "
+        "ON oi.user_id = u.id AND u.age = 21",
+        POSITION,
+    ),
+    (
+        "n1_x37_chained_left_join",
+        f"SELECT u.country, COUNT(p.id) AS m FROM {U} u LEFT JOIN {OI} oi ON oi.user_id = u.id "
+        f"LEFT JOIN {P} p ON p.id = oi.product_id AND u.age = 21 GROUP BY u.country",
+        POSITION,
+    ),
+    (
+        "n1_x38_full_outer_join",
+        f"SELECT u.country, COUNT(DISTINCT oi.user_id) AS m FROM {U} u FULL OUTER JOIN {OI} oi "
+        "ON oi.user_id = u.id AND u.age = 21 GROUP BY u.country",
+        POSITION,
+    ),
+    (
+        "n1_x39_left_join_derived_table",
+        f"SELECT u.country, COUNT(DISTINCT x.uid) AS m FROM {U} u LEFT JOIN "
+        f"(SELECT oi.user_id AS uid FROM {OI} oi) x ON x.uid = u.id AND u.age BETWEEN 21 AND 21 "
+        "GROUP BY u.country",
+        POSITION,
+    ),
+    (
+        "n1_right_join",
+        f"SELECT u.country, COUNT(DISTINCT oi.user_id) AS m FROM {OI} oi RIGHT JOIN {U} u "
+        "ON oi.user_id = u.id AND u.age = 21 GROUP BY u.country",
+        POSITION,
+    ),
+    (
+        "n1_r6_users_on_nullable_side",
+        f"SELECT oi.status, COUNT(DISTINCT u.id) AS m FROM {OI} oi LEFT JOIN {U} u "
+        "ON u.id = oi.user_id AND u.age = 21 GROUP BY oi.status",
+        POSITION,
+    ),
+    (
+        "n1_r7_users_on_nullable_side_count",
+        f"SELECT oi.status, COUNT(DISTINCT oi.user_id) AS n, COUNT(u.id) AS m FROM {OI} oi "
+        f"LEFT JOIN {U} u ON u.id = oi.user_id AND u.age = 21 GROUP BY oi.status",
+        POSITION,
+    ),
+    (
+        "n1_cte_qi_in_left_join_on",
+        f"WITH t AS (SELECT u.id, u.country, u.age FROM {U} u) SELECT t.country, "
+        f"COUNT(DISTINCT oi.user_id) AS m FROM t LEFT JOIN {OI} oi "
+        "ON oi.user_id = t.id AND t.age = 21 GROUP BY t.country",
+        POSITION,
+    ),
+    (
+        "n1_nested_in_derived_table",
+        f"SELECT s.country, SUM(s.m) AS m FROM (SELECT u.country, oi.id AS m FROM {U} u "
+        f"LEFT JOIN {OI} oi ON oi.user_id = u.id AND u.age = 21) s GROUP BY s.country",
+        POSITION,
+    ),
     # Review B1: a QI expression inside a counting aggregate counts a hidden sub-cell.
     (
         "b1_a11_count_or_null",
@@ -369,7 +449,7 @@ def test_redteam_refused(name: str, sql: str, expected: set[str], scope: object)
     assert outcome(sql, scope) in expected, name  # type: ignore[arg-type]
 
 
-def test_existing_having_is_kept_in_main_and_dropped_from_companion() -> None:
+def test_existing_having_is_kept_and_anded() -> None:
     result = rewrite(
         f"SELECT u.state, COUNT(*) AS n FROM {U} u GROUP BY u.state "
         "HAVING COUNT(*) > 1 OR COUNT(*) < 100"
@@ -377,55 +457,57 @@ def test_existing_having_is_kept_in_main_and_dropped_from_companion() -> None:
     assert havings(result.query.sql) == [
         "HAVING (COUNT(*) > 1 OR COUNT(*) < 100) AND COUNT(DISTINCT u.id) >= 5"
     ]
-    assert result.suppressed_query is not None
-    # Review B2: the model's HAVING never reaches the companion.
-    assert havings(result.suppressed_query.sql) == ["HAVING COUNT(DISTINCT u.id) < 5"]
-
-
-def _companion(sql: str, scope: object = ALL) -> str:
-    result = rewrite(sql, scope)  # type: ignore[arg-type]
-    assert result.suppressed_query is not None
-    verify_scoped(result.suppressed_query.sql, scope)  # type: ignore[arg-type]
-    root = sqlglot.parse_one(result.suppressed_query.sql, read="bigquery")
-    assert [p.alias_or_name for p in root.expressions] == ["has_suppressed_groups"]
-    for node in (exp.Order, exp.Limit, exp.Offset, exp.Qualify):
-        assert root.find(node) is None, node
-    return result.suppressed_query.sql
 
 
 @pytest.mark.parametrize("scope", [ACME, ALL], ids=["acme", "all"])
-def test_b2_f1_having_count_equals_n_probe_is_blind(scope: object) -> None:
-    """Review F1: ``HAVING COUNT(*) = n`` must not make the companion answer "is CC n?"."""
-    base = f"SELECT u.state, COUNT(*) AS n FROM {U} u WHERE u.state = 'CC' GROUP BY u.state "
-    probes = {_companion(base + f"HAVING COUNT(*) = {n}", scope) for n in (1, 2, 3)}
-    assert len(probes) == 1  # identical SQL whatever n the model guesses
-    (sql,) = probes
-    assert "COUNT(*) = " not in sql
+def test_n2_no_suppression_companion_is_produced(scope: object) -> None:
+    """Re-review N2: a per-query "were groups hidden?" bit is a one-person oracle (a QI
+    filter isolates user 1 and a WHERE threshold bisects their spend). The rewrite carries
+    only the thresholded query and k, and its output is the same for every threshold."""
+    fields = {
+        f
+        for f in type(
+            rewrite(f"SELECT u.state, COUNT(*) AS n FROM {U} u GROUP BY 1")
+        ).__dataclass_fields__
+    }
+    assert fields == {"query", "k"}
+    probes = [
+        f"WITH t AS (SELECT u.id, u.state, SUM(oi.sale_price) AS s FROM {OI} oi "
+        f"JOIN {U} u ON u.id = oi.user_id WHERE u.age = 21 GROUP BY u.id, u.state) "
+        f"SELECT state, COUNT(*) AS n FROM t WHERE s > {t} GROUP BY state"
+        for t in (5, 9, 10, 15, 25, 35)
+    ] + [
+        f"SELECT u.state, COUNT(*) AS n FROM {OI} oi JOIN {U} u ON u.id = oi.user_id "
+        f"WHERE u.age = 21 AND oi.sale_price > {t} GROUP BY u.state"
+        for t in (5, 15)
+    ]
+    for sql in probes:
+        result = rewrite(sql, scope)  # type: ignore[arg-type]
+        assert not hasattr(result, "suppressed_query"), sql
+        assert run_local(result.query) == [], sql
 
 
 @pytest.mark.parametrize("scope", [ACME, ALL], ids=["acme", "all"])
-def test_b2_f2_having_sum_threshold_probe_is_blind(scope: object) -> None:
-    """Review F2: ``HAVING SUM(x) > t`` must not binary-search a suppressed cell's sum."""
-    base = (
-        f"SELECT u.state, SUM(oi.sale_price) AS s FROM {OI} oi JOIN {U} u ON u.id = oi.user_id "
-        "WHERE u.age = 21 GROUP BY u.state "
+def test_n1_inner_join_with_qi_in_on_behaves_as_where(scope: object) -> None:
+    """Re-review N1 pin: an INNER join filters both sides, so a QI in its ON is allowed and
+    the cell is thresholded as usual (X36: a one-person cell is suppressed)."""
+    sql = (
+        f"SELECT oi.status, SUM(oi.sale_price) AS s FROM {OI} oi JOIN {U} u "
+        "ON u.id = oi.user_id AND u.age = 21 GROUP BY oi.status"
     )
-    probes = {_companion(base + f"HAVING SUM(oi.sale_price) > {t}", scope) for t in (5, 9, 11)}
-    assert len(probes) == 1
-    (sql,) = probes
-    assert havings(sql)[-1] == "HAVING COUNT(DISTINCT u.id) < 5"
+    result = rewrite(sql, scope)  # type: ignore[arg-type]
+    assert havings(result.query.sql)[-1] == "HAVING COUNT(DISTINCT u.id) >= 5"
+    assert run_local(result.query) == []
+    inner = sql.replace(" JOIN ", " INNER JOIN ")
+    assert havings(rewrite(inner, scope).query.sql)[-1] == "HAVING COUNT(DISTINCT u.id) >= 5"  # type: ignore[arg-type]
 
 
-def test_b2_companion_is_a_boolean_not_a_count() -> None:
-    # Whole population: CC (1 user) is suppressed; filtering to BB (5 users) suppresses none.
-    by_state = f"SELECT u.state, COUNT(*) AS n FROM {U} u GROUP BY u.state"
-    yes = rewrite(by_state, ALL).suppressed_query
-    no = rewrite(
-        f"SELECT u.state, COUNT(*) AS n FROM {U} u WHERE u.state = 'BB' GROUP BY u.state", ALL
-    ).suppressed_query
-    assert yes is not None and no is not None
-    assert run_local(yes) == [(True,)] and run_local(yes)[0][0] is True
-    assert run_local(no) == [(False,)] and run_local(no)[0][0] is False
+def test_n1_outer_join_without_qi_in_on_is_allowed() -> None:
+    sql = (
+        f"SELECT u.state, COUNT(DISTINCT u.id) AS n, COUNT(oi.id) AS items FROM {U} u "
+        f"LEFT JOIN {OI} oi ON oi.user_id = u.id WHERE u.age > 20 GROUP BY u.state"
+    )
+    assert havings(rewrite(sql, ALL).query.sql) == ["HAVING COUNT(DISTINCT u.id) >= 5"]
 
 
 def test_b1_count_distinct_bare_qi_column_is_allowed() -> None:
