@@ -179,10 +179,23 @@ _CONFUSABLES = str.maketrans(
         "Ꭰ": "d", "Ꭱ": "r", "Ꭵ": "i", "Ꭺ": "a", "Ꭻ": "j", "Ꭼ": "e", "Ᏼ": "b", "Ꮯ": "c",
         "Ꮐ": "g", "Ꮋ": "h", "Ꮶ": "k", "Ꮮ": "l", "Ꮇ": "m", "Ꮲ": "p", "Ꮢ": "r", "Ꮪ": "s",
         "Ꮤ": "t", "Ꮩ": "v", "Ꮃ": "w", "Ꮓ": "z", "Ꮑ": "n", "Ꮻ": "o", "Ꮜ": "u", "Ꮍ": "y",
+        # Latin letters with no decomposition
+        "ı": "i", "ɨ": "i", "Ɨ": "i", "ø": "o", "Ø": "o", "ł": "l", "Ł": "l", "đ": "d",
+        "Đ": "d",
     }
 )  # fmt: skip
-_MD_JOINERS = re.compile(r"[*_~`>|]+|(?<=\w)-(?=\w)")
-_SPLIT_WORD = re.compile(r"(?<=\w)\n(?=\w)")
+# Invisible characters that are not format (Cf) characters: braille blank, Hangul fillers.
+_FILLERS: Final = "\u2800\u3164\u115f\u1160\uffa0"
+_AS_SPACE = str.maketrans(dict.fromkeys(_FILLERS, " "))
+_DROP_FILLERS = str.maketrans(dict.fromkeys(_FILLERS))
+_HTML_TAG = re.compile(r"<[^<>\n]{0,64}>")
+_MD_LINK = re.compile(r"\[([^\[\]\n]{0,200})\]\([^()\n]{0,200}\)")  # keep the text only
+_MD_JOINERS = re.compile(r"[*_~`>|\[\]()<]+|(?<=\w)-(?=\w)")
+_SPLIT_WORD = re.compile(r"(?<=\w)[\n\u00b7](?=\w)")  # line break or middle dot in a word
+# Joined copy only: wider separators for letter runs ("i,g,n,o,r,e", "i+g+n", "i'g'n"), and
+# commas, "+" and backslashes between words read as spaces.
+_JOIN_RUN = re.compile(r"(?<!\w)(?:\w[\s.\-_*/|,+'\\]{1,3}){4,}\w(?!\w)")
+_WORD_SEPARATORS = re.compile(r"[,+\\]+")
 
 
 def _base(text: str) -> str:
@@ -203,9 +216,10 @@ def _small_capital(c: str) -> str:
 
 
 def _fold(text: str) -> str:
-    """Scan form: format characters removed, combining marks stripped (NFKD, drop Mn,
-    NFKC), small capitals and look-alike letters folded to Latin, casefolded."""
-    text = unicodedata.normalize("NFKD", text)
+    """Scan form: format characters removed, invisible fillers as spaces, combining marks
+    stripped (NFKD, drop Mn, NFKC), small capitals and look-alike letters folded to Latin,
+    casefolded."""
+    text = unicodedata.normalize("NFKD", text.translate(_AS_SPACE))
     text = "".join(_small_capital(c) for c in text if unicodedata.category(c) not in ("Mn", "Cf"))
     text = unicodedata.normalize("NFKC", text).translate(_CONFUSABLES)
     return text.casefold().translate(_HOMOGLYPHS)
@@ -217,16 +231,24 @@ def _per_line(text: str) -> str:
 
 
 def _scan_copies(text: str) -> tuple[str, ...]:
-    """Scan copies: plain, markdown/joiner symbols as spaces, and dotted or letter-spaced
-    words and words split across lines rejoined; each also with leetspeak folded."""
-    lines = _per_line(_fold(text))
-    md = _per_line(_MD_JOINERS.sub(" ", lines))
-    joined = _per_line(_SPACED_RUN.sub(_join_run, _SPLIT_WORD.sub("", md)))
+    """Scan copies: plain, markdown/HTML/joiner symbols as spaces, and dotted or
+    letter-spaced words and words split across lines rejoined; each also with leetspeak
+    folded. Text with invisible fillers is also scanned with the fillers removed, so a
+    filler inside a word ("ig\u2800nore") is caught as well as one used as a space."""
+    variants = [text]
+    if any(c in _FILLERS for c in text):
+        variants.append(text.translate(_DROP_FILLERS))
     out: list[str] = []
-    for c in (lines, md, joined):
-        for v in (c, c.translate(_LEET)):
-            if v not in out:
-                out.append(v)
+    for variant in variants:
+        lines = _per_line(_fold(variant))
+        md = _HTML_TAG.sub(" ", _MD_LINK.sub(r" \1 ", lines))
+        md = _per_line(_MD_JOINERS.sub(" ", md))
+        joined = _JOIN_RUN.sub(_join_run, _SPLIT_WORD.sub("", md))
+        joined = _per_line(_WORD_SEPARATORS.sub(" ", joined))
+        for c in (lines, md, joined):
+            for v in (c, c.translate(_LEET)):
+                if v not in out:
+                    out.append(v)
     return tuple(out)
 
 
@@ -278,7 +300,8 @@ _STRONG_INJECTION = tuple(
         r"<\s*/?\s*(?:system|assistant|developer|instructions?|im_start|im_end)\b[^>]*>",
         r"\[/?\s*(?:inst|system|sys)\s*\]",
         r"<<\s*/?\s*sys\s*>>",
-        r"(?:^|\n)\s*#{0,6}\s*(?:system|developer|assistant)\s*(?:message|prompt)?\s*:",
+        r"(?:^|\n)\s*#{0,6}\s*(?:(?:[-*+]|\d{1,3}[.)])\s*)?(?:system|developer|assistant)\s*"
+        r"(?:message|prompt)?\s*:",
         r"\b(?:new|updated|revised|real|actual|override)\s+(?:system\s+)?(?:instructions?|"
         r"rules|prompt|directives?)\s*:",
     )
