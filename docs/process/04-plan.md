@@ -481,10 +481,10 @@ The checkpointer exists **before** 17 (M-3). Role subgraphs are compiled with `c
 - `prompts/analyst.md`
 - `tests/unit/test_graph.py`
 **Done criteria**:
-- [ ] Named tests: `test_self_correction_bounded`, `test_cli_survives_tool_failure`, `test_malformed_tool_call_handled`, `test_role_tool_isolation`, `test_no_traceback_reaches_user`, `test_grounding_accepts_prior_turn_ledger`, `test_grounding_rejects_unknown_number`, `test_grounding_rounding`, `test_grounding_derived_ops`, `test_grounding_unmatched_labelled`
-- [ ] `test_user_typed_email_not_persisted` passes against the real checkpointer
-- [ ] The safety preamble is code-built and placed before any persona text (asserted again in 26)
-- [ ] [std]
+- [x] Named tests: `test_self_correction_bounded`, `test_cli_survives_tool_failure`, `test_malformed_tool_call_handled`, `test_role_tool_isolation`, `test_no_traceback_reaches_user`, `test_grounding_accepts_prior_turn_ledger`, `test_grounding_rejects_unknown_number`, `test_grounding_rounding`, `test_grounding_derived_ops`, `test_grounding_unmatched_labelled`
+- [x] `test_user_typed_email_not_persisted` passes against the real checkpointer
+- [x] The safety preamble is code-built and placed before any persona text (asserted again in 26)
+- [x] [std]
 **Effort**: L+ (2.5) · **Depends on**: 3, 11, 12, 13, 16 · **Risk**: medium
 
 ## Iteration 14b: Crash resume and budget persistence 🔴
