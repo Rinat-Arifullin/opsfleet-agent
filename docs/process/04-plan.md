@@ -251,16 +251,16 @@ The calibration gate (30) reaches the critical path only through the owner's lab
 - `src/opsfleet_agent/bq/schema.py`: introspection of the 4 allowed tables only
 - `tests/unit/test_bq_client.py` (fake client)
 **Done criteria**:
-- [ ] A dry run over the per-query cap (1 GB) or over the remaining session cap (10 GB) never executes (`test_cost_cap_rejects_before_execution`, `test_session_budget`).
-- [ ] Every executed job carries `maximum_bytes_billed`, `job_timeout_ms` 60 s and labels (`test_job_config_sets_max_bytes_billed`).
-- [ ] Raw BigQuery error text never reaches the LLM, the trace or the audit record. Only the mapped message and reason code do (`test_bq_error_is_mapped_not_forwarded`).
-- [ ] Memo key and invalidation:
+- [x] A dry run over the per-query cap (1 GB) or over the remaining session cap (10 GB) never executes (`test_cost_cap_rejects_before_execution`, `test_session_budget`).
+- [x] Every executed job carries `maximum_bytes_billed`, `job_timeout_ms` 60 s and labels (`test_job_config_sets_max_bytes_billed`).
+- [x] Raw BigQuery error text never reaches the LLM, the trace or the audit record. Only the mapped message and reason code do (`test_bq_error_is_mapped_not_forwarded`).
+- [x] Memo key and invalidation:
   - the memo key is `(sql_hash, scope_key, refresh_date)`, never a table modified time;
   - a changed refresh date misses (`test_memo_misses_after_refresh_date_change`);
   - two scopes never share an entry (`test_result_cache_key_includes_scope`, `test_cache_key_includes_scope`);
   - a repeat inside the window is reused (`test_repeated_query_reuses_result`).
-- [ ] A memo hit is returned to `run_sql` **before** the differencing step, so differencing still runs on a hit (asserted again in 13).
-- [ ] [std]
+- [x] A memo hit is returned to `run_sql` **before** the differencing step, so differencing still runs on a hit (asserted again in 13).
+- [x] [std]
 **Effort**: M+ (1.5) · **Depends on**: 1, 3 · **Risk**: high (cost). **Rollback:** the wrapper is the only path to BigQuery. If a cap test is red, `run_sql` is not wired (13 does not start), and the owner is told.
 
 ## Iteration 6: SQL policy validator 🔴
