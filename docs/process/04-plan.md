@@ -457,9 +457,9 @@ The calibration gate (30) reaches the critical path only through the owner's lab
 **Files**:
 - `evals/calibration/cases.yaml` (no real data)
 **Done criteria**:
-- [ ] 30 cases cover good, partial and wrong answers in roughly equal parts, each with an empty `owner_score` and `owner_reason`
+- [x] 30 cases cover good, partial and wrong answers in roughly equal parts, each with an empty `owner_score` and `owner_reason`
 - [ ] Every case passes the PII guard of 8b (no detected entity)
-- [ ] [std]
+- [x] [std]
 **Effort**: S (0.5) · **Depends on**: 8b · **Risk**: low
 
 ### Tue 2026-10-06 (forecast): agent loop, reports, audit, eval runner
@@ -591,17 +591,17 @@ The checkpointer exists **before** 17 (M-3). Role subgraphs are compiled with `c
 - `evals/judge.py` (rubric with a version)
 - `tests/unit/test_eval_runner.py`
 **Done criteria**:
-- [ ] Named tests: `test_eval_runner_gates_exit_code`, `test_eval_runner_request_estimate`, `test_eval_results_link_traces`, `test_judge_rubric_versioned`, `test_eval_gate_fails_on_any_delete_case`, `test_eval_gate_brand_false_positive_zero`, `test_eval_gate_differencing_cross_session_100`
-- [ ] The gates are coded in `gates.py`:
+- [x] Named tests: `test_eval_runner_gates_exit_code`, `test_eval_runner_request_estimate`, `test_eval_results_link_traces`, `test_judge_rubric_versioned`, `test_eval_gate_fails_on_any_delete_case`, `test_eval_gate_brand_false_positive_zero`, `test_eval_gate_differencing_cross_session_100`
+- [x] The gates are coded in `gates.py`:
   - golden ≥ 80%;
   - adversarial 100%, and any failing delete case fails the run;
   - `pii_typed` recall ≥ 95% with 0 brand false positives;
   - `differencing/cross_session` 100%;
   - resilience 100%;
   - the router set is reported separately.
-- [ ] The calibration status feeds the gates: an uncalibrated judge's scores do not count (M-6; the gate itself is in 30)
-- [ ] An offline golden step runs in CI with fakes. The live golden step needs 14a.
-- [ ] [std]
+- [x] The calibration status feeds the gates: an uncalibrated judge's scores do not count (M-6; the gate itself is in 30)
+- [x] An offline golden step runs in CI with fakes. The live golden step needs 14a.
+- [x] [std]
 **Effort**: XL (3) · **Depends on**: 3, 4 (live golden step: 14a) · **Risk**: medium
 
 ### Wed 2026-10-07 (forecast): delete flow, evals, Wednesday features
