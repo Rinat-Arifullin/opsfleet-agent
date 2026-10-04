@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Python 3.12
+        run: uv python install 3.12
+      - name: Install (locked)
+        run: uv sync --frozen
+      - name: Lint
+        run: uv run ruff check .
+      - name: Offline tests (live tests are deselected)
+        run: uv run pytest -q
+      - name: requirements.txt is in sync with uv.lock
+        run: |
+          uv export --no-hashes --no-emit-project --format requirements-txt > requirements.txt
+          git diff --exit-code requirements.txt
