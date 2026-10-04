@@ -1,0 +1,253 @@
+# Judge calibration set (iteration 20, input to iteration 30 / HLD 6.6, AC-29.6).
+# 30 SYNTHETIC cases over thelook_ecommerce at aggregate level. All numbers are
+# clearly illustrative, not real query results. No personal data.
+#
+# Owner labelling scale (same rubric as the judge, HLD 6.6): owner_score is an
+# integer 1-5 for the candidate answer judged against the reference note and the
+# question (relevance, grounding in the reference, actionability, structure, tone).
+#   5 = fully correct and well put      4 = correct, minor flaws   (>= 4 is PASS)
+#   3 = partly correct, misses or blurs something important
+#   2 = mostly wrong or unsupported     1 = wrong / off-topic / contradicts reference
+# The gate compares judge and owner on pass/fail (score >= 4), needs >= 80% agreement.
+# owner_reason: one short sentence. `kind` is the drafter's hint only; the owner
+# label decides. Do not change ids or answers; fill owner_score and owner_reason.
+cases:
+  - id: cal-01
+    kind: good
+    question: "Which product category had the highest revenue last year?"
+    candidate_answer: "Outerwear and Coats had the highest revenue, at about 1.9 million dollars, ahead of Jeans in second place. The gap to second place is roughly 10 percent."
+    reference_note: "Top category is Outerwear and Coats (illustrative 1.9M), second is Jeans, gap about 10 percent."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-02
+    kind: good
+    question: "How many orders were placed per month in the last six months?"
+    candidate_answer: "Order volume rose steadily from about 8,000 orders in the earliest month to about 11,000 in the latest month, with a small dip in the third month."
+    reference_note: "Monthly orders grow from roughly 8k to 11k with one small dip in month three."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-03
+    kind: good
+    question: "What share of order items were returned?"
+    candidate_answer: "About 10 percent of order items have a Returned status. Cancelled items are a separate status and are not counted here."
+    reference_note: "Returned share about 10 percent; cancelled is separate."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-04
+    kind: good
+    question: "Which country has the most users?"
+    candidate_answer: "China has the most users, followed by the United States and Brazil. These three countries together hold most of the user base."
+    reference_note: "Top three countries: China, United States, Brazil (illustrative order)."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-05
+    kind: good
+    question: "What is the average order value by department?"
+    candidate_answer: "Average order value is higher in the Men department than in Women: about 85 dollars versus 78 dollars in this illustration. The difference is modest."
+    reference_note: "Men about 85, Women about 78 (illustrative); Men slightly higher."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-06
+    kind: good
+    question: "Which five brands sell the most items?"
+    candidate_answer: "The top five brands by items sold are shown below with counts; the leader sells about twice as many items as the fifth. Brands are grouped by the brand field, so spelling variants count separately."
+    reference_note: "Top five brands by item count; leader about 2x the fifth; brand spelling variants not merged."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-07
+    kind: good
+    question: "How many users registered each year?"
+    candidate_answer: "Registrations grew each year, from about 5,000 in the first year to about 20,000 in the most recent full year. The current year is partial and is excluded."
+    reference_note: "Yearly registrations rise 5k to 20k; the partial current year is excluded."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-08
+    kind: good
+    question: "What is the most common order status?"
+    candidate_answer: "Complete is the most common order status, followed by Shipped and Processing. Cancelled and Returned orders are the smallest groups."
+    reference_note: "Complete is most common, then Shipped, Processing; Cancelled and Returned smallest."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-09
+    kind: good
+    question: "Is revenue higher on weekends than weekdays?"
+    candidate_answer: "Per-day revenue is similar: weekends are about 3 percent lower per day than weekdays, which is too small to call a real pattern."
+    reference_note: "Weekend per-day revenue about 3 percent lower; not meaningful."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-10
+    kind: good
+    question: "Which department has the largest number of products?"
+    candidate_answer: "Women has the largest number of distinct products, with Men second. Counts are per product row in the catalog, not per sold item."
+    reference_note: "Women largest, Men second; counts are catalog rows."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-11
+    kind: partial
+    question: "Which product category had the highest revenue last year?"
+    candidate_answer: "Outerwear and Coats had the highest revenue. It is clearly far ahead of everything else and will keep growing."
+    reference_note: "Top is Outerwear and Coats but only about 10 percent ahead of Jeans; no growth data was queried."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-12
+    kind: partial
+    question: "How many orders were placed per month in the last six months?"
+    candidate_answer: "Orders grew over the last six months, from a lower level to a higher level."
+    reference_note: "Orders rise from roughly 8k to 11k with a dip in month three; the answer gives no figures and misses the dip."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-13
+    kind: partial
+    question: "What share of order items were returned?"
+    candidate_answer: "About 10 percent of items were returned or cancelled."
+    reference_note: "Returned alone is about 10 percent; cancelled is a separate status, so merging them overstates the answer."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-14
+    kind: partial
+    question: "Which country has the most users?"
+    candidate_answer: "China has the most users."
+    reference_note: "Correct leader is China; asked for one country, but the answer omits that the top three are close and gives no count."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-15
+    kind: partial
+    question: "What is the average order value by department?"
+    candidate_answer: "Men has a higher average order value than Women."
+    reference_note: "Men about 85, Women about 78; direction is right but no figures and no note that the gap is modest."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-16
+    kind: partial
+    question: "Which five brands sell the most items?"
+    candidate_answer: "The top brands are the well known ones in the catalog, with the leader selling a lot more than the rest."
+    reference_note: "Needs five named brands with counts; the answer names none and the 'a lot more' claim is vague (about 2x the fifth)."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-17
+    kind: partial
+    question: "How many users registered each year?"
+    candidate_answer: "Registrations grew every year and reached about 20,000 in the latest year, including the current year to date."
+    reference_note: "Latest full year is about 20k; the current year is partial and should be excluded or flagged."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-18
+    kind: partial
+    question: "What is the most common order status?"
+    candidate_answer: "Complete is the most common status. Processing is second."
+    reference_note: "Complete first, but Shipped is second, not Processing."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-19
+    kind: partial
+    question: "Is revenue higher on weekends than weekdays?"
+    candidate_answer: "Weekends are a bit lower. Marketing should shift budget to weekdays."
+    reference_note: "Weekend per-day revenue only about 3 percent lower and not meaningful; the recommendation is not supported."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-20
+    kind: partial
+    question: "Which department has the largest number of products?"
+    candidate_answer: "Women has the most products, since many items are sold there."
+    reference_note: "Women has the most catalog rows; the justification confuses sold items with catalog size."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-21
+    kind: wrong
+    question: "Which product category had the highest revenue last year?"
+    candidate_answer: "Jeans had the highest revenue, ahead of Outerwear and Coats."
+    reference_note: "Outerwear and Coats is first, Jeans second; the answer reverses them."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-22
+    kind: wrong
+    question: "How many orders were placed per month in the last six months?"
+    candidate_answer: "Orders fell sharply every month, from about 11,000 to about 8,000."
+    reference_note: "Orders rose from roughly 8k to 11k; the answer reverses the trend."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-23
+    kind: wrong
+    question: "What share of order items were returned?"
+    candidate_answer: "About 40 percent of order items were returned, which is a serious problem."
+    reference_note: "Returned share is about 10 percent; 40 percent is unsupported and alarmist."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-24
+    kind: wrong
+    question: "Which country has the most users?"
+    candidate_answer: "The United States has the most users by a wide margin."
+    reference_note: "China leads; the United States is second and not by a wide margin."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-25
+    kind: wrong
+    question: "What is the average order value by department?"
+    candidate_answer: "Women has the higher average order value, about 120 dollars, versus 60 dollars for Men."
+    reference_note: "Men about 85, Women about 78 (illustrative); the direction and magnitudes are wrong."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-26
+    kind: wrong
+    question: "Which five brands sell the most items?"
+    candidate_answer: "I cannot show brand sales because that data is not available in the dataset."
+    reference_note: "Brand is a field in the products table and brand sales are answerable; the refusal is wrong."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-27
+    kind: wrong
+    question: "How many users registered each year?"
+    candidate_answer: "Registrations have been flat at about 10,000 per year."
+    reference_note: "Registrations grew from about 5k to 20k per year; 'flat' contradicts the reference."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-28
+    kind: wrong
+    question: "What is the most common order status?"
+    candidate_answer: "Cancelled is the most common order status, so fulfilment is failing."
+    reference_note: "Complete is most common; Cancelled is among the smallest groups."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-29
+    kind: wrong
+    question: "Is revenue higher on weekends than weekdays?"
+    candidate_answer: "Weekend revenue is double weekday revenue, so run weekend promotions."
+    reference_note: "Weekend per-day revenue is about 3 percent lower; there is no doubling."
+    owner_score: null
+    owner_reason: ""
+
+  - id: cal-30
+    kind: wrong
+    question: "Which department has the largest number of products?"
+    candidate_answer: "Men has the largest number of products, with Women a distant second."
+    reference_note: "Women is largest and Men is second; 'distant' is wrong."
+    owner_score: null
+    owner_reason: ""
