@@ -862,3 +862,23 @@ def test_stale_refresh_date_older_than_max_age_fails_closed():
     with pytest.raises(SchemaUnavailable) as ei:
         cache.refresh_date()
     assert ei.value.error_class is BqErrorClass.UNAVAILABLE
+
+
+def test_same_sql_under_two_brand_scopes_gets_distinct_keys() -> None:
+    """Brands are a bound parameter, so the scoped SQL text is identical across brand scopes;
+    only ``scope_key`` separates their memo and result-cache entries."""
+    from opsfleet_agent.guards.scope import ProductScope, ScopedQuery, apply_scope
+
+    a_scope = ProductScope.for_brands(["Brand A"])
+    b_scope = ProductScope.for_brands(["Brand B"])
+    a = apply_scope("SELECT brand FROM products", a_scope)
+    b = apply_scope("SELECT brand FROM products", b_scope)
+    assert isinstance(a, ScopedQuery) and isinstance(b, ScopedQuery)
+    assert a.sql == b.sql and a.scope_key != b.scope_key
+    day = date(2026, 1, 1)
+    assert make_memo_key(a.sql, a.scope_key, day, user_id="u1") != make_memo_key(
+        b.sql, b.scope_key, day, user_id="u1"
+    )
+    assert result_cache_key(a.sql, a.scope_key, day) != result_cache_key(
+        b.sql, b.scope_key, day
+    )

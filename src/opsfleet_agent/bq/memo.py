@@ -2,9 +2,11 @@
 
 Key = ``(sql_hash, scope_key, refresh_date, user_id)``:
 
-* ``sql_hash`` is taken over the SQL *after* the scope rewrite with ``as_of`` pinned per turn,
-  so the hash already encodes the scope's filters; ``scope_key`` is still part of every key so
-  two scopes can never share an entry even if their rewritten SQL happened to coincide.
+* ``sql_hash`` is taken over the SQL *after* the scope rewrite with ``as_of`` pinned per turn.
+  It does **not** encode the brand scope: brands are bound as the ``@scope_brands`` query
+  parameter, so the rewritten SQL text is identical for every brand scope. ``scope_key`` is
+  therefore required in every key precisely so that two brand scopes running the same SQL
+  text can never share an entry.
 * ``refresh_date`` is the dataset's daily refresh *date* (``schema.TableMetadataCache``),
   never a table modified time: ``make_memo_key`` rejects a ``datetime``. A new refresh date
   is a different key, so it misses.
