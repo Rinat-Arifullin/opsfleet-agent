@@ -705,8 +705,8 @@ The reply that follows is routed to the input guard as a new turn. This takes ov
 - `prompts/persona.md`
 - `tests/unit/test_persona.py`
 **Done criteria**:
-- [ ] Named tests: `test_persona_version_in_trace`, `test_persona_invalid_keeps_last_valid`, `test_persona_hot_reload`, `test_persona_size_limit`, `test_persona_cannot_override_rules`, `test_persona_cannot_remove_sections`, `test_safety_preamble_precedes_persona`
-- [ ] [std]
+- [x] Named tests: `test_persona_version_in_trace`, `test_persona_invalid_keeps_last_valid`, `test_persona_hot_reload`, `test_persona_size_limit`, `test_persona_cannot_override_rules`, `test_persona_cannot_remove_sections`, `test_safety_preamble_precedes_persona`
+- [x] [std]
 **Effort**: M (1) · **Depends on**: 3, 25 · **Risk**: medium
 
 ## Iteration 28a: Adversarial suites: SQL, PII, scope, injection, off-topic
