@@ -104,6 +104,8 @@ __all__ = [
     "OutputEvent",
     "OutputVerdict",
     "check_output",
+    "decode_for_display",
+    "normalise_for_display",
 ]
 
 logger = logging.getLogger(__name__)
@@ -563,6 +565,19 @@ def _decode(text: str) -> tuple[str, bool, int]:
 
 
 def _normalise(text: str) -> str:
+    return _decode(text)[0]
+
+
+def decode_for_display(text: str) -> tuple[str, bool]:
+    """The text the user will see (entities, Markdown escapes, NFKC, invisibles) and whether the
+    decoding reached a fixpoint. Other checks (grounding, sentinels) must read this, not the raw
+    draft: "5\\,987" and "5<ZWSP>987" are one number once displayed."""
+    text, stable, _ = _decode(text)
+    return text, stable
+
+
+def normalise_for_display(text: str) -> str:
+    """:func:`decode_for_display` without the stability flag."""
     return _decode(text)[0]
 
 

@@ -1084,10 +1084,11 @@ def test_role_tool_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
 
     from opsfleet_agent.config import ROLES
 
-    assert RUN_SQL_ENABLED is False  # until the owner passes the iteration 13 gate
+    assert RUN_SQL_ENABLED is True  # enabled by iteration 14a (graph wiring)
     assert list(inspect.signature(tools_for).parameters) == ["role"]  # no override argument
+    monkeypatch.setattr(registry, "RUN_SQL_ENABLED", False)  # the only switch
     disabled = {role: tools_for(role) for role in ROLES}
-    monkeypatch.setattr(registry, "RUN_SQL_ENABLED", True)  # the only switch
+    monkeypatch.setattr(registry, "RUN_SQL_ENABLED", True)
     enabled = {role: tools_for(role) for role in ROLES}
     for role in ROLES:
         tools = disabled[role]

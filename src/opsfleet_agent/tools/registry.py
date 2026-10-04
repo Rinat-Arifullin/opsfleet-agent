@@ -1,8 +1,8 @@
 """Per-role tool allowlist (HLD §4.2, §6). Default deny: an unknown role gets no tools.
 
-``run_sql`` is disabled until the owner passes the iteration 13 🔴 gate (rollback rule: it
-stays unregistered unless every named test is green and the gate is approved). Flip
-``RUN_SQL_ENABLED`` only as part of that approval.
+``run_sql`` is enabled from iteration 14a, when the graph wires it with the per-turn budget and
+the output guard. ``RUN_SQL_ENABLED`` is the single kill switch: set it to False to take
+``run_sql`` away from every role at once (rollback rule). It has no per-call override.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ LIBRARY_TOOLS: Final = frozenset(  # HLD §4.2 role table
     }
 )
 
-RUN_SQL_ENABLED: Final = False
+RUN_SQL_ENABLED: Final = True
 
 TOOLS_BY_ROLE: Final[Mapping[str, frozenset[str]]] = {
     "quick_analyst": READ_TOOLS | {RUN_SQL},

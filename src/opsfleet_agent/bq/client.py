@@ -64,7 +64,12 @@ class WarehouseJob(Protocol):
 
 
 class WarehouseClient(Protocol):
-    """The subset of ``google.cloud.bigquery.Client`` we use; tests pass a fake."""
+    """The subset of ``google.cloud.bigquery.Client`` we use; tests pass a fake.
+
+    Rows reach run_sql and the differencing guard only through ``BigQueryRunner``, which MUST set
+    ``QueryResult.truncated`` whenever rows are cut by any cap (a cap without the flag would
+    reopen R5-H1).
+    """
 
     def query(self, query: str, job_config: Any = ..., **kwargs: Any) -> WarehouseJob: ...
 
