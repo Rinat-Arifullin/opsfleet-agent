@@ -42,3 +42,12 @@ def test_no_pii_patterns() -> None:
         assert not EMAIL.search(text), c["id"]
         assert not PHONE.search(text), c["id"]
         assert not DIGIT_RUN.search(text), c["id"]
+
+
+def test_no_entity_detected_by_typed_pii_guard() -> None:
+    from opsfleet_agent.guards.pii import PiiDetector, build_allowlist
+
+    detector = PiiDetector(build_allowlist())
+    for c in _cases():
+        for field in ("question", "candidate_answer", "reference_note"):
+            assert detector.detect(c[field]) == [], (c["id"], field)

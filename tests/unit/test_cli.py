@@ -10,6 +10,8 @@ from .test_config import SENTINEL, all_models
 @pytest.fixture(autouse=True)
 def _data_dir(monkeypatch, tmp_path):
     monkeypatch.setenv("OPSFLEET_DATA_DIR", str(tmp_path / "data"))
+    # main() installs a process-wide PII detector; keep it from leaking into other tests.
+    monkeypatch.setattr("opsfleet_agent.guards.pii._default", None)
 
 
 def _env(monkeypatch):
@@ -92,3 +94,27 @@ def test_cli_rejects_unknown_user(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "nobody" in err and "analyst_a" in err and "ceo_demo" in err
     assert "Traceback" not in err
+
+
+def test_cli_refuses_to_start_without_pii_model(monkeypatch, capsys):
+    from opsfleet_agent.guards import pii
+
+    _env(monkeypatch)
+
+    def missing() -> None:
+        raise pii.PiiModelMissing("spaCy model 'en_core_web_sm' is not installed")
+
+    monkeypatch.setattr(cli, "ensure_model_available", missing)
+    assert cli.main(["--user", "analyst_a"], lister=lambda: all_models()) == 2
+    assert "en_core_web_sm" in capsys.readouterr().err
+
+
+def test_cli_installs_detector_with_profile_brands(monkeypatch):
+    from opsfleet_agent.guards import pii
+
+    _env(monkeypatch)
+    monkeypatch.setattr("builtins.input", lambda _="": "exit")
+    assert cli.main(["--user", "analyst_a"], lister=lambda: all_models()) == 0
+    detector = pii.default_detector()
+    brands = {b for p in cli.load_profiles().values() for b in p.brands}
+    assert brands and all(detector.allowlist.covers(b, 0, len(b)) for b in brands)

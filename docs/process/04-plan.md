@@ -332,11 +332,11 @@ The calibration gate (30) reaches the critical path only through the owner's lab
 - `tests/unit/test_pii_typed_gate.py`: offline fixture gate
 - `evals/cases/adversarial/pii_typed/*.yaml`: the first 40 synthetic cases, including `adversarial/pii_typed/brand_false_positive`; no real people
 **Done criteria**:
-- [ ] Named tests: `test_pii_detector_missing_model_fails_startup`, `test_brand_allowlist_not_masked`, `test_typed_pii_ner_masks_person_and_address`, `test_output_guard_uses_ner_detector`
-- [ ] On the fixture, code computes recall ≥ 95% and brand false positives = 0. This gate is **provisional** until 28a extends the set (SEC-20).
-- [ ] Red-team cases: a name in free text, a name split across rows, a brand that looks like a surname
-- [ ] The pinned model installs from `uv sync`. The pip-path instruction is written down for 43.
-- [ ] [std]. The offline test run stays under 60 s (the model is loaded once per session).
+- [x] Named tests: `test_pii_detector_missing_model_fails_startup`, `test_brand_allowlist_not_masked`, `test_typed_pii_ner_masks_person_and_address`, `test_output_guard_uses_ner_detector`
+- [x] On the fixture, code computes recall ≥ 95% and brand false positives = 0. This gate is **provisional** until 28a extends the set (SEC-20).
+- [x] Red-team cases: a name in free text, a name split across rows, a brand that looks like a surname
+- [x] The pinned model installs from `uv sync`. The pip-path instruction is written down for 43.
+- [x] [std]. The offline test run stays under 60 s (the model is loaded once per session).
 **Effort**: L (2) · **Depends on**: 8a · **Risk**: high: brand precision is the likely failure. **Rollback (M-4):** the detector is never narrowed (no PERSON-only fallback) and never disabled. If the gate is red, the output guard refuses free-text answers that contain a detected entity, and the owner is told (🔴).
 
 ## Iteration 9: Small-cell rule and quasi-identifier set 🔴
@@ -458,7 +458,7 @@ The calibration gate (30) reaches the critical path only through the owner's lab
 - `evals/calibration/cases.yaml` (no real data)
 **Done criteria**:
 - [x] 30 cases cover good, partial and wrong answers in roughly equal parts, each with an empty `owner_score` and `owner_reason`
-- [ ] Every case passes the PII guard of 8b (no detected entity)
+- [x] Every case passes the PII guard of 8b (no detected entity)
 - [x] [std]
 **Effort**: S (0.5) · **Depends on**: 8b · **Risk**: low
 

@@ -9,6 +9,13 @@ import sys
 from collections.abc import Sequence
 
 from opsfleet_agent.config import ConfigError, ModelLister, safe_config_view, startup_check
+from opsfleet_agent.guards.pii import (
+    PiiDetector,
+    PiiDetectorError,
+    build_allowlist,
+    ensure_model_available,
+    set_default_detector,
+)
 from opsfleet_agent.obs.tracer import install_log_filter, register_secret
 from opsfleet_agent.session import (
     banner,
@@ -29,14 +36,27 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _install_pii_detector(profiles) -> None:
+    """Refuse to start without the spaCy model (8b); allowlist the configured brands.
+
+    The full catalogue allowlist (brands, categories, departments from BigQuery) replaces
+    this one once the BigQuery client is wired at startup (19).
+    """
+    ensure_model_available()
+    brands = sorted({b for p in profiles for b in p.brands})
+    set_default_detector(PiiDetector(build_allowlist(brands=brands)))
+
+
 def main(argv: Sequence[str] | None = None, *, lister: ModelLister | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         # Profile first: an unknown user must fail before any LLM or BigQuery call.
-        profile = select_profile(load_profiles(), args.user)
+        profiles = load_profiles()
+        profile = select_profile(profiles, args.user)
         settings = startup_check(lister=lister)
         local_startup_check()
-    except ConfigError as e:
+        _install_pii_detector(profiles.values())
+    except (ConfigError, PiiDetectorError) as e:
         print(str(e), file=sys.stderr)
         return 2
     session = start_session(profile)
