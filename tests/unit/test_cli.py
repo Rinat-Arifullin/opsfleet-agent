@@ -29,3 +29,26 @@ def test_cli_requires_user():
     with pytest.raises(SystemExit) as ei:
         cli.main([])
     assert ei.value.code == 2
+
+
+def test_cli_registers_secrets_and_installs_redaction(monkeypatch):
+    import logging
+
+    from opsfleet_agent.obs import tracer as tr
+
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
+    monkeypatch.setenv("GEMINI_API_KEY", SENTINEL)
+    monkeypatch.setenv("LANGGRAPH_AES_KEY", "SENTINEL-aes-for-cli-test")
+    monkeypatch.setattr("builtins.input", lambda _="": "exit")
+    tr.clear_secrets()
+    try:
+        assert cli.main(["--user", "u1"], lister=lambda: all_models()) == 0
+        assert tr._installed_factory is not None
+        rec = logging.getLogger("x.y").makeRecord(
+            "x.y", logging.INFO, "f", 1, f"k={SENTINEL} {'SENTINEL-aes-for-cli-test'}", None, None
+        )
+        assert SENTINEL not in rec.getMessage()
+        assert "SENTINEL-aes-for-cli-test" not in rec.getMessage()
+    finally:
+        tr.uninstall_log_filter()
+        tr.clear_secrets()

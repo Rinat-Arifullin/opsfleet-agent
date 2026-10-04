@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from collections.abc import Sequence
 
 from opsfleet_agent.config import ConfigError, ModelLister, safe_config_view, startup_check
+from opsfleet_agent.obs.tracer import install_log_filter, register_secret
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +29,9 @@ def main(argv: Sequence[str] | None = None, *, lister: ModelLister | None = None
     except ConfigError as e:
         print(str(e), file=sys.stderr)
         return 2
+    install_log_filter()
+    register_secret(settings.gemini_api_key)
+    register_secret(os.environ.get("LANGGRAPH_AES_KEY"))
     log.info("config: %s", safe_config_view(settings))
     print(f"Ready (user: {args.user}). Type 'exit' to quit.")
     while True:
