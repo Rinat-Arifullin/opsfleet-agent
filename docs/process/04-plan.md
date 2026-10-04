@@ -272,16 +272,16 @@ The calibration gate (30) reaches the critical path only through the owner's lab
 - `tests/unit/test_sql_policy.py`
 - `tests/unit/test_sql_policy_redteam.py`
 **Done criteria**:
-- [ ] Named tests: `test_sql_policy_select_only`, `test_sql_policy_table_allowlist`, `test_sql_policy_rejects_pii_projection`, `test_select_star_rejected`, `test_cte_shadowing_rejected`, `test_policy_rejects_select_as_struct`, `test_policy_rejects_table_alias_as_value`, `test_policy_rejects_qi_predicate_at_id_grain`, `test_policy_rejects_id_literal_with_qi`, `test_policy_denies_scalar_functions_on_qi`, `test_source_allowlist`, `test_orders_num_of_item_not_exposed`.
-- [ ] Red-team cases (M-1), each a parametrized case in `test_sql_policy_redteam.py`:
+- [x] Named tests: `test_sql_policy_select_only`, `test_sql_policy_table_allowlist`, `test_sql_policy_rejects_pii_projection`, `test_select_star_rejected`, `test_cte_shadowing_rejected`, `test_policy_rejects_select_as_struct`, `test_policy_rejects_table_alias_as_value`, `test_policy_rejects_qi_predicate_at_id_grain`, `test_policy_rejects_id_literal_with_qi`, `test_policy_denies_scalar_functions_on_qi`, `test_source_allowlist`, `test_orders_num_of_item_not_exposed`.
+- [x] Red-team cases (M-1), each a parametrized case in `test_sql_policy_redteam.py`:
   - PII columns in WHERE, JOIN, GROUP BY, ORDER BY and LIKE;
   - `CONCAT`, `SUBSTR`, `TO_JSON_STRING`, `STRING_AGG` and `ARRAY_AGG` over PII;
   - `EXPORT DATA`, `EXTERNAL_QUERY`, `ML.*`, `FOR SYSTEM_TIME AS OF`, temporary UDFs and `@@` variables;
   - `INFORMATION_SCHEMA` and wildcard tables;
   - `EXECUTE IMMEDIATE` and `;` chains;
   - comment tricks, quoted identifiers, mixed case and unicode look-alikes.
-- [ ] The validator returns a reason code that the audit log can store without any query text (checked in 21).
-- [ ] [std]
+- [x] The validator returns a reason code that the audit log can store without any query text (checked in 21).
+- [x] [std]
 **Effort**: XL (3) · **Depends on**: 2 · **Risk**: high: this is the gate between the LLM and the warehouse. **Rollback:** the policy is a pure module behind `run_sql`. If red-team cases are still red, `run_sql` stays unwired, and the owner is told (🔴). Nothing is relaxed.
 
 ## Iteration 8a: PII regex scrubber 🔴 `[PARALLEL OK with 6]`
