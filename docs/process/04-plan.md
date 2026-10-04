@@ -832,8 +832,8 @@ These iterations run in the reverse of the drop order: the most protected item (
 - `src/opsfleet_agent/commands/persona.py`
 - `tests/unit/test_persona_admin.py`
 **Done criteria**:
-- [ ] Named test: `test_persona_change_audited_and_rollback`
-- [ ] [std]
+- [x] Named test: `test_persona_change_audited_and_rollback`
+- [x] [std]
 **Effort**: S (0.5) · **Depends on**: 21, 26 · **Risk**: low
 
 ## Iteration 42: `access set` (drop 8)
@@ -844,8 +844,8 @@ These iterations run in the reverse of the drop order: the most protected item (
 - `src/opsfleet_agent/commands/access.py`
 - `tests/unit/test_access.py`
 **Done criteria**:
-- [ ] Named test: `test_access_set_audited_and_effective_next_session`
-- [ ] [std]
+- [x] Named test: `test_access_set_audited_and_effective_next_session`
+- [x] [std]
 **Effort**: S (0.5) · **Depends on**: 16, 21 · **Risk**: medium
 
 ## Iteration 35: Erasure CLI 🔴 (drop 7)
