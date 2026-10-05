@@ -596,6 +596,12 @@ _PIECE_BREAK = re.compile(r"[,;|\n\t]")
 _ALPHA_WORD = re.compile(r"[^\W\d_]+")
 _SEGMENT = re.compile(r"[^.!?\n]+")
 _CAPS_RUN = re.compile(r"(?<!\w)[A-Z][A-Z'\u2019\-]+(?:[ \t]+[A-Z][A-Z'\u2019\-]+)+(?!\w)")
+# D-215: a saved-report id as the agent shows it (pii_regex.REPORT_DISPLAY_ID). spaCy tags
+# some random ids as PERSON (about 1 in 10 in a short sentence), which would show the user
+# "<PERSON>" instead of the id. An id is never a name, so it is cut out of every spaCy
+# piece; the rest of the piece (a real name next to the id) is judged as usual. Cue hits
+# are unaffected.
+_REPORT_ID = pii_regex.REPORT_DISPLAY_ID
 
 
 _SPACY = "SpacyRecognizer"
@@ -734,6 +740,27 @@ def _spacy_pieces(text: str, start: int, end: int) -> list[tuple[int, int]]:
         if b > a:
             pieces.append((a, b))
     return pieces
+
+
+def _minus_report_ids(text: str, a: int, b: int) -> list[tuple[int, int, bool]]:
+    """The parts of ``text[a:b]`` outside report-id tokens (D-215) that still contain a
+    letter, trimmed of the separators left at their edges, as (start, end, was_cut)."""
+    ids = [(m.start(), m.end()) for m in _REPORT_ID.finditer(text, max(0, a - 34), b + 34)]
+    ids = [(x, y) for x, y in ids if x < b and y > a]
+    if not ids:
+        return [(a, b, False)]
+    out: list[tuple[int, int]] = []
+    cur = a
+    for x, y in [*ids, (b, b)]:
+        lo, hi = cur, min(x, b)
+        while lo < hi and not text[lo].isalnum():
+            lo += 1
+        while hi > lo and not text[hi - 1].isalnum():
+            hi -= 1
+        if hi > lo and any(c.isalpha() for c in text[lo:hi]):
+            out.append((lo, hi, True))
+        cur = max(cur, y)
+    return out
 
 
 def _outside_placeholders(
@@ -875,6 +902,13 @@ class PiiDetector:
                     return True
         return False
 
+    def _id_neighbour(self, piece: str) -> bool:
+        """D-215: what is left of a spaCy span after a report id is cut out of it is dropped
+        when it is one English word ("Renamed R-<id>"): spaCy tagged the id, not a name.
+        Two or more words, or a word outside the lexicon ("Fenwick"), are still judged."""
+        words = _ALPHA_WORD.findall(piece)
+        return len(words) == 1 and self._common(words[0])
+
     def _recased_name(self, text: str, a: int, piece: str) -> bool:
         """A name found only after recasing a lower-case or ALL-CAPS segment is kept
         when it has two or more words and either follows a person cue ("the buyer was
@@ -900,8 +934,12 @@ class PiiDetector:
         # spaCy-only hits: allowlist (one term covering the whole piece) and the
         # product-noun filter apply here and only here.
         for start, end, recased in self._spacy_results(text):
-            for a, b in _spacy_pieces(text, start, end):
+            for a, b, cut in (
+                p for s, e in _spacy_pieces(text, start, end) for p in _minus_report_ids(text, s, e)
+            ):
                 piece = text[a:b]
+                if cut and self._id_neighbour(piece):
+                    continue  # D-215: "Renamed" was tagged only together with the id
                 caseless = recased or piece.isupper() or piece.islower()
                 if caseless and not self._recased_name(text, a, piece):
                     continue

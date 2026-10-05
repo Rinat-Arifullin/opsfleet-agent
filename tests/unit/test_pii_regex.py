@@ -481,3 +481,27 @@ def test_adversarial_input_finishes_fast(unit):
     start = time.perf_counter()
     scrub(text)
     assert time.perf_counter() - start < 1.0
+
+
+# --- D-215: saved-report display ids -----------------------------------------------------------
+
+
+def test_report_display_id_with_long_digit_run_is_kept() -> None:
+    text = "Report R-97f2a70223664676947f81435add92d1 is ready."  # 13-digit run inside
+    assert scrub(text).text == text and dict(scrub(text).findings) == {}
+
+
+def test_report_id_exemption_is_exact() -> None:
+    run = "70223664676947"
+    # the same digits outside an id, a bare hex id, an id with a glued suffix: masked
+    assert run not in scrub(f"order {run}").text
+    assert run not in scrub(f"97f2a{run}f81435add92d1").text
+    assert run not in scrub(f"R-97f2a{run}f81435add92d14242424242424242").text
+    assert run not in scrub(f"R-97F2A{run}F81435ADD92D1").text  # upper-case is not our format
+    # a card next to an id is still masked
+    out = scrub("R-97f2a70223664676947f81435add92d1 card 4242 4242 4242 4242").text
+    assert "<CARD>" in out and "R-97f2a70223664676947f81435add92d1" in out
+
+
+def test_report_id_sentinel_cannot_be_forged() -> None:
+    assert scrub("x\x00a\x00 4242424242424242").text == "xa <CARD>"

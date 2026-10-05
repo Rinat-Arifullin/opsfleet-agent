@@ -41,6 +41,10 @@ aggregate does not take:
   ``national id``, ``tax id``, ``driver's license``) any id with 6+ digits is ``<ID>``
   (``SSN 123456789``, ``passport X12345678``).
 * An IBAN (compact or in groups of four) that passes the mod-97 check is one ``<ID>``.
+* D-215: a saved-report id as the agent shows it (``R-`` + 32 lower-case hex digits,
+  ``REPORT_DISPLAY_ID``) is the agent's own reference, not PII, and is never masked: a
+  random id can hold a 13+ digit run that the rules above would otherwise cut out of it.
+  Only that exact token is exempt; digits next to it are judged as usual.
 
 Ordinary analytics text is left alone: years, ISO dates, prices (``$1,234.56``),
 percentages, counts and short SKUs.
@@ -275,6 +279,30 @@ _SSN = re.compile(r"(?<![\w.-])\d{3}([-. ])\d{2}\1\d{4}(?![\w-]|\.\d)")
 
 _YEAR = re.compile(r"(?:19|20)\d\d")
 
+#: D-215: a saved-report id in its display form (reports.library.display_id). Exempt from
+#: every digit rule here and from NER in ``pii`` (an id is never a name or a number).
+REPORT_DISPLAY_ID = re.compile(r"(?<![\w-])[Rr]-[0-9a-f]{32}(?![\w-])", re.ASCII)
+# The id is swapped for an inert letters-only sentinel while the patterns run, then restored.
+_SENTINEL = "\x00"
+_SENTINEL_RE = re.compile(r"\x00([a-z]+)\x00")
+
+
+def _sentinel(i: int) -> str:
+    letters = ""
+    while True:
+        i, r = divmod(i, 26)
+        letters = chr(97 + r) + letters
+        if i == 0:
+            return f"{_SENTINEL}{letters}{_SENTINEL}"
+        i -= 1
+
+
+def _sentinel_index(letters: str) -> int:
+    n = 0
+    for c in letters:
+        n = n * 26 + (ord(c) - 96)
+    return n - 1
+
 
 def _digits(s: str) -> str:
     return "".join(c for c in s if c.isdecimal())
@@ -372,7 +400,14 @@ def scrub(text: str) -> ScrubResult:
     if truncated:
         text = _drop_partial_token(text[:MAX_SCRUB_CHARS])
     s = _Scrubber()
-    out = _normalise(text)
+    out = _normalise(text).replace(_SENTINEL, "")
+    ids: list[str] = []
+
+    def _hold(m: re.Match[str]) -> str:
+        ids.append(m.group(0))
+        return _sentinel(len(ids) - 1)
+
+    out = REPORT_DISPLAY_ID.sub(_hold, out)
     out = _EMAIL_STRONG.sub(s.email, out)
     out = _EMAIL_WORD.sub(s.email, out)
     out = _EMAIL_AT_DOTTED.sub(s.email, out)
@@ -386,6 +421,8 @@ def scrub(text: str) -> ScrubResult:
     out = _PHONE_NATIONAL.sub(s.phone, out)
     out = _SSN.sub(s.ssn, out)
     out = _PHONE_EXT.sub(s.phone_ext, out)
+    if ids:
+        out = _SENTINEL_RE.sub(lambda m: ids[_sentinel_index(m.group(1))], out)
     if truncated:
         out += TRUNCATION_MARKER
     return ScrubResult(text=out, findings=MappingProxyType(dict(s.counts)), truncated=truncated)
