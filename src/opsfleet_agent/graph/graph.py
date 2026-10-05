@@ -76,16 +76,28 @@ from opsfleet_agent.graph.context import (
     snapshot_of,
     tag_scope,
 )
+from opsfleet_agent.graph.fixed_replies import (
+    FIXED_KEY,
+    contains_marker,
+    fixed_kind,
+    is_marker,
+    static_texts,
+)
 from opsfleet_agent.graph.grounding import check_grounding, extract_figures, merge_figures
 from opsfleet_agent.graph.intents import (
+    CUSTOMER_ID_NOTICE,
+    asks_for_customer_pii,
     is_comment_followup,
+    is_customer_ranking_request,
     is_memory_question,
     is_sql_request,
 )
 from opsfleet_agent.graph.llm import Limiters, LLMSuccess, LLMWrapper
 from opsfleet_agent.graph.memory import SessionMemory
 from opsfleet_agent.graph.providers import is_local
-from opsfleet_agent.guards.input import check_input
+from opsfleet_agent.guards.echo import ECHO_REJECTED, ECHO_RETRY_RULE, is_echo
+from opsfleet_agent.guards.echo import normalise as normalise_echo
+from opsfleet_agent.guards.input import PII_REQUEST, REFUSALS, check_input
 from opsfleet_agent.guards.output import REFUSAL_TEXT, ROLE_TOOLS, check_output
 from opsfleet_agent.guards.plain_language import (
     PLAIN_LANGUAGE_RULE,
@@ -170,6 +182,10 @@ COMMENT_FALLBACK_TEXT: Final = (
     "Noted. I can check that against the data if you like, for example the sales trend "
     "over recent months or the return rate."
 )
+# D-157: router labels a customer-ranking request may get by mistake (the PII wording in the
+# router prompt); such a request is relabelled in code.
+CUSTOMER_OVERRIDE_LABELS: Final = frozenset({"injection", "off_topic"})
+ECHO_ERROR_CLASS: Final = "echo"  # D-156: the analyst repeated an earlier reply twice
 MAX_PREVIOUS_ANSWER_CHARS: Final = 1500  # the force answer sees one earlier answer, trimmed
 _FORCE_RULES: Final = (
     "The analysis was cut short. Write a brief answer for the user that says what was "
@@ -322,6 +338,7 @@ class TurnState(TypedDict, total=False):
     outcome: str
     error: bool
     grounding_blocked: bool  # the guard blocked the draft before grounding: finalize refuses
+    fixed_reply: str  # D-156: kind of code-owned static reply this turn shows ("" = none)
     context_message: str  # load_context's message to answer (a resolved clarification merged)
     history: Annotated[list[dict[str, Any]], _append_history]  # {"role", "text", "scope"}
     figures: Annotated[list[dict[str, Any]], merge_figures]
@@ -358,6 +375,7 @@ _TURN_RESET: Final[dict[str, Any]] = {
     "outcome": "",
     "error": False,
     "grounding_blocked": False,
+    "fixed_reply": "",
     "context_message": "",
     "report": {},  # iteration 17: a draft lives one turn (until confirm_save resolves it)
     "golden_refs": [],  # D-117: retrieved per turn
@@ -690,6 +708,7 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
             llm=ctx.llm, model=model, invoke=sv.router_invoke, fallback_model=fb, tracer=ctx.tracer,
         )  # fmt: skip
         update.update(label=rd.label, route=rd.route, is_english=rd.is_english)
+        refusal: str | None = None
         if ctx.forced_label and rd.route != "refuse":  # iteration 17: "revise" stays a report
             update.update(label=ctx.forced_label, route="full")
         elif rd.route != "refuse" and is_memory_question(decision.scrubbed):
@@ -702,8 +721,23 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
             # reply that describes the data used in business words (no analyst, no query).
             update.update(label="meta", route="light")
             _record(ctx, "router", "intent", label="meta", route="light", sql_request=True)
-        if rd.route == "refuse":
-            update.update(final_text=rd.refusal_text or REFUSAL_TEXT, outcome="refused")
+        elif rd.label in CUSTOMER_OVERRIDE_LABELS and is_customer_ranking_request(
+            decision.scrubbed
+        ):
+            # D-157: "who are our top 10 customers by spend?" is a data question. Customers are
+            # identified by the pseudonymous customer ID (ADR-013); the SQL policy and the
+            # output guard block direct identifiers whatever the label.
+            if asks_for_customer_pii(decision.scrubbed):
+                update.update(label=rd.label, route="refuse")
+                refusal = REFUSALS[PII_REQUEST]
+                _record(ctx, "router", "intent", label=rd.label, override="customer_pii")
+            else:
+                update.update(label="simple", route="full")
+                ctx.notice = ctx.notice or CUSTOMER_ID_NOTICE
+                _record(ctx, "router", "intent", label="simple", route="full",
+                        override="customer_ranking")  # fmt: skip
+        if update["route"] == "refuse":
+            update.update(final_text=refusal or rd.refusal_text or REFUSAL_TEXT, outcome="refused")
         return update
 
     def light(state: TurnState) -> dict[str, Any]:
@@ -724,7 +758,10 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
         )  # fmt: skip
         ctx.guard_codes |= set(res.guard_codes)
         outcome = "blocked" if res.source == "blocked" else "answered"
-        return {"final_text": res.text, "outcome": outcome, "role": "light_path"}
+        update = {"final_text": res.text, "outcome": outcome, "role": "light_path"}
+        if res.source in ("static", "template"):  # D-156: flag the code-owned reply in history
+            update["fixed_reply"] = fixed_kind(res.text) or res.source
+        return update
 
     def load_context(state: TurnState) -> dict[str, Any]:
         if state.get("label") == "report":
@@ -813,18 +850,31 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
     def _analyst(role: str, state: TurnState) -> dict[str, Any]:
         lo, hi = sv.window()
         a = _assembled(state)  # iteration 15: scope-filtered, fenced context (FR-76)
-        system = build_system_prompt(
-            role, scope_label=ctx.profile.scope_label, persona=ctx.persona,
-            window=(lo.isoformat(), hi.isoformat()),
-            prior_queries=ctx.sql_turn.ledger if role == DEEP else (),
-            context_section=a.prompt_section(),
-        )  # fmt: skip
-        messages = [
-            {"role": "system", "content": system},
-            *a.history,
-            {"role": "user", "content": a.message},
-        ]
-        res = run_analyst(role, _deps(), messages)
+
+        def messages(extra: tuple[tuple[str, str], ...] = ()) -> list[dict[str, Any]]:
+            system = build_system_prompt(
+                role, scope_label=ctx.profile.scope_label, persona=ctx.persona,
+                window=(lo.isoformat(), hi.isoformat()),
+                prior_queries=ctx.sql_turn.ledger if role == DEEP else (),
+                context_section=a.prompt_section(), extra_rules=extra,
+            )  # fmt: skip
+            return [
+                {"role": "system", "content": system},
+                *a.history,
+                {"role": "user", "content": a.message},
+            ]
+
+        res = run_analyst(role, _deps(), messages())
+        if res.status == "ok" and _is_echo(state, res.output):
+            # D-156: the answer repeats an earlier reply. One bounded retry with a corrective
+            # rule; a second echo goes to the force-answer fallback and is never shown.
+            _record(ctx, "guard", "echo", verdict="retry", role=role, rule_hits=[ECHO_REJECTED])
+            res = run_analyst(role, _deps(), messages((("Retry", ECHO_RETRY_RULE),)))
+            if res.status == "ok" and _is_echo(state, res.output):
+                _record(ctx, "guard", "echo", verdict="block", role=role,
+                        rule_hits=[ECHO_REJECTED])  # fmt: skip
+                return {"status": "partial", "draft": "", "error_class": ECHO_ERROR_CLASS,
+                        "role": role}  # fmt: skip
         return {
             "status": res.status,
             "draft": res.output,
@@ -836,7 +886,10 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
         if state.get("status") == "ok":
             return {}
         comment = state.get("status") == "comment"
-        text = _force_text(ctx, state, _previous_answer(_assembled(state)), comment=comment)
+        # D-156: after an echo the earlier answer is not offered again (it was what got copied)
+        echoed = state.get("error_class") == ECHO_ERROR_CLASS
+        previous = "" if echoed else _previous_answer(_assembled(state))
+        text = _force_text(ctx, state, previous, comment=comment)
         status = "comment" if comment else "partial"
         return {"draft": text, "role": FORCE_ANSWER_ROLE, "status": status}
 
@@ -1170,11 +1223,36 @@ def _is_comment(state: TurnState, a: AssembledContext) -> bool:
 
 
 def _previous_answer(a: AssembledContext) -> str:
-    """The latest assistant answer in the assembled (scope-filtered) history, trimmed."""
+    """The latest assistant answer in the assembled (scope-filtered) history, trimmed.
+    A code-owned static reply (a D-156 marker) is not an answer and is skipped."""
     for m in reversed(a.history):
-        if m.get("role") == "assistant" and str(m.get("content") or "").strip():
-            return str(m["content"]).strip()[:MAX_PREVIOUS_ANSWER_CHARS]
+        content = str(m.get("content") or "").strip()
+        if m.get("role") == "assistant" and content and not is_marker(content):
+            return content[:MAX_PREVIOUS_ANSWER_CHARS]
     return ""
+
+
+def _earlier_answers(state: TurnState, message: str) -> list[str]:
+    """D-156: earlier assistant answers the current answer must not repeat. An answer to the
+    same question (asked again) is left out: repeating it is correct, not an echo."""
+    history = list(state.get("history") or [])[-MAX_HISTORY_MESSAGES:]
+    current = normalise_echo(message)
+    out: list[str] = []
+    asked = ""
+    for m in history:
+        text = str(m.get("text") or "")
+        if m.get("role") == "user":
+            asked = normalise_echo(text)
+        elif m.get("role") == "assistant" and text.strip() and asked != current:
+            out.append(text)
+    return out
+
+
+def _is_echo(state: TurnState, answer: str) -> bool:
+    if contains_marker(answer):  # it quotes the stand-in for a code-owned reply
+        return True
+    message = state.get("context_message") or state.get("message") or ""
+    return is_echo(answer, _earlier_answers(state, message), static_texts())
 
 
 def _force_text(
@@ -1218,7 +1296,11 @@ def _force_text(
         value = res.response.value
         text = value.text if isinstance(value, ModelTurn) else value
         if isinstance(text, str) and text.strip() and not getattr(value, "tool_calls", ()):
-            return text.strip()
+            if not _is_echo(state, text):
+                return text.strip()
+            # D-156: a reply that repeats an earlier one is never shown: the template is
+            _record(ctx, "guard", "echo", verdict="block", role=FORCE_ANSWER_ROLE,
+                    rule_hits=[ECHO_REJECTED])  # fmt: skip
     return template
 
 
@@ -1299,10 +1381,14 @@ def _finalize(ctx: TurnContext, state: TurnState) -> dict[str, Any]:
         snap = snapshot_of(ctx.sql_session.scope)
         # iteration 17: a report turn keeps the draft (not "Saved ...") as the assistant answer
         answer = strip_sql((state.get("report") or {}).get("markdown") or text)
-        update["history"] = [
-            {"role": "user", "text": state["message"], "scope": snap},
-            {"role": "assistant", "text": answer[:MAX_HISTORY_CHARS], "scope": snap},
-        ]
+        reply: dict[str, Any] = {
+            "role": "assistant", "text": answer[:MAX_HISTORY_CHARS], "scope": snap,
+        }  # fmt: skip
+        # D-156: a code-owned static reply is flagged at write time; prompts show a marker
+        kind = state.get("fixed_reply") or fixed_kind(answer)
+        if kind:
+            reply[FIXED_KEY] = kind
+        update["history"] = [{"role": "user", "text": state["message"], "scope": snap}, reply]
         if ctx.sql_turn.ledger:  # prior-turn grounding set for follow-ups (AC-07.1/07.2)
             scope = ctx.sql_session.scope
             update["prior_ledger"] = [ledger_entry_for_state(e, scope) for e in ctx.sql_turn.ledger]

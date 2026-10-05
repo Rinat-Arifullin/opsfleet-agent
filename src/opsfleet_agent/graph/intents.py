@@ -10,9 +10,13 @@
 * :func:`is_comment_followup` - a statement or opinion about the previous answer ("so it is
   worth promoting"), not a new data request. It gets one brief reply from the previous answer's
   context instead of a full analyst loop (which spends the turn budget looking for data).
+* :func:`is_customer_ranking_request` - D-157: "who are our top 10 customers by spend?" or
+  "list our customers". The router sometimes labels these ``injection``; A-3 / ADR-013 allow
+  them by pseudonymous customer ID, so the graph answers them instead of refusing.
+  :func:`asks_for_customer_pii` marks the ones that also ask for names, emails or addresses.
 
 They are pure, bounded regex checks on the scan fold the input guard uses (no model call).
-All three are English-only. They only narrow what happens next; the guards, budget and
+All of them are English-only. They only narrow what happens next; the guards, budget and
 grounding still apply.
 """
 
@@ -26,8 +30,11 @@ from opsfleet_agent.guards.input import _fold
 
 __all__ = [
     "MAX_INTENT_CHARS",
+    "CUSTOMER_ID_NOTICE",
     "MEMORY_TEXT",
+    "asks_for_customer_pii",
     "is_comment_followup",
+    "is_customer_ranking_request",
     "is_memory_question",
     "is_sql_request",
 ]
@@ -147,3 +154,63 @@ def is_comment_followup(text: str) -> bool:
     if "?" in folded or _ASK_START_RE.match(folded) or _REQUEST_RE.search(folded):
         return False
     return bool(_OPINION_RE.search(folded))
+
+
+# --- D-157: "top customers" is a data question, not an injection ------------------------------
+CUSTOMER_ID_NOTICE: Final = (
+    "Note: customers are shown by customer ID only. I don't share names, emails or addresses."
+)
+_CUSTOMERS: Final = r"(?:customers?|buyers?|clients?|shoppers?|purchasers?|spenders?|users?)"
+_RANK: Final = (
+    r"(?:top|best|biggest|largest|leading|heaviest|loyal(?:est)?|most\s+(?:valuable|loyal|"
+    r"active|frequent)|highest[\s-]+(?:spending|value|paying|revenue)|big[\s-]+spending|"
+    r"repeat|vip)"
+)
+_CUSTOMER_RANKING_RE: Final = re.compile(
+    r"\b(?:"
+    # "top 10 customers", "best repeat buyers", "most valuable clients by revenue"
+    rf"{_RANK}\s+(?:\d{{1,4}}\s+)?(?:\w+\s+){{0,2}}?{_CUSTOMERS}"
+    # "list (of) our customers", "list all buyers"
+    rf"|list\s+(?:of\s+)?(?:(?:our|all|the|my)\s+)?(?:\w+\s+)?{_CUSTOMERS}"
+    # "who are our customers", "who were the biggest buyers last year"
+    rf"|who\s+(?:are|were|is)\s+(?:our|the|my)\s+(?:\w+\s+){{0,3}}?{_CUSTOMERS}"
+    # "which customers spent the most"
+    rf"|which\s+{_CUSTOMERS}\s+(?:spent|spend|spends|bought|buy|ordered|order|purchased)"
+    r")\b"
+)
+# Words of a genuine injection: such a message keeps the router's refusal.
+_INJECTION_HINT_RE: Final = re.compile(
+    r"\b(?:ignore|disregard|forget|bypass|override|pretend|jailbreak|unrestricted|"
+    r"developer\s+mode|admin|system\s+prompt|instructions?|rules?|polic(?:y|ies)|"
+    r"act\s+as|you\s+are\s+now|label|classify|respond\s+with|output|reveal|print|"
+    r"configuration|select\s|from\s+users)\b"
+)
+# Direct identifiers: these keep a refusal, with the PII text instead of the injection text.
+_CUSTOMER_PII_RE: Final = re.compile(
+    r"\b(?:names?|first[\s_-]*names?|last[\s_-]*names?|surnames?|e-?mails?|e-?mail\s+"
+    r"address(?:es)?|phones?|phone\s+numbers?|addresses|address|street|contacts?|"
+    r"contact\s+details)\b"
+)
+
+
+def _ranking_fold(text: str) -> str | None:
+    if not isinstance(text, str) or not text.strip() or len(text) > MAX_INTENT_CHARS:
+        return None
+    folded = " ".join(_fold(text).split())
+    if not _CUSTOMER_RANKING_RE.search(folded) or _INJECTION_HINT_RE.search(folded):
+        return None
+    return folded
+
+
+def is_customer_ranking_request(text: str) -> bool:
+    """True for a ranking or list of customers with no injection wording (D-157).
+
+    The answer identifies customers by the pseudonymous customer ID only: the SQL policy and
+    the output guard block direct identifiers whatever the label."""
+    return _ranking_fold(text) is not None
+
+
+def asks_for_customer_pii(text: str) -> bool:
+    """True for a customer ranking or list that also asks for names, emails or addresses."""
+    folded = _ranking_fold(text)
+    return folded is not None and bool(_CUSTOMER_PII_RE.search(folded))

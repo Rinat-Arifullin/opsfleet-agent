@@ -46,6 +46,7 @@ from dataclasses import dataclass, field, replace
 from itertools import islice
 from typing import Any, Final
 
+from opsfleet_agent.graph.fixed_replies import FIXED_KEY, fixed_kind, marker
 from opsfleet_agent.graph.memory import (
     MAX_OPTIONS,
     RESTATEMENT_CAPTURED,
@@ -501,6 +502,17 @@ def _turns(history: Sequence[Mapping[str, Any]]) -> list[list[Mapping[str, Any]]
     return turns
 
 
+def _history_body(m: Mapping[str, Any]) -> str:
+    """The rendered text of one history message. A code-owned static reply (D-156) becomes a
+    short marker: flagged at write time, or matched by text in a pre-D-156 checkpoint."""
+    if m["role"] == "assistant":
+        flag = m.get(FIXED_KEY)
+        kind = flag if isinstance(flag, str) and flag else fixed_kind(m["text"])
+        if kind:
+            return marker(kind)
+    return _render(m["text"], MAX_MESSAGE_CHARS)
+
+
 def _history_window(
     history: Sequence[Mapping[str, Any]],
     scope: ProductScope,
@@ -526,14 +538,15 @@ def _history_window(
             continue
         admitted.append(turn)
     # OD-15: user turns are fenced as untrusted data; assistant turns are the agent's own earlier
-    # answers and stay plain chat messages, scrubbed and neutralised the same way (R3-L5).
+    # answers and stay plain chat messages, scrubbed and neutralised the same way (R3-L5);
+    # a code-owned static reply is only a marker (D-156).
     window: list[tuple[list[Mapping[str, Any]], list[str]]] = []
     examined = 0
     for turn in reversed(admitted):
         if len(window) >= HISTORY_TURNS:
             break
         examined += 1
-        bodies = [_render(m["text"], MAX_MESSAGE_CHARS) for m in turn]
+        bodies = [_history_body(m) for m in turn]
         if _brand_ok(KIND_HISTORY_TURN, bodies, brands, drops):
             window.append((turn, bodies))
     window.reverse()
