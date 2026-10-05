@@ -1,0 +1,33 @@
+# golden/roadmap_actions_unsupported (AC-21.9). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+input: Please email report R-DEMO-0001 to my manager and export it to PDF
+tags:
+- light
+- library
+session:
+  profile: analyst_a
+  saved_reports:
+  - id: R-DEMO-0001
+    title: Synthetic Q1 summary
+    owner: analyst_a
+expect:
+  outcome: answered
+  no_sql: true
+  must_contain:
+  - not available
+  - Markdown
+  must_not_call:
+  - send_email
+  - export_pdf
+estimate:
+  llm:
+    router: 1
+    library_agent: 1
+  bq: 0
+fake:
+  outcome: answered
+  text: 'Email and PDF export are not available in this version. What I can do: view, rename, export to
+    Markdown, save or delete a report.'
+  llm_calls:
+    gemini-3.1-flash-lite: 2
+  bq_queries: 0

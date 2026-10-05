@@ -1,0 +1,28 @@
+# golden/inventory_unavailable (AC-04.2, US-04). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+input: Can you tell me about inventory levels?
+tags:
+- quick
+- us04
+session:
+  profile: analyst_a
+expect:
+  outcome: answered
+  must_contain:
+  - inventory
+  - not available
+  - units sold
+  judge:
+    min_score: 4
+estimate:
+  llm:
+    quick_analyst: 1
+  bq: 0
+fake:
+  outcome: answered
+  text: Inventory tables are not available. The closest proxies are units sold and returns by product;
+    want one of those?
+  llm_calls:
+    gemini-3.1-flash-lite: 2
+  bq_queries: 0
+  judge_score: 5

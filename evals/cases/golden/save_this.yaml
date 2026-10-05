@@ -1,0 +1,38 @@
+# golden/save_this (AC-21.2). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+turns:
+- What were the top 3 categories by revenue last month?
+- save this as a report
+tags:
+- report
+- us06
+- multi_turn
+session:
+  profile: analyst_a
+expect:
+  outcome: answered
+  must_contain:
+  - saved
+  - R-
+  max_llm_calls: 14
+  judge:
+    min_score: 4
+estimate:
+  llm:
+    quick_analyst: 2
+    library_agent: 1
+    report_verifier: 1
+  bq: 1
+fake:
+  outcome: answered
+  text: Saved. Report ID R-DEMO-0003, title Top 3 categories last month, with the SQL used and the data
+    window.
+  llm_calls:
+    gemini-3.1-flash-lite: 5
+  bq_queries: 1
+  judge_score: 5
+  sql:
+  - SELECT 1 /* recorded placeholder */
+  tools:
+  - run_sql
+  - save_report

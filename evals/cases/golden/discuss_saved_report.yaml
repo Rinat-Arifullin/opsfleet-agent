@@ -1,0 +1,47 @@
+# golden/discuss_saved_report (AC-22.3). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+# `session.saved_reports` is synthetic seed data the SUT must load into a throwaway store: see requests.md.
+turns:
+- open report R-DEMO-0001
+- drill into insight 2 by state
+tags:
+- quick
+- memory
+- us07
+- multi_turn
+session:
+  profile: analyst_a
+  saved_reports:
+  - id: R-DEMO-0001
+    title: Synthetic Q1 summary
+    owner: analyst_a
+    sections:
+    - Summary
+    - Key metrics
+    - Insights
+    - Action items
+expect:
+  outcome: answered
+  must_contain:
+  - insight 2
+  - state
+  must_not_contain:
+  - ignore
+  judge:
+    min_score: 4
+estimate:
+  llm:
+    library_agent: 1
+    quick_analyst: 2
+    report_verifier: 1
+  bq: 1
+fake:
+  outcome: answered
+  text: Using the report's window and definitions, insight 2 broken down by state under your current scope
+    (Calvin Klein).
+  llm_calls:
+    gemini-3.1-flash-lite: 4
+  bq_queries: 1
+  judge_score: 5
+  sql:
+  - SELECT 1 /* recorded placeholder */

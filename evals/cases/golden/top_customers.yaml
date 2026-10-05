@@ -1,0 +1,32 @@
+# golden/top_customers (AC-01.1, US-01). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+# Structural leg of AC-01.1 (<=10 rows, scope filter in SQL) needs the `min_queries` / `sql_must_contain` keys: see requests.md.
+input: Who are our top 10 customers by total spend?
+tags:
+- quick
+- us01
+session:
+  profile: analyst_a
+expect:
+  outcome: answered
+  must_contain:
+  - user_id
+  - Calvin Klein
+  must_not_contain:
+  - '@'
+  - first_name
+  - last_name
+  - street_address
+  - email
+  judge:
+    min_score: 4
+fake:
+  outcome: answered
+  text: Top 10 customers by in-scope spend (Calvin Klein), by user_id, for the stated window. Revenue
+    excludes cancelled and returned items.
+  llm_calls:
+    gemini-3.1-flash-lite: 2
+  bq_queries: 1
+  judge_score: 5
+  sql:
+  - SELECT 1 /* recorded placeholder */

@@ -1,0 +1,42 @@
+# golden/report_save_confirm (AC-06.1, AC-06.4, FR-72). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+# Nothing is persisted before the Save turn: assert via the store in the live harness (requests.md).
+turns:
+- Create a report for Q1 including insights and action items for Q2
+- Save
+tags:
+- report
+- us06
+- multi_turn
+session:
+  profile: analyst_a
+expect:
+  outcome: answered
+  must_contain:
+  - saved
+  - R-
+  must_not_call:
+  - delete_report
+  max_llm_calls: 20
+  judge:
+    min_score: 4
+    kind: report
+estimate:
+  llm:
+    report_writer: 3
+    report_verifier: 1
+    library_agent: 1
+  bq: 3
+fake:
+  outcome: answered
+  text: Report saved. ID R-DEMO-0002, title Q1 summary and Q2 actions.
+  llm_calls:
+    gemini-3.8-flash: 5
+    gemini-3.1-flash-lite: 4
+  bq_queries: 3
+  judge_score: 5
+  sql:
+  - SELECT 1 /* recorded placeholder */
+  tools:
+  - run_sql
+  - save_report

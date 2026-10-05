@@ -1,0 +1,28 @@
+# golden/my_scope (AC-20.4). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+input: Which products can I analyse?
+tags:
+- light
+- scope
+session:
+  profile: analyst_b
+expect:
+  outcome: answered
+  no_sql: true
+  max_llm_calls: 3
+  must_contain:
+  - Carhartt
+  - Levi's
+  must_not_contain:
+  - Calvin Klein
+estimate:
+  llm:
+    router: 1
+    light_path: 1
+  bq: 0
+fake:
+  outcome: answered
+  text: Your scope is the brands Carhartt and Levi's.
+  llm_calls:
+    gemini-3.1-flash-lite: 2
+  bq_queries: 0

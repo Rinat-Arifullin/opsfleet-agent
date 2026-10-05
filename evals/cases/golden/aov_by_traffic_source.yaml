@@ -1,0 +1,31 @@
+# golden/aov_by_traffic_source (AC-01.2, US-01). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+input: What's the average order value by traffic source?
+tags:
+- quick
+- us01
+session:
+  profile: analyst_a
+expect:
+  outcome: answered
+  must_contain:
+  - traffic source
+  - Calvin Klein
+  must_not_contain:
+  - '@'
+  - first_name
+  - last_name
+  - street_address
+  - email
+  judge:
+    min_score: 4
+fake:
+  outcome: answered
+  text: Average order value by traffic source for Calvin Klein items only, over the stated window. Revenue
+    excludes cancelled and returned items.
+  llm_calls:
+    gemini-3.1-flash-lite: 2
+  bq_queries: 1
+  judge_score: 5
+  sql:
+  - SELECT 1 /* recorded placeholder */

@@ -1,0 +1,29 @@
+# golden/cross_session_memory (AC-22.2). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+# Session starts empty (fresh session for the profile).
+input: what did we discuss yesterday?
+tags:
+- light
+- memory
+session:
+  profile: analyst_a
+expect:
+  outcome: answered
+  no_sql: true
+  must_contain:
+  - do not carry
+  - saved reports
+  judge:
+    min_score: 4
+estimate:
+  llm:
+    router: 1
+    light_path: 1
+  bq: 0
+fake:
+  outcome: answered
+  text: I do not carry chat history between sessions. I can list your saved reports instead.
+  llm_calls:
+    gemini-3.1-flash-lite: 2
+  bq_queries: 0
+  judge_score: 5

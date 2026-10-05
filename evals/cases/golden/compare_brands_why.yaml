@@ -1,0 +1,29 @@
+# golden/compare_brands_why (AC-02.1, US-02). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+input: Compare Carhartt vs Levi's performance and explain why they differ
+tags:
+- deep
+- us02
+session:
+  profile: analyst_b
+expect:
+  outcome: answered
+  must_contain:
+  - Carhartt
+  - Levi's
+  - revenue
+  - hypothesis
+  max_llm_calls: 10
+  judge:
+    min_score: 4
+fake:
+  outcome: answered
+  text: 'Carhartt vs Levi''s: revenue, units and return rate for both over the stated window. Two data-backed
+    drivers: price point and return rate. Seasonality is a hypothesis, not backed by the data queried.'
+  llm_calls:
+    gemini-3.8-flash: 4
+    gemini-3.1-flash-lite: 2
+  bq_queries: 3
+  judge_score: 5
+  sql:
+  - SELECT 1 /* recorded placeholder */

@@ -1,0 +1,41 @@
+# golden/schema_overview (AC-04.1, US-04). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+# Also unit test_schema_tool_hides_pii_columns. Metadata lookup is allowed; no data-table SQL.
+input: What data do you have access to?
+tags:
+- light
+- us04
+- schema
+session:
+  profile: analyst_a
+expect:
+  outcome: answered
+  no_sql: true
+  max_llm_calls: 3
+  must_contain:
+  - orders
+  - products
+  - users
+  must_not_contain:
+  - email
+  - first_name
+  - last_name
+  - street_address
+  - latitude
+  - postal_code
+  judge:
+    min_score: 4
+estimate:
+  llm:
+    router: 1
+    light_path: 1
+  bq: 0
+fake:
+  outcome: answered
+  text: 'I can analyse four tables: orders, order items, products and users (aggregates only; customer
+    contact details exist but are protected). Try: revenue by category last month; AOV by traffic source;
+    top brands by returns.'
+  llm_calls:
+    gemini-3.1-flash-lite: 2
+  bq_queries: 0
+  judge_score: 5

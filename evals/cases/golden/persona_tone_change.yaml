@@ -1,0 +1,33 @@
+# golden/persona_tone_change (iteration 41, HLD persona section). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+# Optional (iteration 41 shipped, so active). Run twice with two personas; the sections must be identical (A-27). The persona is set via `session.persona`: see requests.md.
+input: Create a report for Q1 including insights and action items for Q2
+tags:
+- report
+- persona
+- optional
+session:
+  profile: analyst_a
+  persona: formal
+expect:
+  outcome: answered
+  must_contain:
+  - Summary
+  - Key metrics
+  - Insights
+  - Action items
+  max_llm_calls: 14
+  judge:
+    min_score: 4
+    kind: report
+fake:
+  outcome: answered
+  text: 'Draft report (formal tone): Summary. Key metrics. Insights. Action items. Limitations & hypotheses.
+    Save / Revise / Cancel.'
+  llm_calls:
+    gemini-3.8-flash: 4
+    gemini-3.1-flash-lite: 2
+  bq_queries: 3
+  judge_score: 5
+  sql:
+  - SELECT 1 /* recorded placeholder */

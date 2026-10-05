@@ -1,0 +1,32 @@
+# golden/followup_breakdown (AC-07.1, US-07). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+turns:
+- What is our monthly revenue for the last 12 months?
+- now break that down by category, only the top 3
+tags:
+- quick
+- us07
+- multi_turn
+session:
+  profile: analyst_a
+expect:
+  outcome: answered
+  must_contain:
+  - top 3
+  - 12 months
+  judge:
+    min_score: 4
+estimate:
+  llm:
+    quick_analyst: 3
+    report_verifier: 1
+  bq: 2
+fake:
+  outcome: answered
+  text: Same 12 months window and revenue definition, now for the top 3 categories by month.
+  llm_calls:
+    gemini-3.1-flash-lite: 4
+  bq_queries: 1
+  judge_score: 5
+  sql:
+  - SELECT 1 /* recorded placeholder */

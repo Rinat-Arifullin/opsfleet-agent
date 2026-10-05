@@ -1,0 +1,28 @@
+# golden/stated_assumption_defaults (AC-23.1). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+input: What was revenue last quarter?
+tags:
+- quick
+- defaults
+session:
+  profile: analyst_a
+expect:
+  outcome: answered
+  must_contain:
+  - quarter
+  - revenue
+  - Calvin Klein
+  must_not_contain:
+  - which quarter
+  judge:
+    min_score: 4
+fake:
+  outcome: answered
+  text: Revenue last quarter (the most recent completed quarter, with its year stated), for Calvin Klein.
+    Revenue excludes cancelled and returned items.
+  llm_calls:
+    gemini-3.1-flash-lite: 2
+  bq_queries: 1
+  judge_score: 5
+  sql:
+  - SELECT 1 /* recorded placeholder */

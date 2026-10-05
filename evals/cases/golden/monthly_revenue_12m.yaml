@@ -1,0 +1,25 @@
+# golden/monthly_revenue_12m (AC-03.1, US-03). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+input: What is our monthly revenue for the last 12 months?
+tags:
+- quick
+- us03
+session:
+  profile: analyst_a
+expect:
+  outcome: answered
+  must_contain:
+  - partial
+  - revenue
+  judge:
+    min_score: 4
+fake:
+  outcome: answered
+  text: Monthly revenue for Calvin Klein over the last 12 months. The current month is partial. Revenue
+    counts completed and shipped items, excluding cancelled and returned.
+  llm_calls:
+    gemini-3.1-flash-lite: 2
+  bq_queries: 1
+  judge_score: 5
+  sql:
+  - SELECT 1 /* recorded placeholder */

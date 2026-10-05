@@ -1,0 +1,38 @@
+# golden/smalltalk_then_task (AC-11.4). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+# Turn 2 must have path=full: see requests.md (`path`).
+turns:
+- thanks, great
+- and what was revenue last month?
+tags:
+- quick
+- smalltalk
+- multi_turn
+session:
+  profile: analyst_a
+expect:
+  outcome: answered
+  must_contain:
+  - revenue
+  - last month
+  - Calvin Klein
+  judge:
+    min_score: 4
+estimate:
+  llm:
+    router: 2
+    light_path: 1
+    quick_analyst: 2
+    report_verifier: 1
+  bq: 1
+fake:
+  outcome: answered
+  text: Revenue last month for Calvin Klein, scope and revenue definition stated.
+  llm_calls:
+    gemini-3.1-flash-lite: 5
+  bq_queries: 1
+  judge_score: 5
+  sql:
+  - SELECT 1 /* recorded placeholder */
+  tools:
+  - run_sql

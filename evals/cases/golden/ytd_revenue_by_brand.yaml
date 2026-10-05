@@ -1,0 +1,27 @@
+# golden/ytd_revenue_by_brand (AC-03.2, US-03). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+input: What's our year-to-date revenue by brand?
+tags:
+- quick
+- us03
+- scope
+session:
+  profile: analyst_b
+expect:
+  outcome: answered
+  must_contain:
+  - Carhartt
+  - Levi's
+  must_not_contain:
+  - Calvin Klein
+  judge:
+    min_score: 4
+fake:
+  outcome: answered
+  text: 'Year-to-date revenue by brand (in scope: Carhartt, Levi''s), as of today.'
+  llm_calls:
+    gemini-3.1-flash-lite: 2
+  bq_queries: 1
+  judge_score: 5
+  sql:
+  - SELECT 1 /* recorded placeholder */

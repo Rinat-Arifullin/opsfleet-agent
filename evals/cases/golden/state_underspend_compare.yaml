@@ -1,0 +1,28 @@
+# golden/state_underspend_compare (AC-05.1, US-05). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+# Span count in the trace (>=2 queries) needs `min_queries`: see requests.md.
+input: Why are users in California underspending, and how do they compare to users in Texas?
+tags:
+- deep
+- us05
+session:
+  profile: ceo_demo
+expect:
+  outcome: answered
+  must_contain:
+  - California
+  - Texas
+  max_llm_calls: 10
+  judge:
+    min_score: 4
+fake:
+  outcome: answered
+  text: 'California vs Texas: spend per user and a breakdown by category. A data-backed explanation: lower
+    share of high-priced categories in California. Causes beyond the data are hypotheses.'
+  llm_calls:
+    gemini-3.8-flash: 4
+    gemini-3.1-flash-lite: 2
+  bq_queries: 3
+  judge_score: 5
+  sql:
+  - SELECT 1 /* recorded placeholder */

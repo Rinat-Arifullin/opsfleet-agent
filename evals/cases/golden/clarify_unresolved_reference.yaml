@@ -1,0 +1,33 @@
+# golden/clarify_unresolved_reference (AC-23.2, AC-23.3). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+# Turn 1 must be one short clarifying question with 2-3 options and no SQL; this needs a per-turn expectation: see requests.md. The final outcome is checked here.
+turns:
+- How did it do compared to the other one?
+- Carhartt vs Levi's, last month
+tags:
+- quick
+- clarify
+- multi_turn
+session:
+  profile: analyst_b
+expect:
+  outcome: answered
+  must_contain:
+  - Carhartt
+  - Levi's
+  judge:
+    min_score: 4
+estimate:
+  llm:
+    quick_analyst: 3
+    report_verifier: 1
+  bq: 1
+fake:
+  outcome: answered
+  text: 'Carhartt vs Levi''s for last month: revenue and units for both brands.'
+  llm_calls:
+    gemini-3.1-flash-lite: 4
+  bq_queries: 1
+  judge_score: 5
+  sql:
+  - SELECT 1 /* recorded placeholder */

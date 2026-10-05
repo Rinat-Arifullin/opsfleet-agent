@@ -1,0 +1,32 @@
+# golden/preference_table_vs_bullets (iteration 39 (preferences)). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+# Optional. Two profiles with different format preferences get different formats; the second profile (bullets) is a sibling run, see requests.md.
+input: What were the top 5 categories by revenue last month?
+tags:
+- quick
+- preferences
+- optional
+session:
+  profile: analyst_a
+  preferences:
+    format: table
+expect:
+  outcome: answered
+  must_contain:
+  - '|'
+  max_llm_calls: 10
+  judge:
+    min_score: 4
+skip: requires iteration 39 (preferences); not shipped yet. Remove this skip when 39 lands.
+fake:
+  outcome: answered
+  text: |-
+    | category | revenue |
+    |---|---|
+    | Jeans | (from query) |
+  llm_calls:
+    gemini-3.1-flash-lite: 2
+  bq_queries: 1
+  judge_score: 5
+  sql:
+  - SELECT 1 /* recorded placeholder */

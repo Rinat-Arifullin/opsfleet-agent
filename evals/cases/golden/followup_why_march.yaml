@@ -1,0 +1,35 @@
+# golden/followup_why_march (AC-07.2, US-07). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+turns:
+- What is our monthly revenue for the last 12 months?
+- why is March so low?
+tags:
+- deep
+- us07
+- multi_turn
+session:
+  profile: analyst_a
+expect:
+  outcome: answered
+  must_contain:
+  - March
+  max_llm_calls: 20
+  judge:
+    min_score: 4
+estimate:
+  llm:
+    quick_analyst: 2
+    deep_analyst: 3
+    report_verifier: 1
+  bq: 3
+fake:
+  outcome: answered
+  text: 'March in the previous result: investigating with a further query on orders and returns by week
+    in March.'
+  llm_calls:
+    gemini-3.8-flash: 4
+    gemini-3.1-flash-lite: 4
+  bq_queries: 2
+  judge_score: 5
+  sql:
+  - SELECT 1 /* recorded placeholder */

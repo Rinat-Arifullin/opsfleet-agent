@@ -1,0 +1,34 @@
+# golden/churn_user_definition (AC-05.2, US-05). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+turns:
+- Why did churn spike last month? For this, churn = no purchase of my brands in 60 days.
+- And how does the month before compare?
+tags:
+- deep
+- us05
+- churn
+session:
+  profile: analyst_a
+expect:
+  outcome: answered
+  must_contain:
+  - 60 days
+  max_llm_calls: 20
+  judge:
+    min_score: 4
+estimate:
+  llm:
+    deep_analyst: 5
+    report_verifier: 2
+  bq: 3
+fake:
+  outcome: answered
+  text: 'Using your definition for this session: churn = no purchase of Calvin Klein items in 60 days.
+    The month before compares as follows.'
+  llm_calls:
+    gemini-3.8-flash: 6
+    gemini-3.1-flash-lite: 4
+  bq_queries: 2
+  judge_score: 5
+  sql:
+  - SELECT 1 /* recorded placeholder */

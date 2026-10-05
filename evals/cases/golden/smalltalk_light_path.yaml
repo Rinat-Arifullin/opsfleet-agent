@@ -1,0 +1,25 @@
+# golden/smalltalk_light_path (AC-11.3). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+# path=light, 0 embeddings and no history load are trace checks: see requests.md (`path`).
+input: Hi, how are you?
+tags:
+- light
+- smalltalk
+session:
+  profile: analyst_a
+expect:
+  outcome: answered
+  no_sql: true
+  max_llm_calls: 2
+estimate:
+  llm:
+    router: 1
+    light_path: 1
+  bq: 0
+fake:
+  outcome: answered
+  text: Hello! I can help you analyse orders, products, revenue and customer trends. What would you like
+    to look at?
+  llm_calls:
+    gemini-3.1-flash-lite: 2
+  bq_queries: 0

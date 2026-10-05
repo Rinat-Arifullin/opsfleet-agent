@@ -1,0 +1,31 @@
+# golden/churn_last_month (AC-05.2, US-05). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+input: Why did our churn rate spike last month?
+tags:
+- deep
+- us05
+- churn
+session:
+  profile: ceo_demo
+expect:
+  outcome: answered
+  must_contain:
+  - churn
+  - no order in
+  - restate
+  must_not_contain:
+  - which definition do you mean
+  judge:
+    min_score: 4
+fake:
+  outcome: answered
+  text: 'Default definition used: a customer churns when they had no order in 90 days after a prior order,
+    measured monthly. You can restate your own window and activity event. Last month vs prior months shows
+    no spike.'
+  llm_calls:
+    gemini-3.8-flash: 4
+    gemini-3.1-flash-lite: 2
+  bq_queries: 2
+  judge_score: 5
+  sql:
+  - SELECT 1 /* recorded placeholder */

@@ -1,0 +1,47 @@
+# golden/report_search (AC-21.10). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+# Code-side search, no judge: the checks are deterministic.
+input: find my reports about returns from last quarter
+tags:
+- light
+- library
+session:
+  profile: analyst_a
+  saved_reports:
+  - id: R-DEMO-0101
+    title: Returns review
+    owner: analyst_a
+    created: relative:-30d
+    tags:
+    - returns
+  - id: R-DEMO-0102
+    title: Holiday sales
+    owner: analyst_a
+    created: relative:-30d
+    tags:
+    - sales
+  - id: R-DEMO-0900
+    title: Returns review (other user)
+    owner: analyst_b
+    created: relative:-30d
+    tags:
+    - returns
+expect:
+  outcome: answered
+  no_sql: true
+  must_contain:
+  - R-DEMO-0101
+  must_not_contain:
+  - R-DEMO-0102
+  - R-DEMO-0900
+estimate:
+  llm:
+    router: 1
+    library_agent: 1
+  bq: 0
+fake:
+  outcome: answered
+  text: '1 match: R-DEMO-0101, Returns review, created last quarter, tag returns.'
+  llm_calls:
+    gemini-3.1-flash-lite: 2
+  bq_queries: 0
