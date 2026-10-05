@@ -31,6 +31,29 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | 17 | cfa876a | three review rounds. Round 1: 1 BLOCKER (PII in the stored title and limitations and in the "Saved report" message) plus 4 MAJOR (another user could save the owner's last answer; the final draft skipped the code precheck when the verifier cap was hit; a revise could not be closed after Ctrl-C; the CLI never wired ReportStore) plus 7 MINOR, all fixed. Round 2 re-review: the cross-user save still worked via an intervening turn, and another user's turn silently dropped a pending draft; `sql_used` and the other metadata were stored unguarded. All fixed: the graph now refuses any turn from a non-owner on an existing session (OD-23), and every stored text field is guarded and scrubbed. 3056 tests; the reviewer's experiments pass. Saving goes through the unauthenticated `--user`, as in 19 | owner: approve / request changes |
 | wire (D-96/D-117/D-114) | 1038268 | known_brands from profiles+seed feed the scope guard; top-3 golden examples (scrubbed, fenced, analyst turns only) in the analyst prompt; resume replays saved refs with no re-embedding; CI sets OPSFLEET_GOLDEN_STRICT=1. ODs in docs/process/iter-wire-ods.md | owner: approve / request changes |
 
+## Owner answers, 2026-10-05 morning
+
+| Item | Answer | Follow-up |
+|---|---|---|
+| D-2 | **Deadline moved: end of day Wed 2026-10-07** (not Thu) | re-plan the remaining iterations; Step 6 moves to Wed |
+| L0 (D-1, D-5, D-112) | Run the live spike now, staying inside the request limits | orchestrator runs it with a capped call count |
+| D-3 | Night run accepted; owner reviews the 🔴 iterations now | — |
+| 22a OD-10 (AC-12.13 vs AC-12.15) | Strict: after a restart a confirmed but not executed delete is expired, nothing deleted | amend AC-12.13 |
+| 22a OD-1 | Accepted: `/delete` command plus strict phrase parsing; both always need the user's confirmation | — |
+| 22a OD-14 (subset delete) | Answer did not address the case; re-asked | open |
+| D-133 | Accepted (newest 200 reports) | — |
+| D-6 | **2 retries, 1 s / 2 s backoff** (neither the plan nor ADR-003) | code change in the retry wrapper + ADR-003 text |
+| D-9, D-13, D-48 | Typed tokens (`<EMAIL>`, `<PHONE>`...) everywhere | align ACs and any remaining `[REDACTED]` text |
+| D-22 | Take the HLD: table-not-found maps to `UNKNOWN_COLUMN` | code change (iteration 13 error mapping) |
+| D-45 | Keep the code (QI expressions inside counting aggregates refused) | fix HLD §5.2 |
+| D-28 | Owner asked what UNNEST is; explained | open |
+| D-46, D-47 | Owner asked when a URL is a problem; explained | open |
+| D-20, D-31, D-35, D-60, D-75, D-94, D-103, D-115 | Add to the HLD, low priority | HLD batch edit |
+| D-137 | Accepted (DegradedGraph wrapper) | — |
+| D-138 | Accepted: quotas move to `config/models.yaml` | apply the config diff |
+| D-139 | Accepted: apply the `user_quota` migration | apply the migration diff |
+| Every row whose "Blocks" is "nothing" | Defaults accepted | — |
+
 ## Decisions needed from you
 
 | # | Question | Default taken overnight | Blocks |
