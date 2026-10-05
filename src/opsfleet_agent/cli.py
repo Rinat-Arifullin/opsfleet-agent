@@ -186,6 +186,7 @@ class Runtime:
     close: Callable[[], object] | None = None
     report_store: Any = None  # iteration 17: ReportStore on app.db (/reports)
     langfuse: Any = None  # iteration 40: obs.langfuse_sink.LangfuseSink, None when not configured
+    preference_store: Any = None  # iteration 39: store.preferences on app.db (/prefs)
 
 
 AgentFactory = Callable[[Settings, Any, Session, Path], Runtime]
@@ -256,6 +257,7 @@ def build_runtime(
     from opsfleet_agent.store.db import open_store
     from opsfleet_agent.store.feedback import FeedbackStore
     from opsfleet_agent.store.fingerprints import FingerprintStore
+    from opsfleet_agent.store.preferences import SQLitePreferenceStore
     from opsfleet_agent.store.quota import QuotaLimits, QuotaStore
     from opsfleet_agent.store.reports import ReportStore
     from opsfleet_agent.tools.run_sql import scoped_job_config_factory
@@ -303,6 +305,7 @@ def build_runtime(
     )
     personas = PersonaStore()
     reports = ReportStore(conn)  # iteration 17: the same app.db as audit and feedback
+    preferences = SQLitePreferenceStore(conn)  # iteration 39: per-user, read every turn
     services = GraphServices(
         settings=settings,
         persona=personas.refresh,
@@ -316,6 +319,7 @@ def build_runtime(
         known_brands=known_brands,
         golden_index=golden,
         delete=wire_delete(conn, audit_log, reports),  # 22a: None keeps /delete unregistered
+        preferences=preferences,
     )
     return Runtime(
         graph=DegradedGraph(AgentGraph(services, checkpointer), quota, health),
@@ -329,6 +333,7 @@ def build_runtime(
         close=conn.close,
         report_store=reports,
         langfuse=langfuse,
+        preference_store=preferences,
     )
 
 
@@ -381,6 +386,7 @@ class _Repl:
             listing=self.listing,
             delete_start=self._delete_start,
             langfuse=getattr(rt, "langfuse", None),
+            preference_store=getattr(rt, "preference_store", None),
         )
 
     def _delete_start(self, args: str) -> str:

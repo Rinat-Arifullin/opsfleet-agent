@@ -15,7 +15,9 @@ Two things live here, both only for the current session:
   merely contains the value ("orders table", "short-term"), cannot set one.
   Notes are sanitised (no URLs, code, instruction-like or policy-conflicting text), at most
   200 characters, at most 5 (``NOTE_REJECTED``). Persisting preferences across sessions is
-  iteration 39: :class:`PreferenceStore` is the seam, and nothing here writes to it.
+  iteration 39: :class:`PreferenceStore` is the seam (``store/preferences.py`` implements it,
+  ``/prefs`` writes through it), and :func:`render_preferences` turns validated values into
+  fixed code sentences for the lowest-precedence prompt block.
 
 A pending clarification (AC-23.2/23.3) is also session memory: the original question waits for
 the user's answer and is completed with it once, without asking again.
@@ -253,7 +255,7 @@ class PreferenceResult:
 
 
 class PreferenceStore(Protocol):
-    """Seam for iteration 39 (persisted preferences). Nothing in iteration 15 calls it."""
+    """Seam for persisted preferences (iteration 39; ``store.preferences`` implements it)."""
 
     def save(self, user_id: str, preferences: Mapping[str, Any]) -> None: ...
 
@@ -277,10 +279,12 @@ class SessionMemory:
         return replace(self, pending_clarification=None)
 
     def persistable(self) -> dict[str, Any]:
-        """What iteration 39 may persist: preferences and notes. Never a restatement."""
+        """What iteration 39 persists: preferences and notes (with the scope snapshot each note
+        was written under, so FR-76 filtering still works in a later session). Never a
+        restatement and never a pending clarification."""
         return {
             "preferences": dict(self.preferences),
-            "notes": [n.text for n in self.notes],
+            "notes": [{"text": n.text, "scope": dict(n.scope_snapshot)} for n in self.notes],
         }
 
     def to_state(self) -> dict[str, Any]:
@@ -519,3 +523,35 @@ def _value_in_message(field: str, value: Any, message: str) -> bool:
             _stated_with_intent(message, p) for p in _SYNONYMS["charts"][True]
         )
     return any(_stated_with_intent(message, p) for p in _SYNONYMS[field][value])
+
+
+_FORMAT_SENTENCES = {
+    "table": "Prefer a table for lists and comparisons.",
+    "bullets": "Prefer bullet points.",
+    "prose": "Prefer short prose paragraphs.",
+}
+_DEPTH_SENTENCES = {
+    "brief": "Keep answers brief.",
+    "standard": "Use standard answer depth.",
+    "deep": "Give a deeper analysis with more breakdowns.",
+}
+
+
+def render_preferences(memory: SessionMemory) -> str:
+    """Validated preferences as fixed code sentences, or "" (iteration 39, AC-24.4).
+
+    Only enumerated values reach the prompt, and only through these sentences: no user text
+    is copied here (notes go as fenced, scope-filtered data in the context section).
+    """
+    prefs = memory.preferences
+    out: list[str] = []
+    fmt, depth, charts = prefs.get("format"), prefs.get("depth"), prefs.get("charts")
+    if fmt in _FORMAT_SENTENCES:
+        out.append(_FORMAT_SENTENCES[fmt])
+    if depth in _DEPTH_SENTENCES:
+        out.append(_DEPTH_SENTENCES[depth])
+    if charts is True:
+        out.append("Suggest a chart when it helps.")
+    elif charts is False:
+        out.append("Do not suggest charts.")
+    return "\n".join(f"- {line}" for line in out)

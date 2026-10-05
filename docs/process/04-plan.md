@@ -932,8 +932,8 @@ These iterations run in the reverse of the drop order: the most protected item (
 - `src/opsfleet_agent/store/preferences.py`
 - `tests/unit/test_preferences.py`
 **Done criteria**:
-- [ ] Named tests: `test_preferences_view_reset`, `test_preference_cannot_override_safety`, `test_preference_notes_stored_injection`, `test_instruction_precedence`, `test_preferences_persist_and_apply`
-- [ ] [std]
+- [x] Named tests: `test_preferences_view_reset`, `test_preference_cannot_override_safety`, `test_preference_notes_stored_injection`, `test_instruction_precedence`, `test_preferences_persist_and_apply`
+- [x] [std]
 **Effort**: M (1) · **Depends on**: 15, 19 · **Risk**: low
 
 ### Thu 2026-10-08: final run, README, clean machine; Step 6 from 12:00

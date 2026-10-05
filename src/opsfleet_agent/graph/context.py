@@ -386,12 +386,8 @@ class AssembledContext:
             "Stated defaults (state each one you use, and the scope, in the answer):\n"
             + "\n".join(f"- {d}" for d in self.defaults)
         ]
-        prefs = self.memory.preferences  # validated enum/bool values only (memory.py)
-        if prefs:
-            parts.append(
-                "Answer preferences for this session: "
-                + ", ".join(f"{k}={str(prefs[k]).lower()}" for k in sorted(prefs))
-            )
+        # Preferences are not here (iteration 39): they go after the persona as the
+        # lowest-precedence block (persona.assemble_prompt, memory.render_preferences).
         parts += [b for b in (self.summary_block, *self.store_blocks, self.ledger_block) if b]
         return "\n\n".join(parts)
 

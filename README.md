@@ -291,6 +291,7 @@ with `/` is a command and never reaches the LLM. Any other line is a turn with i
 | `/trace [turn_id]` | Show the trace of the last (or a given) turn, with the Langfuse link if enabled |
 | `/audit [--session \| --user]` | Show audit events: saves, deletes, refusals |
 | `/persona` | Show the active persona version |
+| `/prefs [set format\|depth\|charts <value> \| note <text> \| reset]` | View or change your answer preferences (format, depth, charts, short notes); kept across sessions, never above the safety rules |
 
 Ctrl-C during an answer cancels the turn within about a second: the BigQuery job is cancelled
 and the turn is closed in the checkpoint. A second Ctrl-C at the prompt quits with exit code

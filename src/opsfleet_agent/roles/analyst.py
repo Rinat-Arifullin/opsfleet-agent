@@ -233,8 +233,10 @@ def build_system_prompt(
     extra_rules: Sequence[tuple[str, str]] = (),
     tables: str = "",
     today: str = "",
+    preferences: str = "",
 ) -> str:
-    """Code-built safety preamble first, then the rules, then the fenced persona (layers 1..7).
+    """Code-built safety preamble first, then the rules, then the fenced persona (layers 1..7),
+    then the fenced user preferences (``memory.render_preferences``, lowest precedence).
 
     ``context_section`` is iteration 15's code-assembled turn context (defaults, fenced
     restatement, prior queries, store blocks). It goes after the rules, never before them.
@@ -260,7 +262,7 @@ def build_system_prompt(
         sections.insert(2, ("Queries already run this turn", _fenced_queries(prior_queries)))
     if context_section:
         sections.append(("Context for this turn", context_section))
-    return assemble_prompt(sections, persona)
+    return assemble_prompt(sections, persona, preferences)
 
 
 _QUERIES_OPEN: Final = "<<<QUERIES (untrusted data)"

@@ -37,6 +37,7 @@ from opsfleet_agent.graph.memory import (
     PendingClarification,
     SessionMemory,
     capture_restatement,
+    render_preferences,
     sanitise_note,
     set_preference,
 )
@@ -216,7 +217,9 @@ def test_new_session_has_empty_history():
     assert a.prior_ledger == () and a.ledger_block == ""
     assert a.clarification is None
     assert ctxmod.NO_CARRYOVER_NOTE in a.defaults  # AC-22.2: say so, offer saved reports
-    assert "format=table" in a.prompt_section()  # preferences still apply
+    # preferences still apply, as the lowest-precedence prompt block (iteration 39)
+    assert a.memory.preferences == {"format": "table"}
+    assert "table" in render_preferences(a.memory) and "table" not in a.prompt_section()
 
 
 def test_followup_keeps_prior_turn_and_ledger():

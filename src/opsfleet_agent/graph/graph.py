@@ -41,7 +41,7 @@ import time
 import unicodedata
 import uuid
 from collections.abc import Callable, Collection, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Annotated, Any, Final, TypedDict
@@ -97,7 +97,7 @@ from opsfleet_agent.graph.intents import (
     mentions_customers,
 )
 from opsfleet_agent.graph.llm import Limiters, LLMSuccess, LLMWrapper
-from opsfleet_agent.graph.memory import SessionMemory
+from opsfleet_agent.graph.memory import SessionMemory, render_preferences
 from opsfleet_agent.graph.providers import is_local
 from opsfleet_agent.guards.echo import ECHO_REJECTED, ECHO_RETRY_RULE, is_echo
 from opsfleet_agent.guards.echo import normalise as normalise_echo
@@ -418,6 +418,9 @@ class GraphServices:
     golden_index: Any = None
     # iteration 22a: delete.flow.DeleteService; None = delete disabled (fail closed)
     delete: Any = None
+    # iteration 39: store.preferences.SQLitePreferenceStore, the per-user source of truth for
+    # preferences and notes (read every turn). None = session memory only.
+    preferences: Any = None
 
     def window(self) -> tuple[date, date]:
         if self.data_window is not None:
@@ -839,7 +842,7 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
             summary=state.get("history_summary") or None,
             prior_ledger=state.get("prior_ledger") or [],
             store_items=golden,  # D-117 Golden examples; seam: saved report bodies (19)
-            memory=SessionMemory.from_state(state.get("memory")),
+            memory=_with_stored_preferences(ctx, SessionMemory.from_state(state.get("memory"))),
             known_brands=sv.known_brands,  # D-96
         )
 
@@ -887,7 +890,7 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
                 window=(lo.isoformat(), hi.isoformat()),
                 prior_queries=ctx.sql_turn.ledger if role == DEEP else (),
                 context_section=a.prompt_section(), extra_rules=extra, tables=tables,
-                today=today,
+                today=today, preferences=render_preferences(a.memory),
             )  # fmt: skip
             return [
                 {"role": "system", "content": system},
@@ -1190,6 +1193,22 @@ def _report_guard(ctx: TurnContext, text: str) -> OutputVerdict:
     return OutputVerdict(True, "\n".join(out), tuple(events))
 
 
+def _with_stored_preferences(ctx: TurnContext, memory: SessionMemory) -> SessionMemory:
+    """Iteration 39: the user's stored preferences and notes replace the session's (the store
+    is the source of truth, so a ``/prefs`` change applies from the next turn and in new
+    sessions). A read failure gives no preferences and no notes (fail closed); the turn goes on.
+    Restatements and a pending clarification stay session-only."""
+    store = ctx.services.preferences
+    if store is None:
+        return memory
+    try:
+        stored = store.load(ctx.profile.user_id)
+    except Exception as exc:  # store unavailable: answer without preferences
+        logger.error("preference load failed: %s", type(exc).__name__)
+        stored = SessionMemory()
+    return replace(memory, preferences=dict(stored.preferences), notes=stored.notes)
+
+
 def _build_report(
     ctx: TurnContext,
     *,
@@ -1208,6 +1227,7 @@ def _build_report(
         invoke=sv.analyst_invoke,
         models={r: model_ids_from_settings(sv.settings, r) for r in (WRITER_ROLE, VERIFIER_ROLE)},
         persona=ctx.persona, deadline_hit=ctx.budget.deadline_hit, extra_notes=extra_notes,
+        preferences=render_preferences(ctx.assembled.memory) if ctx.assembled else "",
     )  # fmt: skip
     if not res.ok or res.draft is None:
         _record(ctx, "guard", "report", verdict="no_draft")

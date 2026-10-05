@@ -223,9 +223,12 @@ def produce_report(
     deadline_hit: Callable[[], bool] | None = None,
     prompt: str | None = None,
     extra_notes: Sequence[str] = (),
+    preferences: str = "",
 ) -> ReportResult:
     """Write, check and render a report draft. Never saves anything (the graph confirms).
-    ``extra_notes`` are code-owned lines shown under the summary (e.g. a partial analysis)."""
+    ``extra_notes`` are code-owned lines shown under the summary (e.g. a partial analysis).
+    ``preferences`` is the code-rendered, lowest-precedence block (iteration 39): it may shape
+    format and depth inside sections, never the required sections themselves."""
     sql_used = tuple(str(e.get("sql", "")) for e in sql_ledger if str(e.get("sql", "")).strip())
     lo, hi = window[0].isoformat(), window[1].isoformat()
     queries = "\n".join(
@@ -246,6 +249,7 @@ def produce_report(
             ("Result figures", _figure_line(figures) or "(none)"),
         ],
         persona,
+        preferences,
     )
     base = [{"role": "system", "content": system}, {"role": "user", "content": question}]
     w_model, w_fb = models[WRITER_ROLE]

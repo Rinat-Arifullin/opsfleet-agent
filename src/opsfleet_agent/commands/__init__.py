@@ -57,6 +57,8 @@ class CommandContext:
     delete_start: Callable[[str], str] | None = None
     # Iteration 40: obs.langfuse_sink.LangfuseSink when Langfuse is configured, else None.
     langfuse: Any = None
+    # Iteration 39: store.preferences.SQLitePreferenceStore; None = /prefs unavailable.
+    preference_store: Any = None
 
 
 REPORTS_LIST_LIMIT: Final = 20
@@ -111,6 +113,25 @@ def _feedback(args: str, ctx: CommandContext) -> CommandResult:
     except Exception as exc:  # a store failure never crashes the REPL
         log.error("feedback failed: %s", type(exc).__name__)
         return CommandResult("Could not save feedback right now.")
+    return CommandResult(text)
+
+
+def _prefs(args: str, ctx: CommandContext) -> CommandResult:
+    if ctx.preference_store is None:
+        return CommandResult(STORE_UNAVAILABLE_TEXT)
+    from opsfleet_agent.commands.preferences import handle_prefs
+
+    try:
+        text = handle_prefs(
+            args,
+            store=ctx.preference_store,
+            user_id=ctx.user_id,
+            scope=ctx.scope,
+            tracer=ctx.tracer,
+        )
+    except Exception as exc:  # a store failure never crashes the REPL
+        log.error("prefs failed: %s", type(exc).__name__)
+        return CommandResult("Could not read or save preferences right now.")
     return CommandResult(text)
 
 
@@ -252,6 +273,12 @@ def _table() -> dict[str, Command]:
         ),
         Command("/audit", "/audit [--session|--user]", "Show your audit events.", _audit),
         Command("/persona", "/persona", "Show the active persona version.", _persona),
+        Command(
+            "/prefs",
+            "/prefs [set <key> <value>|note|reset]",
+            "View or change your answer preferences.",
+            _prefs,
+        ),
         Command("/reports", "/reports [words]", "List your saved reports.", _reports),
         Command("/open", "/open <id|n|title>", "Open a saved report.", _open),
         Command("/search", "/search <words> [tag:x]", "Search saved reports.", _search),
