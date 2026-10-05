@@ -515,9 +515,9 @@ The checkpointer exists **before** 17 (M-3). Role subgraphs are compiled with `c
 - `src/opsfleet_agent/graph/memory.py`
 - `tests/unit/test_context.py`
 **Done criteria**:
-- [ ] Named tests: `test_context_scope_filter_drops_out_of_scope`, `test_history_window_bounded`, `test_new_session_has_empty_history`, `test_churn_restatement_session_only`, `test_set_preference_value_in_message`
-- [ ] Every item from the store (report bodies, history, seed trios) is wrapped as untrusted data before it enters the prompt
-- [ ] [std]
+- [x] Named tests: `test_context_scope_filter_drops_out_of_scope`, `test_history_window_bounded`, `test_new_session_has_empty_history`, `test_churn_restatement_session_only`, `test_set_preference_value_in_message`
+- [x] Every item from the store (report bodies, history, seed trios) is wrapped as untrusted data before it enters the prompt
+- [x] [std]
 **Effort**: M+ (1.5) · **Depends on**: 14a · **Risk**: high. **Rollback:** if the scope filter is red, cross-turn context is off (one-turn memory only), and the owner is told.
 
 ## Iteration 17: Report writer, verifier, confirm-before-save 🔴
