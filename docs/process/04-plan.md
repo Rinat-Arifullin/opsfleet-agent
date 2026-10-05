@@ -678,9 +678,9 @@ The reply that follows is routed to the input guard as a new turn. This takes ov
 - `src/opsfleet_agent/store/quota.py`
 - `tests/unit/test_degraded.py`
 **Done criteria**:
-- [ ] Named tests: `test_all_models_down_graceful`, `test_degraded_mode_lists_and_searches_reports_when_llm_down`, `test_quota_blocks_after_limit`
-- [ ] AC-21.14 export clause: degraded export is asserted only if 33 ships. Otherwise it is listed as not implemented (M-3).
-- [ ] [std]
+- [x] Named tests: `test_all_models_down_graceful`, `test_degraded_mode_lists_and_searches_reports_when_llm_down`, `test_quota_blocks_after_limit`
+- [x] AC-21.14 export clause: degraded export is asserted only if 33 ships. Otherwise it is listed as not implemented (M-3).
+- [x] [std]
 **Effort**: M (1) · **Depends on**: 3, 5, 18 · **Risk**: medium
 
 ## Iteration 25: Trace viewer and metrics summary `[PARALLEL OK with 24]`
