@@ -81,6 +81,12 @@ from opsfleet_agent.graph.llm import Limiters, LLMSuccess, LLMWrapper
 from opsfleet_agent.graph.memory import SessionMemory
 from opsfleet_agent.guards.input import check_input
 from opsfleet_agent.guards.output import REFUSAL_TEXT, ROLE_TOOLS, check_output
+from opsfleet_agent.guards.plain_language import (
+    PLAIN_LANGUAGE_RULE,
+    PLAIN_LANGUAGE_SECTION,
+    SCHEMA_TERMS_REWRITTEN,
+    humanize_identifiers,
+)
 from opsfleet_agent.guards.scope import ProductScope
 from opsfleet_agent.obs import progress
 from opsfleet_agent.persona import Persona, assemble_prompt
@@ -1087,7 +1093,12 @@ def _force_text(ctx: TurnContext, state: TurnState) -> str:
     sv = ctx.services
     model, fb = model_ids_from_settings(sv.settings, "fallback")
     system = assemble_prompt(
-        [("Force answer", _FORCE_RULES), ("Queries", summary or "(none)")], ctx.persona
+        [
+            ("Force answer", _FORCE_RULES),
+            (PLAIN_LANGUAGE_SECTION, PLAIN_LANGUAGE_RULE),  # D-151
+            ("Queries", summary or "(none)"),
+        ],
+        ctx.persona,
     )
     messages = [
         {"role": "system", "content": system},
@@ -1142,8 +1153,15 @@ def _finalize(ctx: TurnContext, state: TurnState) -> dict[str, Any]:
     else:
         verdict = _guard(ctx, state, state.get("draft", ""))
         codes = set(verdict.codes())
-        ctx.guard_codes |= codes
         text = verdict.text if verdict.text else REFUSAL_TEXT
+        if verdict.allowed and verdict.text:
+            # D-151: plain-language rewrite of the allowed answer (analyst or force answer).
+            # It runs after the guard, so the guard judged the model's own words, and it only
+            # swaps identifiers for business words: no digit, URL or PII can be introduced.
+            text = humanize_identifiers(verdict.text)
+            if text != verdict.text:
+                codes.add(SCHEMA_TERMS_REWRITTEN)
+        ctx.guard_codes |= codes
         update["outcome"] = "answered" if verdict.allowed else "blocked"
         _record(ctx, "guard", "output", verdict="allow" if verdict.allowed else "block",
                 rule_hits=sorted(codes))  # fmt: skip

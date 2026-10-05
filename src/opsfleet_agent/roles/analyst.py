@@ -47,6 +47,7 @@ from opsfleet_agent.graph.llm import (
 )
 from opsfleet_agent.graph.providers import chat_model_for
 from opsfleet_agent.guards.output import normalise_for_display
+from opsfleet_agent.guards.plain_language import PLAIN_LANGUAGE_RULE, PLAIN_LANGUAGE_SECTION
 from opsfleet_agent.persona import PERSONA_LABEL, SAFETY_PREAMBLE, Persona, assemble_prompt
 from opsfleet_agent.tools.registry import RUN_SQL, tools_for
 
@@ -237,7 +238,12 @@ def build_system_prompt(
     body = prompt if prompt is not None else load_analyst_prompt()
     mode = _MODE_TEXT[role]
     scope = f"Your data access: {scope_label}. The data covers {window[0]} to {window[1]}."
-    sections = [("Scope", scope), ("Role", mode), ("Analyst rules", body)]
+    sections = [
+        ("Scope", scope),
+        ("Role", mode),
+        ("Analyst rules", body),
+        (PLAIN_LANGUAGE_SECTION, PLAIN_LANGUAGE_RULE),  # D-151: code-owned, not the persona
+    ]
     if prior_queries:
         sections.insert(2, ("Queries already run this turn", _fenced_queries(prior_queries)))
     if context_section:

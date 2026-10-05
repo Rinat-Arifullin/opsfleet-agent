@@ -27,6 +27,12 @@ from opsfleet_agent.guards.output import (
     check_output,
 )
 from opsfleet_agent.guards.pii import PiiDetector
+from opsfleet_agent.guards.plain_language import (
+    PLAIN_LANGUAGE_RULE,
+    PLAIN_LANGUAGE_SECTION,
+    SCHEMA_TERMS_REWRITTEN,
+    humanize_identifiers,
+)
 from opsfleet_agent.persona import PERSONA_LABEL, SAFETY_PREAMBLE, Persona, assemble_prompt
 from opsfleet_agent.roles.router import LIGHT_LABELS, ChatMessage, Invoke, UserTurn
 from opsfleet_agent.session import Profile
@@ -91,7 +97,11 @@ def build_light_messages(
     if not isinstance(message, UserTurn):
         raise TypeError("message must be a UserTurn")
     system = assemble_prompt(
-        [("Scope", _scope_text(profile)), ("Light reply", _LIGHT_RULES)],
+        [
+            ("Scope", _scope_text(profile)),
+            ("Light reply", _LIGHT_RULES),
+            (PLAIN_LANGUAGE_SECTION, PLAIN_LANGUAGE_RULE),  # D-151
+        ],
         persona,
     )
     return [ChatMessage("system", system), ChatMessage("user", message.text)]
@@ -136,7 +146,12 @@ def run_light_path(
     if verdict.allowed and not verdict.text.strip():  # e.g. "<b></b>": nothing left to show
         text, source = _template(label, profile), "template"
     elif verdict.allowed:
-        text = verdict.text + suffix
+        body = verdict.text
+        if source == "model":  # D-151: model-written text only, after the guard allowed it
+            body = humanize_identifiers(body)
+            if body != verdict.text:
+                codes = codes | {SCHEMA_TERMS_REWRITTEN}
+        text = body + suffix
     elif UNEXPECTED_ACTION in codes:  # the turn did something it must not: fail closed
         text, source = verdict.text, "blocked"
     else:  # e.g. the model echoed instructions: a code-written reply is always safe

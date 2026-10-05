@@ -28,6 +28,7 @@ from typing import Any, Final
 
 from opsfleet_agent.graph.context import KIND_HISTORY_TURN, KIND_LEDGER, fence_untrusted
 from opsfleet_agent.graph.llm import LLMSuccess, LLMWrapper
+from opsfleet_agent.guards.plain_language import PLAIN_LANGUAGE_SECTION, REPORT_PLAIN_LANGUAGE_RULE
 from opsfleet_agent.persona import Persona, assemble_prompt
 from opsfleet_agent.reports.schema import (
     MAX_JSON_CHARS,
@@ -135,6 +136,7 @@ def produce_report(
         [
             ("Scope", f"Data access: {scope_label}. The data covers {lo} to {hi}."),
             ("Report writer rules", prompt if prompt is not None else load_report_prompt()),
+            (PLAIN_LANGUAGE_SECTION, REPORT_PLAIN_LANGUAGE_RULE),  # D-151: prose only
             (
                 "Analysis",
                 fence_untrusted(KIND_HISTORY_TURN, analysis, max_chars=MAX_ANALYSIS_CHARS),

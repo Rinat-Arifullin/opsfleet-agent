@@ -1,0 +1,303 @@
+"""Plain-language answers (owner decision D-151).
+
+Chat answers are read by business users, not engineers. They must not show table names,
+column names, SQL or schema terms. Two code-owned layers enforce this:
+
+* :data:`PLAIN_LANGUAGE_RULE` is a prompt section added by code (never by the persona) to
+  every prompt that writes user-facing chat text: the quick and deep analyst, the light
+  path and the force answer. :data:`REPORT_PLAIN_LANGUAGE_RULE` is the report-writer variant:
+  it covers the report prose and leaves the report structure and the SQL the system appends
+  alone.
+* :func:`humanize_identifiers` is a pure, deterministic rewrite applied to model-written
+  chat text **after** the output guard has allowed it. It replaces identifiers the model
+  still wrote (``sale_price``, ``order_items.created_at``, "the orders table") with business
+  words. It never changes a digit, it is idempotent, and it leaves code blocks and pasted
+  SQL alone (AC-02.2: a user who asks "show me the SQL" still sees it).
+
+The identifier set comes from :data:`opsfleet_agent.guards.sql_policy.ALLOWED_TABLES`, so a
+schema change cannot leave a column un-humanized without a test noticing (every allowed
+column has a phrase, checked at import time).
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Callable
+from types import MappingProxyType
+from typing import Final
+
+from opsfleet_agent.guards.sql_policy import ALLOWED_TABLES, DATASET
+
+__all__ = [
+    "PLAIN_LANGUAGE_RULE",
+    "PLAIN_LANGUAGE_SECTION",
+    "REPORT_PLAIN_LANGUAGE_RULE",
+    "SCHEMA_TERMS_REWRITTEN",
+    "humanize_identifiers",
+]
+
+#: Trace rule code (lowercase, like the output guard's codes) recorded when the rewrite
+#: changed the answer.
+SCHEMA_TERMS_REWRITTEN: Final = "schema_terms_rewritten"
+
+#: Section title used by every prompt site, so tests can find the section.
+PLAIN_LANGUAGE_SECTION: Final = "Answer language"
+
+PLAIN_LANGUAGE_RULE: Final = (
+    "Write for a business reader who does not know how the data is stored. In your answer, "
+    "never mention table names, column names, field names, SQL, queries, joins or the "
+    "database schema. Describe the data in business words instead, for example "
+    '"item sale price", "order date", "order status" or "customer sign-up date". '
+    "Mention the product scope and the time zone naturally where they matter, for example "
+    '"for Calvin Klein products" or "dates are in UTC". '
+    "Only if the user explicitly asks to see the SQL, show it in a fenced code block."
+)
+
+REPORT_PLAIN_LANGUAGE_RULE: Final = (
+    "Write every text value for a business reader who does not know how the data is "
+    "stored: never mention table names, column names, field names, SQL, queries, joins or "
+    "the database schema. Use business words instead, for example \"item sale price\" or "
+    '"order date". Keep every required key; the system appends the SQL separately.'
+)
+
+# --- identifier phrases ---------------------------------------------------------------
+
+_TABLE_WORDS: Final = MappingProxyType(
+    {"orders": "orders", "order_items": "order items", "products": "products", "users": "customers"}
+)
+_RECORD_WORDS: Final = MappingProxyType(
+    {
+        "orders": "order records",
+        "order_items": "order item records",
+        "products": "product records",
+        "users": "customer records",
+    }
+)
+_COLUMN_WORDS: Final = MappingProxyType(
+    {
+        "id": "ID",
+        "name": "name",
+        "brand": "brand",
+        "category": "category",
+        "department": "department",
+        "retail_price": "retail price",
+        "cost": "cost",
+        "sku": "SKU",
+        "distribution_center_id": "distribution center ID",
+        "order_id": "order ID",
+        "user_id": "customer ID",
+        "product_id": "product ID",
+        "inventory_item_id": "inventory item ID",
+        "status": "status",
+        "sale_price": "sale price",
+        "created_at": "created date",
+        "shipped_at": "shipped date",
+        "delivered_at": "delivered date",
+        "returned_at": "returned date",
+        "first_name": "first name",
+        "last_name": "last name",
+        "email": "email",
+        "age": "age",
+        "gender": "gender",
+        "state": "state",
+        "street_address": "street address",
+        "postal_code": "postal code",
+        "city": "city",
+        "country": "country",
+        "latitude": "latitude",
+        "longitude": "longitude",
+        "traffic_source": "traffic source",
+        "user_geom": "customer location",
+    }
+)
+#: Table-specific phrases where the bare column word would be ambiguous.
+_QUALIFIED_WORDS: Final = MappingProxyType(
+    {
+        ("orders", "created_at"): "order date",
+        ("orders", "status"): "order status",
+        ("orders", "shipped_at"): "order shipped date",
+        ("orders", "delivered_at"): "order delivered date",
+        ("orders", "returned_at"): "order returned date",
+        ("order_items", "created_at"): "item created date",
+        ("order_items", "sale_price"): "item sale price",
+        ("order_items", "status"): "item status",
+        ("order_items", "id"): "order item ID",
+        ("products", "id"): "product ID",
+        ("products", "name"): "product name",
+        ("products", "cost"): "product cost",
+        ("users", "id"): "customer ID",
+        ("users", "created_at"): "customer sign-up date",
+        ("users", "age"): "customer age",
+        ("users", "gender"): "customer gender",
+        ("users", "country"): "customer country",
+        ("users", "state"): "customer state",
+        ("users", "city"): "customer city",
+    }
+)
+
+
+def _check_phrases() -> None:
+    """Import-time guard: every allowlisted table and column has a phrase."""
+    if set(_TABLE_WORDS) != set(ALLOWED_TABLES) or set(_RECORD_WORDS) != set(ALLOWED_TABLES):
+        raise RuntimeError("plain-language table phrases drift from the policy schema")
+    columns = set().union(*ALLOWED_TABLES.values())
+    if not columns <= set(_COLUMN_WORDS):
+        raise RuntimeError("plain-language column phrases drift from the policy schema")
+    for table, column in _QUALIFIED_WORDS:
+        if column not in ALLOWED_TABLES.get(table, frozenset()):
+            raise RuntimeError("plain-language qualified phrase names an unknown column")
+    if any(ch.isdigit() for p in (*_TABLE_WORDS.values(), *_RECORD_WORDS.values(),
+                                  *_COLUMN_WORDS.values(), *_QUALIFIED_WORDS.values())
+           for ch in p):  # fmt: skip
+        raise RuntimeError("plain-language phrases must not contain digits")
+
+
+_check_phrases()
+
+_ALL_COLUMNS: Final = frozenset(_COLUMN_WORDS)
+_TABLES_ALT: Final = "|".join(sorted(map(re.escape, ALLOWED_TABLES), key=len, reverse=True))
+_COLUMNS_ALT: Final = "|".join(sorted(map(re.escape, _ALL_COLUMNS), key=len, reverse=True))
+#: Bare identifiers rewritten without backticks: only snake_case ones, so ordinary English
+#: ("orders", "status", "users") is never touched.
+_SNAKE: Final = sorted(
+    (n for n in (*ALLOWED_TABLES, *_ALL_COLUMNS, DATASET) if "_" in n), key=len, reverse=True
+)
+
+_DATASET_RE: Final = re.compile(
+    rf"(?P<the>\bthe\s+)?`?(?:[\w-]+\.)?{re.escape(DATASET)}(?:\.(?P<table>{_TABLES_ALT}))?`?"
+    r"(?![\w`]|\.\w)(?:\s+(?:dataset|tables?)\b)?",
+    re.IGNORECASE,
+)
+_TABLE_PHRASE_RE: Final = re.compile(
+    rf"(?P<the>\bthe\s+)?(?:parent\s+)?`?(?P<table>{_TABLES_ALT})`?\s+tables?\b"
+)
+_COLUMN_PHRASE_RE: Final = re.compile(
+    rf"(?P<the>\bthe\s+)?`?(?:(?P<table>{_TABLES_ALT})\.)?(?P<col>{_COLUMNS_ALT})`?"
+    r"\s+(?:columns?|fields?)\b"
+)
+_DOTTED_RE: Final = re.compile(
+    rf"(?<![\w.@/-])`?(?P<table>{_TABLES_ALT})\.(?P<col>{_COLUMNS_ALT})`?(?![\w`]|\.\w)"
+)
+_BACKTICK_RE: Final = re.compile(r"`(?P<body>[A-Za-z_][\w.]{0,79})`")
+_BARE_RE: Final = re.compile(
+    r"(?<![\w.@/`-])(?P<tok>" + "|".join(map(re.escape, _SNAKE)) + r")(?![\w`])"
+)
+_ALIAS_RE: Final = re.compile(r"[a-z]{1,3}")
+
+_FENCE_RE: Final = re.compile(r"```.*?(?:```|\Z)", re.DOTALL)
+_PARAGRAPH_SPLIT_RE: Final = re.compile(r"(\n[ \t]*\n)")
+_SQL_PARAGRAPH_RE: Final = re.compile(r"\bSELECT\b[\s\S]*\bFROM\b")
+_SENTENCE_START_RE: Final = re.compile(r"(?:\A|[.!?:]\s+|\n\s*(?:[-*+]\s+|\d+[.)]\s+)?)\Z")
+
+
+def _column_phrase(table: str | None, column: str) -> str:
+    if table is not None and (table, column) in _QUALIFIED_WORDS:
+        return _QUALIFIED_WORDS[(table, column)]
+    return _COLUMN_WORDS.get(column, column.replace("_", " "))
+
+
+def _fit(match: re.Match[str], phrase: str) -> str:
+    """Capitalise the phrase when it starts a sentence or list item."""
+    if phrase and _SENTENCE_START_RE.search(match.string, 0, match.start()):
+        return phrase[0].upper() + phrase[1:]
+    return phrase
+
+
+def _sub_dataset(m: re.Match[str]) -> str:
+    table = m.group("table")
+    if not table:
+        return _fit(m, "the store data")
+    return _fit(m, ("the " if m.group("the") else "") + _RECORD_WORDS[table.lower()])
+
+
+def _sub_table_phrase(m: re.Match[str]) -> str:
+    phrase = _RECORD_WORDS[m.group("table")]
+    return _fit(m, ("the " if m.group("the") else "") + phrase)
+
+
+def _sub_column_phrase(m: re.Match[str]) -> str:
+    phrase = _column_phrase(m.group("table"), m.group("col"))
+    return _fit(m, ("the " if m.group("the") else "") + phrase)
+
+
+def _sub_dotted(m: re.Match[str]) -> str:
+    table, col = m.group("table"), m.group("col")
+    if col not in ALLOWED_TABLES[table]:
+        return m.group(0)
+    return _fit(m, _column_phrase(table, col))
+
+
+def _sub_backtick(m: re.Match[str]) -> str:
+    body = m.group("body")
+    parts = body.split(".")
+    if len(parts) == 1:
+        name = parts[0]
+        if name in _TABLE_WORDS:
+            return _fit(m, _TABLE_WORDS[name])
+        if name in _COLUMN_WORDS:
+            return _fit(m, _column_phrase(None, name))
+        return m.group(0)
+    if len(parts) == 2:
+        prefix, col = parts
+        if prefix in ALLOWED_TABLES and col in ALLOWED_TABLES[prefix]:
+            return _fit(m, _column_phrase(prefix, col))
+        if _ALIAS_RE.fullmatch(prefix) and col in _COLUMN_WORDS:  # `oi.sale_price`
+            return _fit(m, _column_phrase(None, col))
+    return m.group(0)
+
+
+def _sub_bare(m: re.Match[str]) -> str:
+    tok = m.group("tok")
+    if tok == DATASET:
+        return _fit(m, "the store data")
+    if tok in _TABLE_WORDS:
+        return _fit(m, _TABLE_WORDS[tok])
+    return _fit(m, _column_phrase(None, tok))
+
+
+_PASSES: Final[tuple[tuple[re.Pattern[str], Callable[[re.Match[str]], str]], ...]] = (
+    (_DATASET_RE, _sub_dataset),
+    (_TABLE_PHRASE_RE, _sub_table_phrase),
+    (_COLUMN_PHRASE_RE, _sub_column_phrase),
+    (_DOTTED_RE, _sub_dotted),
+    (_BACKTICK_RE, _sub_backtick),
+    (_BARE_RE, _sub_bare),
+)
+
+
+def _humanize_prose(text: str) -> str:
+    for pattern, repl in _PASSES:
+        text = pattern.sub(repl, text)
+    return text
+
+
+def _humanize_unfenced(text: str) -> str:
+    """Rewrite paragraph by paragraph; a paragraph holding pasted SQL is left as is."""
+    parts = _PARAGRAPH_SPLIT_RE.split(text)
+    return "".join(
+        p if i % 2 or _SQL_PARAGRAPH_RE.search(p) else _humanize_prose(p)
+        for i, p in enumerate(parts)
+    )
+
+
+def humanize_identifiers(text: str) -> str:
+    """Replace table, column and dataset identifiers in ``text`` with business words.
+
+    Pure and deterministic. Never adds, removes or changes a digit; idempotent
+    (``humanize_identifiers(humanize_identifiers(t)) == humanize_identifiers(t)``). Fenced
+    code blocks and paragraphs that contain ``SELECT ... FROM`` are returned unchanged.
+    Ordinary English words ("orders", "users", "status") are only rewritten in an
+    identifier form: backticked, ``table.column``, or "the orders table".
+    """
+    if not isinstance(text, str):
+        raise TypeError("text must be a str")
+    if not text:
+        return text
+    out: list[str] = []
+    pos = 0
+    for m in _FENCE_RE.finditer(text):
+        out.append(_humanize_unfenced(text[pos : m.start()]))
+        out.append(m.group(0))
+        pos = m.end()
+    out.append(_humanize_unfenced(text[pos:]))
+    return "".join(out)
