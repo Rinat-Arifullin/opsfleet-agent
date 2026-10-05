@@ -125,7 +125,7 @@ from opsfleet_agent.guards.small_cell import (
     SmallCellRewrite,
     apply_small_cell,
 )
-from opsfleet_agent.guards.sql_policy import MAX_SQL_CHARS, Rule, check_aggregate_only
+from opsfleet_agent.guards.sql_policy import MAX_SQL_CHARS, Rule, aggregate_only_plan
 
 __all__ = [
     "MAX_PURPOSE_CHARS",
@@ -212,6 +212,12 @@ EMPTY_HINT_FIRST: Final = (
 EMPTY_HINT_FINAL: Final = (
     "The query again returned no rows. Do not query again: tell the user that no rows "
     "matched and which filters were applied."
+)
+#: D-163: every band of a bands answer held fewer than k customers and was hidden.
+SMALL_BANDS_HINT: Final = (
+    "Every band in this result had too few customers to show, so all of them are hidden. "
+    "Do not query again: tell the user the bands are too small to show, or offer wider "
+    "bands."
 )
 TRUNCATED_HINT: Final = (
     f"Only the first {MAX_ROWS} rows are shown. Aggregate further or add ORDER BY ... LIMIT."
@@ -408,6 +414,10 @@ class RunSqlSession:
     scope: ProductScope | None
     bytes: SessionByteBudget = field(default_factory=SessionByteBudget)
     memo: QueryMemo[QueryResult] = field(default_factory=QueryMemo)
+    # D-162: sticky aggregate-only mode. Set once a turn of this session was a customer
+    # ranking (spend bands); never cleared for the rest of the session, so a follow-up such as
+    # "show their IDs" runs under the same bands-only rules. A new session starts clear.
+    aggregate_only: bool = False
 
 
 @dataclass
@@ -553,6 +563,39 @@ def _scrub_rows(
     return out_columns, out_rows
 
 
+def _customer_count(value: Any) -> int | None:
+    """An integral customer count from a result cell, or None when it is not one."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, decimal.Decimal | float) and math.isfinite(value) and int(value) == value:
+        return int(value)
+    return None
+
+
+def _suppress_small_bands(
+    rows: list[dict[str, Any]], band_counts: tuple[str, ...], k: int
+) -> tuple[list[dict[str, Any]], int]:
+    """D-163: drop every band row whose customer count is below `k`.
+
+    `band_counts` are the result columns the SQL policy proved to count distinct customers
+    (`aggregate_only_plan`). The check runs on the returned rows, so no SQL the model writes can
+    get a small band past it. A row whose count column is missing, null or not an integer is
+    dropped too (fail closed). Rows are dropped, not merged: share and average columns are not
+    additive, so merging them in code would print wrong numbers."""
+    if not band_counts:
+        return rows, 0
+    kept: list[dict[str, Any]] = []
+    for row in rows:
+        lowered = {str(key).lower(): value for key, value in row.items()}
+        counts = [_customer_count(lowered.get(name)) for name in band_counts]
+        if all(c is not None and c >= k for c in counts):
+            kept.append(row)
+    hidden = len(rows) - len(kept)
+    return kept, hidden
+
+
 def _cap(rows: list[dict[str, Any]], truncated: bool) -> tuple[list[dict[str, Any]], bool]:
     return rows[:MAX_ROWS], truncated or len(rows) > MAX_ROWS
 
@@ -664,10 +707,14 @@ class RunSqlTool:
         if isinstance(scoped, ScopeRefusal):
             return _from_refusal(scoped)
         assert scope is not None  # apply_scope refuses a None scope
-        if turn.aggregate_only:  # D-159: bands and counts only, no individual customers
-            decision = check_aggregate_only(args.sql)
-            if not decision.allowed:
-                return _from_refusal(ScopeRefusal.from_policy(decision))
+        band_counts: tuple[str, ...] = ()
+        # D-159: bands and counts only, no individual customers. D-162: the session flag keeps
+        # it on for every later turn of the session.
+        if turn.aggregate_only or session.aggregate_only:
+            plan_ao = aggregate_only_plan(args.sql)
+            if not plan_ao.decision.allowed:
+                return _from_refusal(ScopeRefusal.from_policy(plan_ao.decision))
+            band_counts = plan_ao.band_counts
         # 4: small cell
         sc = apply_small_cell(scoped, scope, self.k)
         if isinstance(sc, ScopeRefusal):
@@ -717,14 +764,16 @@ class RunSqlTool:
         columns = [c for c in result.columns if c not in injected]
         if injected:
             rows = [{k: v for k, v in r.items() if k not in injected} for r in rows]
-        # 9: scrub; 10: cap
+        # 9: scrub; D-163: small bands; 10: cap
         columns, rows = _scrub_rows(columns, rows, self.scrub)
+        rows, hidden_bands = _suppress_small_bands(rows, band_counts, self.k)
         rows, truncated = _cap(rows, result.truncated)
-        suppressed = (
-            f"groups with fewer than {self.k} customers are hidden"
-            if isinstance(sc, SmallCellRewrite) and sc.query.sql != scoped.sql
-            else None
-        )
+        notes = []
+        if isinstance(sc, SmallCellRewrite) and sc.query.sql != scoped.sql:
+            notes.append(f"groups with fewer than {self.k} customers are hidden")
+        if hidden_bands:
+            notes.append(f"{hidden_bands} band(s) with fewer than {self.k} customers hidden")
+        suppressed = "; ".join(notes) or None
         return _Success(
             columns=columns,
             rows=rows,
@@ -740,6 +789,7 @@ class RunSqlTool:
             model_sql=args.sql,
             purpose=args.purpose,
             statement_key=statement_key,
+            hint=SMALL_BANDS_HINT if hidden_bands and not rows else None,
         )
 
     def _population(
@@ -893,7 +943,9 @@ class RunSqlTool:
                 }
             )
             if not outcome.rows:
-                outcome.hint = EMPTY_HINT_FIRST if turn.empty_results == 0 else EMPTY_HINT_FINAL
+                if outcome.hint is None:
+                    first = turn.empty_results == 0
+                    outcome.hint = EMPTY_HINT_FIRST if first else EMPTY_HINT_FINAL
                 turn.empty_results += 1
             elif outcome.truncated:
                 outcome.hint = TRUNCATED_HINT

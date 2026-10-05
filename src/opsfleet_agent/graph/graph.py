@@ -94,6 +94,7 @@ from opsfleet_agent.graph.intents import (
     is_customer_ranking_request,
     is_sql_request,
     mentions_customer_id,
+    mentions_customers,
 )
 from opsfleet_agent.graph.llm import Limiters, LLMSuccess, LLMWrapper
 from opsfleet_agent.graph.memory import SessionMemory
@@ -365,6 +366,9 @@ class TurnState(TypedDict, total=False):
     # iteration 22a: the pending delete (ids, sha256(token), binding fields, step). Not in
     # _TURN_RESET: it lives from the preview turn to the confirmation turn. Never the token.
     pending_action: dict[str, Any]
+    # D-162: sticky aggregate-only mode. Set by the first customer-ranking turn of the session
+    # and never cleared: every later turn runs run_sql in bands-only mode. Not in _TURN_RESET.
+    aggregate_only: bool
 
 
 _TURN_RESET: Final[dict[str, Any]] = {
@@ -616,6 +620,8 @@ def _restore_ctx(ctx: TurnContext, snap: Any) -> bool:
         setattr(t, f, sql[f])
     for f in _SQL_COUNTS:
         setattr(t, f, sql[f])
+    if ctx.sql_session.aggregate_only:  # D-162: a resumed turn of a sticky session
+        t.aggregate_only = True
     ctx.tool_names[:] = names
     ctx.new_figures[:] = figures
     ctx.guard_codes |= set(codes)
@@ -712,6 +718,11 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
             "message": decision.scrubbed,
             "pii_notice": decision.pii_notice or "",
         }
+        # D-162: once a turn of this session was a customer ranking, every later turn stays
+        # aggregate-only (no reset within the session; a new session starts clear).
+        sticky = bool(state.get("aggregate_only")) or ctx.sql_session.aggregate_only
+        if sticky:
+            ctx.sql_session.aggregate_only = ctx.sql_turn.aggregate_only = True
         model, fb = model_ids_from_settings(settings, "router")
         prev = _previous_user(state, ctx.sql_session.scope)
         rd = route(
@@ -745,6 +756,11 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
             # D-159: a customer ranking, whatever the label, is answered with spend bands and
             # customer counts only. run_sql refuses id-grain queries for the rest of the turn.
             ctx.sql_turn.aggregate_only = True
+            ctx.sql_session.aggregate_only = True  # D-162: sticky for the rest of the session
+            update["aggregate_only"] = True
+            ctx.notice = ctx.notice or CUSTOMER_BANDS_NOTICE
+        elif sticky and update["route"] == "full" and mentions_customers(decision.scrubbed):
+            # D-162: a follow-up about customers ("show their IDs") is still answered in bands
             ctx.notice = ctx.notice or CUSTOMER_BANDS_NOTICE
         if update["route"] == "refuse":
             update.update(final_text=refusal or rd.refusal_text or REFUSAL_TEXT, outcome="refused")
@@ -1726,6 +1742,8 @@ class AgentGraph:
                     # M1: another user's session is refused before any graph write, so its
                     # history, ledger and pending draft stay exactly as they were
                     return TurnResult(OTHER_OWNER_TEXT, outcome="refused")
+                if values.get("aggregate_only"):  # D-162: survives a process restart
+                    sql_session.aggregate_only = True
                 # iteration 22a: a confirmed delete stranded before execute_delete (a crash
                 # or Ctrl-C) is closed first, re-verified, never silently dropped (OD-10)
                 if check_pending and DELETE_EXECUTE_NODE in tuple(st.next):
@@ -1960,7 +1978,12 @@ class AgentGraph:
         ctx = _new_context(self.services, "", session, self._sql_session(session), "")
         graph = _build(ctx, self.checkpointer)
         snap = graph.get_state(self._config(session.session_id))
-        return PendingTurn(self, session, (ctx, graph), tuple(snap.next), dict(snap.values))
+        values = dict(snap.values)
+        if values.get("aggregate_only") and values.get("owner") in (
+            None, "", session.profile.user_id
+        ):  # D-162: a resumed turn keeps the session's aggregate-only mode
+            ctx.sql_session.aggregate_only = True
+        return PendingTurn(self, session, (ctx, graph), tuple(snap.next), values)
 
 
 @dataclass

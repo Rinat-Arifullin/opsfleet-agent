@@ -40,6 +40,7 @@ __all__ = [
     "is_customer_ranking_request",
     "is_sql_request",
     "mentions_customer_id",
+    "mentions_customers",
 ]
 
 MAX_INTENT_CHARS: Final = 300  # longer messages are never treated as these intents
@@ -115,10 +116,11 @@ CUSTOMER_BANDS_RULE: Final = (
     "and customer counts only, never with individual customers. Write one query that computes "
     "each customer's total spend in a subquery, then groups those totals into spend bands with "
     "CASE (for example under $100, $100 to $499, $500 to $999, $1,000 and over) and returns per "
-    "band the number of customers, the band's revenue and its share of total revenue. Do not "
+    "band the number of customers as a column named customers (COUNT(*) AS customers over the "
+    "per-customer subquery), the band's revenue and its share of total revenue. Do not "
     "return or mention customer IDs, user IDs or per-customer rows: such a query is refused. "
-    f"A band with fewer than {DEFAULT_K} customers is merged into the next lower band; if that "
-    "is not possible, leave it out and say that small bands were combined."
+    f"A band with fewer than {DEFAULT_K} customers is hidden from the result by the tool; "
+    "when a band is missing, say that small bands are not shown, or use wider bands."
 )
 _CUSTOMERS: Final = r"(?:customers?|buyers?|clients?|shoppers?|purchasers?|spenders?|users?)"
 _RANK: Final = (
@@ -193,3 +195,17 @@ def mentions_customer_id(text: str) -> bool:
     if not isinstance(text, str) or not text:
         return False
     return bool(_CUSTOMER_ID_RE.search(text))
+
+
+# D-162: a follow-up in an aggregate-only session that is about customers or their IDs gets the
+# bands notice again. The notice is cosmetic: run_sql enforces the mode on every turn anyway.
+_CUSTOMER_FOLLOWUP_RE: Final = re.compile(
+    rf"\b(?:{_CUSTOMERS}|ids?|identifiers?|who)\b", re.IGNORECASE
+)
+
+
+def mentions_customers(text: str) -> bool:
+    """True when a message is about customers, their IDs or who they are (D-162)."""
+    if not isinstance(text, str) or not text.strip() or len(text) > MAX_INTENT_CHARS:
+        return False
+    return bool(_CUSTOMER_FOLLOWUP_RE.search(" ".join(_fold(text).split())))

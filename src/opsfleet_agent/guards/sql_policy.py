@@ -141,8 +141,10 @@ __all__ = [
     "QI_COLUMNS",
     "SCOPE_PATTERN_HINT",
     "SOURCE_NOT_ALLOWED_HINT",
+    "AggregateOnlyPlan",
     "PolicyDecision",
     "Rule",
+    "aggregate_only_plan",
     "allowed_sources_text",
     "check_aggregate_only",
     "check_sql",
@@ -229,6 +231,16 @@ _PII: Final = "pii"
 _RAWTS: Final = "rawts"
 #: A value computed from a QI (anything but a bare pass-through of a QI column).
 _QIEXPR: Final = "qiexpr"
+#: D-163: a customer key (``users.id``, ``orders.user_id``, ``order_items.user_id``). It marks
+#: a per-customer subquery (one row per customer) and ``COUNT(DISTINCT <customer key>)``.
+_USERKEY: Final = "userkey"
+_USER_KEYS: Final[MappingProxyType[str, frozenset[str]]] = MappingProxyType(
+    {
+        "users": frozenset({"id"}),
+        "orders": frozenset({"user_id"}),
+        "order_items": frozenset({"user_id"}),
+    }
+)
 #: ``DATE_TRUNC``/``TIMESTAMP_TRUNC``/``DATETIME_TRUNC`` units coarse enough for a signup
 #: timestamp (MONTH or coarser). WEEK, DAY and ISOYEAR are not allowed (fail closed).
 _COARSE_TS_UNITS: Final = frozenset({"MONTH", "QUARTER", "YEAR"})
@@ -296,6 +308,7 @@ class Rule(StrEnum):
     SMALL_CELL_UNPLACEABLE = "small_cell_unplaceable"
     QI_DIFFERENCING = "qi_differencing"
     CUSTOMER_GRAIN = "customer_grain"
+    BAND_COUNT_REQUIRED = "band_count_required"
 
 
 _HINTS: Final[MappingProxyType[Rule, str]] = MappingProxyType(
@@ -355,6 +368,12 @@ _HINTS: Final[MappingProxyType[Rule, str]] = MappingProxyType(
             "each customer's total in a subquery, then group those totals into spend bands "
             "(CASE on the total) and return per band the number of customers and the share "
             "of revenue; return no customer ids and no per-customer, per-order or per-item rows"
+        ),
+        Rule.BAND_COUNT_REQUIRED: (
+            "this query groups per-customer values into bands or groups: return each group's "
+            "number of customers as a named column, either COUNT(*) AS customers over the "
+            "per-customer subquery or COUNT(DISTINCT user_id) AS customers; groups with too "
+            "few customers are hidden from the result"
         ),
     }
 )
@@ -495,23 +514,50 @@ def check_sql(sql: str) -> PolicyDecision:
     return _ALLOW
 
 
-def check_aggregate_only(sql: str) -> PolicyDecision:
-    """D-159: the extra check for a customer-ranking turn, after :func:`check_sql` allowed it.
+@dataclass(frozen=True, slots=True)
+class AggregateOnlyPlan:
+    """Outcome of :func:`aggregate_only_plan`.
+
+    ``band_counts`` names the root output columns that hold a customer count (lower case).
+    It is non-empty exactly when the statement is *banded* (it groups per-customer values)
+    and allowed; ``run_sql`` then hides every result row whose count is below k (D-163)."""
+
+    decision: PolicyDecision
+    band_counts: tuple[str, ...] = ()
+
+
+def aggregate_only_plan(sql: str) -> AggregateOnlyPlan:
+    """D-159 / D-163: the extra check for an aggregate-only (customer-ranking) turn.
 
     Denies (:attr:`Rule.CUSTOMER_GRAIN`) a statement whose result is at row grain (one row
     per customer, order or item, or plain table rows) or that returns an id column, also one
-    surfaced through MIN/MAX/ANY_VALUE. Pure; fails closed like :func:`check_sql`."""
+    surfaced through MIN/MAX/ANY_VALUE.
+
+    D-163: a *banded* statement (one that computes per-customer values in a subquery, CTE or
+    window and aggregates them) must return a named customer-count column, or it is denied
+    (:attr:`Rule.BAND_COUNT_REQUIRED`). A customer count is ``COUNT(DISTINCT <customer key>)``
+    or ``COUNT(*)`` / ``COUNT(col)`` whose only source has one row per customer. Pure; fails
+    closed like :func:`check_sql`."""
     try:
         _check(sql)
-        if _Analyzer(_parse(sql)).returns_id_grain():
+        analyzer = _Analyzer(_parse(sql))
+        if analyzer.returns_id_grain():
             raise _Reject(Rule.CUSTOMER_GRAIN)
+        banded, counts = analyzer.band_count_columns()
+        if banded and not counts:
+            raise _Reject(Rule.BAND_COUNT_REQUIRED)
     except _Reject as rej:
-        return _deny(rej.rule, rej.hint)
+        return AggregateOnlyPlan(_deny(rej.rule, rej.hint))
     except (SqlglotError, RecursionError):
-        return _deny(Rule.SQL_SYNTAX)
+        return AggregateOnlyPlan(_deny(Rule.SQL_SYNTAX))
     except Exception:  # noqa: BLE001 - fail closed on any analyser bug
-        return _deny(Rule.UNSUPPORTED_SYNTAX)
-    return _ALLOW
+        return AggregateOnlyPlan(_deny(Rule.UNSUPPORTED_SYNTAX))
+    return AggregateOnlyPlan(_ALLOW, counts)
+
+
+def check_aggregate_only(sql: str) -> PolicyDecision:
+    """The decision of :func:`aggregate_only_plan` (D-159, D-163)."""
+    return aggregate_only_plan(sql).decision
 
 
 def regenerate_sql(sql: str) -> str:
@@ -921,6 +967,8 @@ class _Analyzer:
                 tags.add(_QI)
             if name in _ID_KEYS.get(table, _EMPTY):
                 tags.add(_IDKEY)
+            if name in _USER_KEYS.get(table, _EMPTY):
+                tags.add(_USERKEY)
             if table == "users" and name == "created_at":
                 tags.add(_RAWTS)
             return frozenset(tags)
@@ -947,7 +995,7 @@ class _Analyzer:
         if _coarse_truncation(node):
             return children - {_RAWTS}
         if isinstance(node, _AGGREGATES) and not isinstance(node, _ID_PRESERVING_AGGS):
-            return children - {_IDKEY}
+            return children - {_IDKEY, _USERKEY}
         return children
 
     def _raw_taint(self, node: exp.Expression) -> frozenset[str]:
@@ -1129,6 +1177,102 @@ class _Analyzer:
             self.scope_of_expr[id(scope.expression)] = scope
         root_info = self._analyze(self.root_scope)
         return root_info.row_grain or any(_IDKEY in t for t in root_info.output_list)
+
+    # -- D-163: customer bands
+
+    def band_count_columns(self) -> tuple[bool, tuple[str, ...]]:
+        """``(banded, count columns)`` of the root result (D-163).
+
+        *Banded*: a non-root query level has one row per customer (GROUP BY only customer
+        keys) or groups / de-duplicates by a customer key, or a window partitions by one. The
+        count columns are the named root outputs that count customers; for a set operation,
+        the positions that count customers in every branch (names from the first branch)."""
+        scopes = list(self.root_scope.traverse())
+        for scope in scopes:
+            self.scope_of_expr[id(scope.expression)] = scope
+        self._analyze(self.root_scope)
+        banded = any(
+            self._groups_by_customer(s) for s in scopes if s is not self.root_scope
+        ) or any(self._window_by_customer(n) for n in _iter_nodes(self.root))
+        if not banded:
+            return False, ()
+        root = self.root_scope.expression
+        branches = list(_branch_selects(root)) if isinstance(root, exp.SetOperation) else [root]
+        positions: set[int] | None = None
+        for branch in branches:
+            scope = self.root_scope if branch is root else self._scope_for(branch)
+            found = {
+                pos for pos, proj in enumerate(branch.expressions)
+                if self._is_customer_count(proj, scope)
+            }
+            positions = found if positions is None else positions & found
+        first = branches[0].expressions
+        names = sorted({first[p].alias_or_name.lower() for p in positions or ()} - {""})
+        return True, tuple(names)
+
+    def _group_keys(self, select: exp.Select) -> list[exp.Expression] | None:
+        group = select.args.get("group")
+        if group is None:
+            return None
+        if group.args.get("all"):
+            return [p for p in select.expressions if not _contains_aggregate(p)]
+        return [_group_key_target(k, select) for k in group.expressions]
+
+    def _groups_by_customer(self, scope: Scope) -> bool:
+        select = scope.expression
+        if not isinstance(select, exp.Select):
+            return False
+        keys = self._group_keys(select)
+        if keys is not None:
+            return any(_USERKEY in self.taint(k) for k in keys)
+        if select.args.get("distinct") is not None:
+            return any(_USERKEY in self.taint(p) for p in select.expressions)
+        return False
+
+    def _window_by_customer(self, node: exp.Expression) -> bool:
+        if not isinstance(node, exp.Window):
+            return False
+        return any(_USERKEY in self._raw_taint(p) for p in node.args.get("partition_by") or ())
+
+    def _one_row_per_customer(self, source: object, depth: int = 0) -> bool:
+        """A query level whose rows are distinct customers: GROUP BY only customer keys, or
+        plain rows (no join, no aggregate, no DISTINCT) of one such level. Bounded depth."""
+        if not isinstance(source, Scope) or depth > MAX_DEPTH:
+            return False
+        select = source.expression
+        if not isinstance(select, exp.Select):
+            return False
+        keys = self._group_keys(select)
+        if keys is not None:
+            return bool(keys) and all(_USERKEY in self.taint(k) for k in keys)
+        if select.args.get("joins") or select.args.get("distinct") is not None:
+            return False
+        if any(_contains_aggregate(p) for p in select.expressions):
+            return False
+        sources = list(_selected_sources(source).values())
+        return len(sources) == 1 and self._one_row_per_customer(sources[0], depth + 1)
+
+    def _is_customer_count(self, proj: exp.Expression, scope: Scope) -> bool:
+        if not isinstance(proj, exp.Alias) or not proj.alias:
+            return False
+        node = proj.this
+        while isinstance(node, exp.Paren):
+            node = node.this
+        if not isinstance(node, exp.Count):
+            return False  # also a window COUNT(...) OVER (...): its node is the Window
+        arg = node.this
+        if isinstance(arg, exp.Distinct):
+            exprs = arg.expressions
+            return (
+                len(exprs) == 1
+                and isinstance(exprs[0], exp.Column)
+                and _USERKEY in self.col_taint.get(id(exprs[0]), _EMPTY)
+            )
+        select = scope.expression
+        if not isinstance(select, exp.Select) or select.args.get("joins"):
+            return False
+        sources = list(_selected_sources(scope).values())
+        return len(sources) == 1 and self._one_row_per_customer(sources[0])
 
     def _check_grain(self, scopes: list[Scope]) -> None:
         root_info = self._analyze(self.root_scope)
