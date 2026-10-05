@@ -97,7 +97,7 @@ _KEEP: Final = frozenset("\t\n")
 # introducer and prints as inert text). Cf: every format character (bidi controls incl.
 # U+061C, zero-width characters, U+180E, U+FEFF, ...). Zl/Zp: the line and paragraph
 # separators. All of these can drive the terminal, or reorder or hide text.
-_UNSAFE_CATEGORIES: Final = frozenset({"Cc", "Cf", "Zl", "Zp"})
+_UNSAFE_CATEGORIES: Final = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
 
 
 def terminal_safe(text: str) -> str:
@@ -109,6 +109,19 @@ def terminal_safe(text: str) -> str:
     return "".join(
         c for c in text if c in _KEEP or unicodedata.category(c) not in _UNSAFE_CATEGORIES
     )
+
+
+def clean_input(text: str) -> str:
+    """Typed input as valid UTF-8 text: undecodable bytes become U+FFFD.
+
+    `input()` hands back lone surrogates when the terminal sends bytes that are not UTF-8,
+    e.g. macOS libedit erasing half of a Cyrillic letter on Backspace. Every later layer
+    (the PII detector first) would fail on them, so they are repaired once, here."""
+    try:
+        raw = text.encode("utf-8", "surrogateescape")
+    except UnicodeEncodeError:  # a surrogate surrogateescape did not produce
+        raw = text.encode("utf-8", "replace")
+    return raw.decode("utf-8", "replace")
 
 
 def _say(text: str) -> None:
@@ -441,7 +454,7 @@ class _Repl:
                 _say("\n" + PROMPT_INTERRUPT_TEXT)
                 continue
             interrupts = 0
-            line = line.strip()[:MAX_INPUT_CHARS]
+            line = clean_input(line).strip()[:MAX_INPUT_CHARS]
             if not line:
                 continue
             if commands.is_command(line):

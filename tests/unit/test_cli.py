@@ -296,6 +296,29 @@ def test_cli_answers_through_terminal_safe(monkeypatch, capsys, factory):
     assert factory.closed == [True]
 
 
+def test_cli_repairs_undecodable_input(monkeypatch, capsys, factory):
+    # macOS libedit: Backspace over a Cyrillic letter leaves its lead byte, which input()
+    # returns as a lone surrogate; the PII detector would fail closed on it.
+    _env(monkeypatch)
+    _inputs(monkeypatch, "how many compo\udcd0nies?", "quit")
+    assert cli.main(["--user", "analyst_a"], lister=lambda: all_models()) == 0
+    ((text, _sid, _turn),) = factory.graph.calls
+    assert text == "how many compo\ufffdnies?"
+    text.encode("utf-8")  # valid UTF-8 from here on
+
+
+def test_clean_input() -> None:
+    assert cli.clean_input("plain — ü") == "plain — ü"
+    assert cli.clean_input("ab\udcd0c") == "ab\ufffdc"
+    # a complete UTF-8 sequence split into escapes is rebuilt
+    assert cli.clean_input("\udcd0\udcb4a") == "\u0434a"
+    assert cli.clean_input("x\ud800y") == "x?y"  # not a surrogateescape byte
+
+
+def test_terminal_safe_drops_lone_surrogates() -> None:
+    assert cli.terminal_safe("a\udcd0b") == "ab"
+
+
 def test_cli_commands(monkeypatch, capsys, factory):
     _env(monkeypatch)
     _inputs(
