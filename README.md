@@ -54,3 +54,26 @@ What changes under `lmstudio`:
 Answer quality, latency and tool-calling reliability depend on the local model. Eval results and
 the deliverable are measured on Gemini only. To check your setup, run the live smoke test:
 `OPSFLEET_LLM_PROVIDER=lmstudio uv run pytest -m live tests/live/test_lmstudio_smoke.py -q`.
+
+## Observability with Langfuse (optional)
+
+Each CLI turn can be sent to a self-hosted [Langfuse](https://langfuse.com) as one trace: the
+router decision and input guard, the quick or deep analyst steps, every LLM call (masked prompt,
+output, tokens, latency, numbered retry attempts), tool calls with sanitized SQL, and the
+grounding and output guard verdicts. It is off unless all three variables are set in the root
+`.env` (or the environment):
+
+```sh
+LANGFUSE_PUBLIC_KEY=pk-lf-your-public-key
+LANGFUSE_SECRET_KEY=sk-lf-your-secret-key
+LANGFUSE_HOST=http://localhost:3000   # LANGFUSE_BASE_URL is accepted too
+```
+
+Tracing is fail-open: if Langfuse is down or misconfigured, the CLI answers as usual and the
+sink switches itself off. Traces are flushed on exit, waiting at most 5 seconds. `/trace` prints
+the Langfuse trace id and link of the turn. PII and secrets are masked in code before anything
+leaves the process; result rows, tool results, pending actions and delete proofs are never sent.
+It works the same with `OPSFLEET_LLM_PROVIDER=lmstudio`.
+
+To run Langfuse locally with Docker, see [infra/langfuse/README.md](infra/langfuse/README.md).
+Design and the exact list of fields sent: [docs/process/iter40-ods.md](docs/process/iter40-ods.md).

@@ -93,6 +93,7 @@ PROMPT_INTERRUPT_TEXT: Final = "(Press Ctrl-C again, or type /exit, to quit.)"
 HINT_TEXT: Final = "Type /help for commands, /exit to quit."
 EXIT_INTERRUPTED: Final = 130
 CANCEL_BOUND_S: Final = 1.0  # the best-effort BigQuery cancel never holds the prompt longer
+LANGFUSE_FLUSH_BOUND_S: Final = 5.0  # iteration 40: the exit flush never holds the exit longer
 _MAC_FAILURE: Final = "MAC check failed"
 _KEEP: Final = frozenset("\t\n")
 # Cc: C0, DEL and C1 controls (ESC is in C0, so every ANSI/OSC sequence loses its
@@ -173,6 +174,7 @@ class Runtime:
     persona_version: Callable[[], str] | None = None
     close: Callable[[], object] | None = None
     report_store: Any = None  # iteration 17: ReportStore on app.db (/reports)
+    langfuse: Any = None  # iteration 40: obs.langfuse_sink.LangfuseSink, None when not configured
 
 
 AgentFactory = Callable[[Settings, Any, Session, Path], Runtime]
@@ -235,6 +237,7 @@ def build_runtime(
     from opsfleet_agent.graph.graph import AgentGraph, GraphServices, build_run_sql_tool
     from opsfleet_agent.guards.differencing import DifferencingGuard
     from opsfleet_agent.guards.pii import default_detector
+    from opsfleet_agent.obs.langfuse_sink import build_sink
     from opsfleet_agent.obs.tracer import Tracer
     from opsfleet_agent.persona import PersonaStore
     from opsfleet_agent.roles.analyst import make_gemini_invoke
@@ -266,6 +269,15 @@ def build_runtime(
     audit_log = AuditLog(conn)
     trace_dir = data_dir / "traces"
     tracer = Tracer(trace_dir, session.session_id)
+    # Iteration 40: optional Langfuse (off unless LANGFUSE_* are set; load_settings loaded .env).
+    langfuse = build_sink(detector=default_detector())
+    if langfuse is not None:
+        tracer.extra_sink = langfuse.on_span
+
+    def _observed(name: str, invoke: Any) -> Any:
+        # Outside health.wrap, so quota refusals show as failed generations too.
+        return langfuse.wrap_llm(name, invoke) if langfuse is not None else invoke
+
     tool = build_run_sql_tool(
         settings,
         runner,
@@ -280,8 +292,8 @@ def build_runtime(
         settings=settings,
         persona=personas.refresh,
         detector=default_detector(),
-        router_invoke=health.wrap(_make_router_invoke(settings)),
-        analyst_invoke=health.wrap(make_gemini_invoke(settings)),
+        router_invoke=_observed("llm.chat", health.wrap(_make_router_invoke(settings))),
+        analyst_invoke=_observed("llm.tools", health.wrap(make_gemini_invoke(settings))),
         run_sql=tool,
         cache=cache,
         tracer=tracer,
@@ -301,6 +313,7 @@ def build_runtime(
         persona_version=lambda: personas.current.version,
         close=conn.close,
         report_store=reports,
+        langfuse=langfuse,
     )
 
 
@@ -352,6 +365,7 @@ class _Repl:
             scope=self._scope(),
             listing=self.listing,
             delete_start=self._delete_start,
+            langfuse=getattr(rt, "langfuse", None),
         )
 
     def _delete_start(self, args: str) -> str:
@@ -407,11 +421,29 @@ class _Repl:
         """Run one question; Ctrl-C cancels the in-flight BigQuery job and returns."""
         turn_id = uuid.uuid4().hex[:12]
         result = self.guarded(
-            lambda: self.runtime.graph.run_turn(text, session=self.session, turn_id=turn_id),
+            self._observed(
+                lambda: self.runtime.graph.run_turn(text, session=self.session, turn_id=turn_id),
+                turn_id,
+                text,
+            ),
             turn_id,
         )
         if result is not None:
             self.show(result, turn_id)
+
+    def _observed(self, fn: Callable[[], Any], turn_id: str | None, text: str) -> Callable[[], Any]:
+        """Iteration 40: one Langfuse trace per turn when the sink is on; else ``fn`` as is.
+        The sink scrubs ``text`` itself and never changes the result or the exceptions."""
+        sink = getattr(self.runtime, "langfuse", None)
+        if sink is None:
+            return fn
+        return sink.traced(
+            fn,
+            session_id=self.session.session_id,
+            user_id=self.session.profile.user_id,
+            turn_id=turn_id,
+            question=text,
+        )
 
     def show(self, result: Any, turn_id: str | None) -> None:
         """Print an answer and its notice; remember the turn for /feedback and /trace."""
@@ -550,6 +582,7 @@ def _main(
             settings = load_settings()  # loads .env, so the AES key may come from there
             register_secret(settings.gemini_api_key)
             register_secret(os.environ.get(AES_KEY_ENV))
+            register_secret(os.environ.get("LANGFUSE_SECRET_KEY"))  # iteration 40 (optional)
             local_startup_check(data_dir=data_dir)
             checkpointer = build_checkpointer(data_dir)  # no valid AES key: refuse (D-78)
         except ConfigError as e:
@@ -593,6 +626,9 @@ def _main(
         _say(HINT_TEXT)
         return repl.loop()
     finally:
+        sink = getattr(runtime, "langfuse", None)
+        if sink is not None:  # iteration 40: send buffered traces, at most FLUSH_BOUND_S
+            _bounded(sink.shutdown, LANGFUSE_FLUSH_BOUND_S, "langfuse flush")
         if runtime is not None and runtime.close is not None:
             try:
                 runtime.close()

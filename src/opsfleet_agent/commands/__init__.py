@@ -55,6 +55,8 @@ class CommandContext:
     # Iteration 22a: starts a two-phase delete on the graph and returns the reply text (the
     # preview, never a deletion). None while the delete feature is off (fail closed).
     delete_start: Callable[[str], str] | None = None
+    # Iteration 40: obs.langfuse_sink.LangfuseSink when Langfuse is configured, else None.
+    langfuse: Any = None
 
 
 REPORTS_LIST_LIMIT: Final = 20
@@ -121,10 +123,25 @@ def _trace(args: str, ctx: CommandContext) -> CommandResult:
     if not turn:
         return CommandResult("Usage: /trace [turn_id] (no answered turn yet).")
     try:
-        return CommandResult(render_trace(ctx.trace_dir, turn, ctx.session_id))
+        text = render_trace(ctx.trace_dir, turn, ctx.session_id)
     except Exception as exc:
         log.error("trace failed: %s", type(exc).__name__)
         return CommandResult("Could not read the trace right now.")
+    return CommandResult(text + _langfuse_line(ctx, turn))
+
+
+def _langfuse_line(ctx: CommandContext, turn: str) -> str:
+    """Iteration 40: the Langfuse trace id (and UI link) of the turn, when tracing is on."""
+    if ctx.langfuse is None:
+        return ""
+    try:
+        trace_id = ctx.langfuse.trace_id_for(turn)
+        if not trace_id:
+            return ""
+        url = ctx.langfuse.trace_url(trace_id)
+    except Exception:  # noqa: BLE001 - optional line, never breaks /trace
+        return ""
+    return f"\nLangfuse trace: {trace_id}" + (f" ({url})" if url else "")
 
 
 def _audit(args: str, ctx: CommandContext) -> CommandResult:

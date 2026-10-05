@@ -13,7 +13,7 @@ import os
 import re
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -282,6 +282,9 @@ class Tracer:
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.capture_llm_text = capture_llm_text
         self.max_str = max_str
+        # Optional second sink (iteration 40: Langfuse). It receives the already cleaned span
+        # (allowlisted, SQL sanitized, sensitive keys dropped) and must never break a record.
+        self.extra_sink: Callable[[dict[str, Any]], None] | None = None
 
     @property
     def path(self) -> Path:
@@ -327,6 +330,11 @@ class Tracer:
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as f:
             f.write(json.dumps(clean, ensure_ascii=False, default=str) + "\n")
+        if self.extra_sink is not None:
+            try:
+                self.extra_sink(clean)
+            except Exception:  # noqa: BLE001 - an optional sink never breaks the trace or turn
+                pass
         return clean
 
     @contextmanager
