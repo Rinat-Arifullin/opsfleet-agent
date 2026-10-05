@@ -224,8 +224,9 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | D-167 | ✅ Owner 2026-10-05: Live-1 reports OD-8, the catalogue's categories and departments join the brands in the PII allowlist, so NER no longer masks e.g. "Swim". Done (78493b7) | — | nothing |
 | D-168 | ✅ Owner 2026-10-05: fix the golden report cases, not the graph: `q1_report` expects `report_pending`, `report_save_confirm` and `save_this` expect `report_saved`; `report_save_confirm` runs live (Live-1 OD-9). Done (3a52947) | — | nothing |
 | D-169 | ✅ Owner 2026-10-05: one session-id shape. The live eval SUT uses `uuid4().hex` like the CLI, so live graph paths audit (Live-1 OD-12). Done (3a52947) | — | nothing |
-| D-170 | ✅ Owner 2026-10-05: D-162 aggregate-only stickiness lasts the whole session (bands OD-1/OD-2 confirmed, no code change). OD-3 (hide vs merge small bands) still open. Done (3a52947) | — | nothing |
+| D-170 | ✅ Owner 2026-10-05: D-162 aggregate-only stickiness lasts the whole session (bands OD-1/OD-2 confirmed, no code change). OD-3 resolved by D-172. Done (3a52947) | — | nothing |
 | D-171 | ✅ Owner 2026-10-05: analytical section headings (Takeaways, Summary, Insights, Note, Highlights, …) are in every PII allowlist (`REPORT_TERMS`, like `SCHEMA_TERMS`); spaCy masked "Takeaways:" as `<PERSON>` and the masked heading leaked into later turns (smoke-9080868). Names next to or sharing a word with a heading are still masked. Product names starting with a name-like word (e.g. "<PERSON> 2 Button … Suit") are a separate open issue. Done (60bdcc1) | — | nothing |
+| D-172 | ✅ Owner 2026-10-05: bands OD-3, "merge". A spend band under k = 5 customers is merged in code (fixed label `other bands`, counts and plain sums added, shares and averages empty); bands that are not provably disjoint, or labelled by a raw value, are still hidden. All small bands merge into one row, then with the smallest band at or above k (not with the adjacent band), so the result does not depend on row order; window columns that could reveal a merged or hidden band are emptied; `QUALIFY` and subqueries in the outer query (other than `user_id IN (SELECT ...)`) are refused. 🔴 PII: owner review pending | Bands OD-10 (`COUNTIF` / conditional sums and `MAX` / `MIN` / `ANY_VALUE` inside a band are not checked against k) and OD-11 (a subquery inside the per-customer CTE can gate the whole result): options in `iter-d162-d163-bands.md` | nothing |
 
 ## Scope questions (🟡: add now / defer to README "future work" / skip)
 
@@ -293,3 +294,4 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | D-169 | done | 3a52947. live_sut sid = uuid4().hex; tests assert SESSION_ID_RE. Offline ids keep the ev- form (no audit writes offline). |
 | D-170 | done | 3a52947. Docs only (iter-d162-d163-bands.md OD-2). |
 | D-171 | done | 60bdcc1. guards/pii.py REPORT_TERMS, tests/unit/test_d171_report_terms.py. |
+| D-172 | done | sql_policy AggregateOnlyPlan.mergeable/additive/labels/row_local/totals, `_BAREUSER` customer-key tag; run_sql _merge_small_bands, _mask_windows, MERGED_BANDS_HINT; tests in test_d162_d163_bands.py. [owner review pending] |

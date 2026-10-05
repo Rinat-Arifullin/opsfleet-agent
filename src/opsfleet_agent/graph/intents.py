@@ -119,8 +119,10 @@ CUSTOMER_BANDS_RULE: Final = (
     "band the number of customers as a column named customers (COUNT(*) AS customers over the "
     "per-customer subquery), the band's revenue and its share of total revenue. Do not "
     "return or mention customer IDs, user IDs or per-customer rows: such a query is refused. "
-    f"A band with fewer than {DEFAULT_K} customers is hidden from the result by the tool; "
-    "when a band is missing, say that small bands are not shown, or use wider bands."
+    f"The tool merges bands with fewer than {DEFAULT_K} customers with other bands "
+    "(labelled 'other bands'; shares and averages are empty for it); "
+    "present a merged band as one band and say why. If a band is missing, small bands could "
+    "not be merged and are not shown: say so, or use wider bands."
 )
 _CUSTOMERS: Final = r"(?:customers?|buyers?|clients?|shoppers?|purchasers?|spenders?|users?)"
 _RANK: Final = (

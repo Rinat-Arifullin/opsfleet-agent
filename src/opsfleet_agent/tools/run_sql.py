@@ -125,7 +125,12 @@ from opsfleet_agent.guards.small_cell import (
     SmallCellRewrite,
     apply_small_cell,
 )
-from opsfleet_agent.guards.sql_policy import MAX_SQL_CHARS, Rule, aggregate_only_plan
+from opsfleet_agent.guards.sql_policy import (
+    MAX_SQL_CHARS,
+    AggregateOnlyPlan,
+    Rule,
+    aggregate_only_plan,
+)
 
 __all__ = [
     "MAX_PURPOSE_CHARS",
@@ -218,6 +223,19 @@ SMALL_BANDS_HINT: Final = (
     "Every band in this result had too few customers to show, so all of them are hidden. "
     "Do not query again: tell the user the bands are too small to show, or offer wider "
     "bands."
+)
+#: D-172: the label of a merged row. A fixed label: joining the small bands' own labels would
+#: show which narrow bands hold any customer.
+MERGED_LABEL: Final = "other bands"
+#: OD-3 / D-172: some bands held fewer than k customers and were merged together.
+MERGED_BANDS_HINT: Final = (
+    "Some bands had too few customers to show on their own, so they were merged into one row "
+    "(with another band when still too small), labelled 'other bands': counts and sums are "
+    "added up, and columns that cannot be added up (shares, averages, medians) are empty for "
+    "that row; columns computed across rows (running totals, "
+    "previous/next band) are empty on every row. Present the merged row as one band and say "
+    "why; do not compute the missing values for the bands inside it. Do not query again to "
+    "split it."
 )
 TRUNCATED_HINT: Final = (
     f"Only the first {MAX_ROWS} rows are shown. Aggregate further or add ORDER BY ... LIMIT."
@@ -574,26 +592,126 @@ def _customer_count(value: Any) -> int | None:
     return None
 
 
-def _suppress_small_bands(
-    rows: list[dict[str, Any]], band_counts: tuple[str, ...], k: int
-) -> tuple[list[dict[str, Any]], int]:
-    """D-163: drop every band row whose customer count is below `k`.
+def _merge_small_bands(
+    rows: list[dict[str, Any]], plan: AggregateOnlyPlan | None, k: int
+) -> tuple[list[dict[str, Any]], int, int]:
+    """D-163, OD-3 / D-172: merge the bands with fewer than `k` customers, or hide them.
 
-    `band_counts` are the result columns the SQL policy proved to count distinct customers
-    (`aggregate_only_plan`). The check runs on the returned rows, so no SQL the model writes can
-    get a small band past it. A row whose count column is missing, null or not an integer is
-    dropped too (fail closed). Rows are dropped, not merged: share and average columns are not
-    additive, so merging them in code would print wrong numbers."""
-    if not band_counts:
-        return rows, 0
-    kept: list[dict[str, Any]] = []
+    `plan.band_counts` are the result columns the SQL policy proved to count distinct
+    customers (`aggregate_only_plan`). The check runs on the returned rows, so no SQL the model
+    writes can get a small band past it. A row whose count column is missing, null or not an
+    integer is hidden (fail closed). When `plan.mergeable` (disjoint bands with fixed names),
+    every band below `k` (on any count column) goes into one merged row; if that row is still
+    below `k`, the smallest band at or above `k` (by counts, then labels, then the row text)
+    joins it. The outcome does not depend on the result order, so re-sorting the same query
+    reveals nothing. A merged row sums the count and `plan.additive` columns, labels
+    `plan.labels` with `MERGED_LABEL` and empties (None) every other column: shares, averages and
+    medians are not additive. When the bands may overlap, or no merge reaches `k`, the small
+    bands are hidden instead. Window columns that could reveal a merged or hidden band are
+    then emptied on every row (`_mask_windows`).
+
+    Returns (rows, bands merged away, rows hidden)."""
+    if plan is None or not plan.band_counts:
+        return rows, 0, 0
+    counted: list[tuple[dict[str, Any], tuple[int, ...]]] = []
     for row in rows:
         lowered = {str(key).lower(): value for key, value in row.items()}
-        counts = [_customer_count(lowered.get(name)) for name in band_counts]
-        if all(c is not None and c >= k for c in counts):
-            kept.append(row)
-    hidden = len(rows) - len(kept)
-    return kept, hidden
+        counts = [_customer_count(lowered.get(name)) for name in plan.band_counts]
+        if all(c is not None for c in counts):
+            counted.append((row, tuple(counts)))  # type: ignore[arg-type]
+    small = [i for i, (_, counts) in enumerate(counted) if min(counts) < k]
+    big = [i for i in range(len(counted)) if i not in set(small)]
+    if plan.mergeable and small:
+        group = list(small)
+        if min(_total(counted, group)) < k and big:
+            partner = min(big, key=lambda i: (counted[i][1], _label_key(counted[i][0], plan)))
+            group = sorted(group + [partner])
+            big.remove(partner)
+        if min(_total(counted, group)) >= k and len(group) > 1:
+            row = _merged_row([counted[i][0] for i in group], _total(counted, group), plan)
+            keep = {i: counted[i][0] for i in big}
+            keep[group[0]] = row
+            dropped = len(rows) - len(counted)
+            out = [keep[i] for i in sorted(keep)]
+            return _mask_windows(out, plan, row, dropped), len(group) - 1, dropped
+    out = [counted[i][0] for i in big]
+    hidden = len(rows) - len(out)
+    return _mask_windows(out, plan, None, hidden), 0, hidden
+
+
+def _total(counted: list[tuple[dict[str, Any], tuple[int, ...]]], group: list[int]) -> list[int]:
+    width = len(counted[group[0]][1])
+    return [sum(counted[i][1][n] for i in group) for n in range(width)]
+
+
+def _label_key(row: dict[str, Any], plan: AggregateOnlyPlan) -> tuple[str, str]:
+    """A tie-break for the merge partner that does not depend on the result order."""
+    labels = set(plan.labels)
+    named = sorted((str(key).lower(), str(value)) for key, value in row.items()
+                   if str(key).lower() in labels)  # fmt: skip
+    return repr(named), repr(sorted((str(key), repr(value)) for key, value in row.items()))
+
+
+def _mask_windows(
+    rows: list[dict[str, Any]],
+    plan: AggregateOnlyPlan,
+    merged_row: dict[str, Any] | None,
+    hidden: int,
+) -> list[dict[str, Any]]:
+    """D-172: empty the window columns that could reveal a merged or hidden band.
+
+    A window (``LEAD(COUNT(*)) OVER (...)``, a share over ``SUM(...) OVER ()``) reads other
+    rows of the result, so it can still show a band that was merged away or hidden. Once any
+    row is hidden, only the count and `plan.row_local` columns stay; once a band is merged,
+    the grand-total shares (`plan.totals`) stay too, since merging keeps the total."""
+    if not hidden and merged_row is None:
+        return rows
+    keep = set(plan.band_counts) | set(plan.row_local)
+    if not hidden:
+        keep |= set(plan.totals)
+    out = []
+    for row in rows:
+        if row is merged_row:
+            out.append(row)
+            continue
+        out.append({key: value if str(key).lower() in keep else None
+                    for key, value in row.items()})  # fmt: skip
+    return out
+
+
+def _merged_row(
+    rows: list[dict[str, Any]], counts: list[int], plan: AggregateOnlyPlan
+) -> dict[str, Any]:
+    """One row for a merged band; `counts` are the validated totals of `plan.band_counts`."""
+    count_of = dict(zip(plan.band_counts, counts, strict=True))
+    additive, labels = set(plan.additive), set(plan.labels)
+    merged: dict[str, Any] = {}
+    for key in rows[0]:
+        name = str(key).lower()
+        values = [r.get(key) for r in rows]
+        if name in count_of:
+            merged[key] = count_of[name]
+        elif name in additive:
+            merged[key] = _sum_cells(values)
+        elif name in labels:
+            merged[key] = MERGED_LABEL
+        else:
+            merged[key] = None
+    return merged
+
+
+def _sum_cells(values: list[Any]) -> int | float | decimal.Decimal | None:
+    """The sum of numeric cells, or None (fail closed) when any cell is null, not a number,
+    not finite, or decimal.Decimal mixed with float."""
+    if any(isinstance(v, bool) or not isinstance(v, int | float | decimal.Decimal) for v in values):
+        return None
+    kinds = {type(v) for v in values}
+    if decimal.Decimal in kinds and float in kinds:
+        return None
+    total = sum(values)
+    if isinstance(total, decimal.Decimal):
+        return total if total.is_finite() else None
+    return total if not isinstance(total, float) or math.isfinite(total) else None
 
 
 def _cap(rows: list[dict[str, Any]], truncated: bool) -> tuple[list[dict[str, Any]], bool]:
@@ -707,14 +825,13 @@ class RunSqlTool:
         if isinstance(scoped, ScopeRefusal):
             return _from_refusal(scoped)
         assert scope is not None  # apply_scope refuses a None scope
-        band_counts: tuple[str, ...] = ()
+        plan_ao: AggregateOnlyPlan | None = None
         # D-159: bands and counts only, no individual customers. D-162: the session flag keeps
         # it on for every later turn of the session.
         if turn.aggregate_only or session.aggregate_only:
             plan_ao = aggregate_only_plan(args.sql)
             if not plan_ao.decision.allowed:
                 return _from_refusal(ScopeRefusal.from_policy(plan_ao.decision))
-            band_counts = plan_ao.band_counts
         # 4: small cell
         sc = apply_small_cell(scoped, scope, self.k)
         if isinstance(sc, ScopeRefusal):
@@ -764,15 +881,19 @@ class RunSqlTool:
         columns = [c for c in result.columns if c not in injected]
         if injected:
             rows = [{k: v for k, v in r.items() if k not in injected} for r in rows]
-        # 9: scrub; D-163: small bands; 10: cap
+        # 9: scrub; D-163 / D-172: merge small bands; 10: cap
         columns, rows = _scrub_rows(columns, rows, self.scrub)
-        rows, hidden_bands = _suppress_small_bands(rows, band_counts, self.k)
+        rows, merged_bands, hidden_bands = _merge_small_bands(rows, plan_ao, self.k)
         rows, truncated = _cap(rows, result.truncated)
         notes = []
         if isinstance(sc, SmallCellRewrite) and sc.query.sql != scoped.sql:
             notes.append(f"groups with fewer than {self.k} customers are hidden")
+        # D-172: no band numbers; with narrow bands the number says how many hold a customer
+        if merged_bands:
+            notes.append(f"bands with fewer than {self.k} customers merged with other bands")
         if hidden_bands:
-            notes.append(f"{hidden_bands} band(s) with fewer than {self.k} customers hidden")
+            notes.append(f"bands hidden (fewer than {self.k} customers and no safe merge, or "
+                         "no valid customer count)")  # fmt: skip
         suppressed = "; ".join(notes) or None
         return _Success(
             columns=columns,
@@ -789,7 +910,10 @@ class RunSqlTool:
             model_sql=args.sql,
             purpose=args.purpose,
             statement_key=statement_key,
-            hint=SMALL_BANDS_HINT if hidden_bands and not rows else None,
+            hint=(
+                SMALL_BANDS_HINT if hidden_bands and not rows
+                else MERGED_BANDS_HINT if merged_bands else None
+            ),  # fmt: skip
         )
 
     def _population(

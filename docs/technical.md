@@ -70,7 +70,7 @@ There are 4 LLM roles plus the light path. The HLD's fifth role, the Library age
 | `guards/input.py` | Overlong input (4000 chars), typed PII (masked before anything stores or routes it), injection patterns (per line, after folding look-alikes) | `check_input` :512 |
 | `guards/pii_regex.py` | Regex PII scrubber: email, phone, card, id, with Unicode folding | `scrub` :367 |
 | `guards/pii.py` | Presidio with spaCy NER after the regex stage. The allowlist covers schema terms, report headings, scope brands, catalogue categories and departments | `SCHEMA_TERMS` :277, `REPORT_TERMS` :290, `CATALOGUE_CATEGORIES` :301, `CATALOGUE_DEPARTMENTS` :308, `scrub_output` :967; `MIN_SCORE` 0.5, `NER_SCORE` 0.85 |
-| `guards/sql_policy.py` | sqlglot AST policy that fails closed. 25 rules: SELECT only, allowed tables, no PII columns, quasi-identifier rules, no `SELECT *`, no UNNEST, no QI inside counting aggregates. Size caps: 8000 chars, 5000 nodes, depth 120 | `check_sql` :504, `Rule` :284, `ALLOWED_TABLES` :166, `PII_COLUMNS` :197, `QI_COLUMNS` :209, `aggregate_only_plan` :529, `check_aggregate_only` :558 |
+| `guards/sql_policy.py` | sqlglot AST policy that fails closed. 25 rules: SELECT only, allowed tables, no PII columns, quasi-identifier rules, no `SELECT *`, no UNNEST, no QI inside counting aggregates. Size caps: 8000 chars, 5000 nodes, depth 120 | `check_sql` :509, `Rule` :288, `ALLOWED_TABLES` :166, `PII_COLUMNS` :197, `QI_COLUMNS` :209, `aggregate_only_plan` :547, `check_aggregate_only` :579 |
 | `guards/scope.py`, `scope_ctes.py` | Brand scope: AST rewrite of every table reference into code-built, PII-free CTEs (`__p`, `__oi`, `__o`, `__u`) filtered by the bound parameter `@scope_brands`, plus a post-rewrite invariant check | `apply_scope` :446, `verify_scoped` :340 |
 | `guards/small_cell.py` | Small-cell rule for customer quasi-identifier breakdowns (k = 5) | `apply_small_cell` :179 |
 | `guards/differencing.py` | Differencing attacks across queries, per session and per user across sessions (fingerprints kept 30 days) | `DifferencingGuard` :490 (`prepare` :532, `release` :616) |
@@ -82,7 +82,7 @@ There are 4 LLM roles plus the light path. The HLD's fifth role, the Library age
 
 | Module | Responsibility | Key symbols |
 |---|---|---|
-| `tools/run_sql.py` | The only path from a model to BigQuery. Runs every guard in order (§4) | `RunSqlTool` :606 (`run` :646, `_pipeline` :701, `_scrub_rows` :537, `_suppress_small_bands` :577, `_cap` :599), `MAX_ROWS=200` |
+| `tools/run_sql.py` | The only path from a model to BigQuery. Runs every guard in order (§4) | `RunSqlTool` :723 (`run` :763, `_pipeline` :818, `_scrub_rows` :554, `_merge_small_bands` :594, `_cap` :716), `MAX_ROWS=200` |
 | `tools/schema_tool.py`, `tools/registry.py` | Schema description with PII columns hidden; tool registry | — |
 | `bq/client.py` | `WarehouseClient` protocol and `BigQueryRunner`: mandatory dry run, `maximum_bytes_billed`, 1 GB per query, 10 GB per session, 60 s, 200 rows | `BigQueryRunner` :267 (`prepare` :304, `execute` :335) |
 | `bq/errors.py`, `bq/memo.py`, `bq/schema.py` | Error classification (raw error text is inspected, never kept), memo keyed after the scope rewrite, table metadata cache | `ErrorCode` :31, `run_memoised` :131, `TableMetadataCache` |
@@ -208,7 +208,7 @@ flowchart TD
 10. **Rows.**
     - Injected count columns are dropped.
     - PII in values is scrubbed.
-    - Small spend bands are suppressed (D-163).
+    - Spend bands with fewer than 5 customers are merged together (and with the smallest large band if still too small), or hidden when bands may overlap or are not named by fixed labels (D-163, D-172).
     - The result is capped at 200 rows.
 11. **Accounting.** Bytes, ledger and trace spans are recorded, and a typed envelope is returned to the model.
 
@@ -327,7 +327,8 @@ Full rows are in `docs/process/OWNER-QUEUE.md` and the ADRs are in `docs/decisio
 | D-157 → D-159 | "Top customers" is answered with spend bands and customer counts, never individual customers or ids | Ranking by id at customer grain is re-identifying. The guard is code (`check_aggregate_only`), not the prompt |
 | D-162 | `aggregate_only` stays on for the rest of the session | Otherwise "now show their IDs" in the next turn gets around it |
 | D-163 | Each band must hold at least 5 customers, enforced in code | The same k as the small-cell rule |
-| D-170 | Notice text accepted. OD-3 (hide vs merge small bands) is still open | — |
+| D-170 | Aggregate-only mode lasts the whole session | — |
+| D-172 | Bands under 5 customers are merged into one row, then with the smallest band of 5 or more if still too small (fixed label `other bands`, counts and sums added, shares and averages empty). Bands that may share customers (`UNION`, a source that is not one row per customer) or are labelled by a raw value are hidden instead; window columns that could reveal them are emptied; `QUALIFY` and row-gating subqueries are refused | Summing counts of overlapping bands could overcount, a raw label would list each customer's value, and an order-dependent partner would let a re-sorted query be subtracted from the first, so the merge is canonical and only for provably disjoint, fixed-name bands |
 
 ### Routing and roles
 | Decision | What | Why |
@@ -404,7 +405,6 @@ Full rows are in `docs/process/OWNER-QUEUE.md` and the ADRs are in `docs/decisio
 
 ## 11. Open items
 
-- **OD-3 (bands): hide or merge small spend bands.** This is an owner decision.
 - **Product names that begin with a name-like word** are masked by NER (D-171 note). This is a 🔴 PII question for the owner.
 - **🔴 iterations awaiting owner review** (committed with `[owner review pending]`): 5–15, 17, 19, 21, 22a, 24, plus the CLI wiring. Nothing merges into `main` without the owner.
 - **Remaining plan:**
