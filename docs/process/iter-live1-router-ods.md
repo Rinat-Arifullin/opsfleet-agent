@@ -44,7 +44,7 @@ No hot files, no new dependencies, no config fields.
 
 ## Open decisions
 
-- **OD-1. A regex detector, against the D-155 direction.**
+- **OD-1. A regex detector, against the D-155 direction.** Resolved by D-165: router only. The regex, `UNAVAILABLE_DATA_TEXTS` and the light-path override are removed; the router labels these questions `simple` and the analyst prompt (analyst-v2) says the data is not available and offers proxies. OD-2, OD-3 and OD-5 fall away with it.
   - D-155 moved memory and comment detection from regex to router labels.
   - This change adds an English regex again, for a narrow factual topic: data that is not in the allowlist. The reasons are:
     - a small local model mislabels this case;

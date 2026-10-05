@@ -1,9 +1,9 @@
 """Code-owned static replies in history (D-156).
 
 A reply the code wrote (the capabilities text, the memory answer, the "show me the SQL" reply,
-the "data not available" replies, the greeting template, error and fallback templates) is a
-fact about the conversation, not an answer the model should build on. In every LLM prompt such
-a history turn is replaced by a short marker, so a model cannot copy it into a later answer.
+the greeting template, error and fallback templates) is a fact about the conversation, not an
+answer the model should build on. In every LLM prompt such a history turn is replaced by a
+short marker, so a model cannot copy it into a later answer.
 
 * :func:`fixed_kind` names the static reply a text is (or starts with), or returns ``None``.
   ``_finalize`` stores that kind in the history entry (``"fixed"``) at write time; for
@@ -55,7 +55,7 @@ def _registry() -> tuple[tuple[str, str], ...]:
     """(kind, static text) pairs, longest text first so a prefix match picks the most specific."""
     from opsfleet_agent.graph import graph as g
     from opsfleet_agent.graph.degraded import AI_UNAVAILABLE_TEXT
-    from opsfleet_agent.graph.intents import MEMORY_TEXT, UNAVAILABLE_DATA_TEXTS
+    from opsfleet_agent.graph.intents import MEMORY_TEXT
     from opsfleet_agent.guards import input as input_guard
     from opsfleet_agent.guards.output import REFUSAL_TEXT
     from opsfleet_agent.guards.plain_language import SQL_NOT_SHOWN_TEXT
@@ -72,7 +72,6 @@ def _registry() -> tuple[tuple[str, str], ...]:
         ("partial", g.PARTIAL_WITH_CONTEXT_TEXT),
         ("comment_fallback", g.COMMENT_FALLBACK_TEXT),
         ("ai_unavailable", AI_UNAVAILABLE_TEXT),
-        *(("unavailable_data", t) for t in UNAVAILABLE_DATA_TEXTS.values()),
         *(("refusal", t) for t in input_guard.REFUSALS.values() if isinstance(t, str)),
     ]
     out = [(k, _norm(t)) for k, t in pairs if _norm(t)]

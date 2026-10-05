@@ -219,6 +219,7 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | D-162 | ✅ Owner 2026-10-05: D-159 OD-5, `aggregate_only` stays on for follow-ups after a bands answer ("show their IDs" is refused in code too). In progress | — | nothing |
 | D-163 | ✅ Owner 2026-10-05: D-159 OD-3, the minimum of 5 customers per spend band is enforced in code, not only in the prompt. In progress | — | nothing |
 | D-164 | ✅ Owner 2026-10-05: D-155 OD-1/OD-2, no fallback on a router outage and no FR-17 carve-out for non-English memory/comment turns; current behaviour stays. D-160: old pre-matrix Langfuse dataset items are not archived. | — | nothing |
+| D-165 | ✅ Owner 2026-10-05: Live-1 router OD-1, go router-only. The English regex override for unavailable data (inventory, warehouse, ad spend, web visits) is removed; router-v3 labels these `simple` and the analyst says the data is not available and offers proxies. | — | nothing |
 
 ## Scope questions (🟡: add now / defer to README "future work" / skip)
 

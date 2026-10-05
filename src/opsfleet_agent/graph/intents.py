@@ -14,12 +14,6 @@
   with customer counts only (no individual customers, no customer IDs); ``run_sql`` enforces
   it for the turn and :func:`mentions_customer_id` checks the answer.
   :func:`asks_for_customer_pii` marks the ones that also ask for names, emails or addresses.
-* :func:`unavailable_data_topic` - iter-live1: a question about data the dataset does not
-  hold (inventory and stock levels, warehouses, marketing spend, website visits). The router
-  of a small local model labels these ``meta`` (capabilities text) or a data label (the
-  analyst then guesses). Code answers them with :data:`UNAVAILABLE_DATA_TEXTS`: what is not
-  available and the closest proxies from the allowed tables, with no model call after the
-  router and no SQL.
 
 The checks are pure, bounded regex checks on the scan fold the input guard uses (no model
 call). They are English-only. They only narrow what happens next; the guards, budget and
@@ -42,12 +36,10 @@ __all__ = [
     "CUSTOMER_BANDS_RULE",
     "CUSTOMER_BANDS_SECTION",
     "MEMORY_TEXT",
-    "UNAVAILABLE_DATA_TEXTS",
     "asks_for_customer_pii",
     "is_customer_ranking_request",
     "is_sql_request",
     "mentions_customer_id",
-    "unavailable_data_topic",
 ]
 
 MAX_INTENT_CHARS: Final = 300  # longer messages are never treated as these intents
@@ -201,81 +193,3 @@ def mentions_customer_id(text: str) -> bool:
     if not isinstance(text, str) or not text:
         return False
     return bool(_CUSTOMER_ID_RE.search(text))
-
-
-# --- iter-live1: data the dataset does not hold ----------------------------------------------
-# The allowed tables are orders, order items, products and users (bq.schema.ALLOWED_TABLES).
-# Each reply says the data is "not available" and offers proxies those tables can answer.
-_ALLOWED_TABLES_TEXT: Final = "orders, order items, products and users"
-UNAVAILABLE_DATA_TEXTS: Final[dict[str, str]] = {
-    "inventory": (
-        "Inventory and stock levels are not available: inventory data is outside the tables "
-        f"I can use ({_ALLOWED_TABLES_TEXT}). The closest proxies are units sold and returns "
-        "by product, brand or category over time; want one of those?"
-    ),
-    "warehouse": (
-        "Warehouse and distribution centre data is not available: it is outside the tables I "
-        f"can use ({_ALLOWED_TABLES_TEXT}). The closest proxies are units sold, shipping and "
-        "delivery times and returns by product; want one of those?"
-    ),
-    "marketing": (
-        "Marketing and advertising spend data is not available: it is outside the tables I "
-        f"can use ({_ALLOWED_TABLES_TEXT}). The closest proxies are new users, orders, revenue "
-        "and units sold by traffic source; want one of those?"
-    ),
-    "web": (
-        "Website visit and page view data is not available: it is outside the tables I can "
-        f"use ({_ALLOWED_TABLES_TEXT}). The closest proxies are new users, orders and units "
-        "sold by traffic source; want one of those?"
-    ),
-}
-# Most specific first: "warehouse stock" is an inventory question.
-_UNAVAILABLE_RES: Final[tuple[tuple[str, re.Pattern[str]], ...]] = (
-    (
-        "inventory",
-        re.compile(
-            # "inventory item id(s)" is a column of order items: a normal data question
-            r"\binventor(?:y|ies)\b(?![\s_-]*items?[\s_-]*ids?\b)"
-            r"|\bstock[\s-]*(?:levels?|on[\s-]+hand|counts?|positions?|outs?|availability)\b"
-            r"|\bstockouts?\b|\b(?:in|out[\s-]+of|low\s+on|left\s+in)[\s-]+stock\b"
-            r"|\b(?:units?|items?|products?)\s+(?:on[\s-]+hand|in\s+(?:the\s+)?warehouses?)\b"
-            r"|\b(?:warehouse|current)\s+stock\b|\brestock(?:ing)?\b"
-            r"|\bstock\s+(?:left|remaining)\b|\bhow\s+much\s+stock\b"
-        ),
-    ),
-    (
-        "warehouse",
-        re.compile(
-            r"\bwarehouses?\b|\bdistribution[\s-]+cent(?:er|re)s?\b"
-            r"|\bfulfil{1,2}ment[\s-]+cent(?:er|re)s?\b"
-        ),
-    ),
-    (
-        "marketing",
-        re.compile(
-            r"\b(?:ad|ads|advertising|marketing|campaign|media|paid[\s-]+search)[\s-]+"
-            r"(?:spend(?:ing)?|budgets?|costs?|expenses?)\b"
-            r"|\bcost[\s-]+per[\s-]+(?:click|acquisition|lead)\b|\b(?:roas|cpc|cpa|cpm)\b"
-            r"|\bcustomer[\s-]+acquisition[\s-]+costs?\b|\breturn\s+on\s+ad\s+spend\b"
-        ),
-    ),
-    (
-        "web",
-        re.compile(
-            r"\bpage[\s-]*views?\b|\bclick[\s-]*stream\b|\bbounce[\s-]+rates?\b"
-            r"|\b(?:web|website|site|browsing)[\s-]+(?:events?|sessions?|visits?|visitors?)\b"
-        ),
-    ),
-)
-
-
-def unavailable_data_topic(text: str) -> str | None:
-    """The unavailable-data topic ``text`` asks about (a key of :data:`UNAVAILABLE_DATA_TEXTS`),
-    or ``None``. Pure, bounded regex on the scan fold; English only, like the agent."""
-    if not isinstance(text, str) or not text.strip() or len(text) > MAX_INTENT_CHARS:
-        return None
-    folded = " ".join(_fold(text).split())
-    for topic, pattern in _UNAVAILABLE_RES:
-        if pattern.search(folded):
-            return topic
-    return None
