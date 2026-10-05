@@ -36,7 +36,7 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | Item | Answer | Follow-up |
 |---|---|---|
 | D-2 | **Deadline moved: end of day Wed 2026-10-07** (not Thu) | re-plan the remaining iterations; Step 6 moves to Wed |
-| L0 (D-1, D-5, D-112) | Run the live spike now, staying inside the request limits | orchestrator runs it with a capped call count |
+| L0 (D-1, D-5, D-112) | Run the live spike now, staying inside the request limits | **done 2026-10-05: 3/3 passed** (`gemini-3.1-flash-lite`, `gemini-3.8-flash`, `gemini-embedding-001` returns 768 dims), 3 calls. The embedding daily limit is still unread (AI Studio dashboard) |
 | D-3 | Night run accepted; owner reviews the 🔴 iterations now | — |
 | 22a OD-10 (AC-12.13 vs AC-12.15) | Strict: after a restart a confirmed but not executed delete is expired, nothing deleted | amend AC-12.13 |
 | 22a OD-1 | Accepted: `/delete` command plus strict phrase parsing; both always need the user's confirmation | — |
