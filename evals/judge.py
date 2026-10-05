@@ -94,11 +94,11 @@ def parse_verdict(raw: str, model: str) -> JudgeVerdict:
     m = re.search(r"\{.*\}", raw, re.DOTALL)
     try:
         data = json.loads(m.group(0)) if m else {}
-        score = int(data["score"])
-        if not 1 <= score <= 5:
+        score = data["score"]
+        if type(score) is not int or not 1 <= score <= 5:  # no bool, float or string scores
             raise ValueError
         return JudgeVerdict(score, str(data.get("rationale", ""))[:500], model, RUBRIC_VERSION)
-    except (ValueError, KeyError, TypeError):
+    except (ValueError, KeyError, TypeError, AttributeError):
         return JudgeVerdict(None, "", model, RUBRIC_VERSION, error="unparsable judge output")
 
 
@@ -118,6 +118,35 @@ class Judge:
         return parse_verdict(raw, self.model)
 
 
+def inputs_hash(cases: list[dict[str, Any]], labels: dict[str, int], judge_model: str) -> str:
+    """Binds a calibration record to what it measured: case texts, owner labels, rubric, model."""
+    payload = {
+        "cases": [
+            [c["id"], c["question"], c["candidate_answer"], c.get("reference_note", "")]
+            for c in cases
+        ],
+        "labels": {k: labels[k] for k in sorted(labels)},
+        "rubric": rubric_hash(),
+        "rubric_kinds": RUBRIC_KINDS,
+        "prompt_template": build_prompt("", "", kind="golden"),
+        "judge_model": judge_model,
+        "pass_score": PASS_SCORE,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def recorded_agreement(scores: dict[str, int | None], labels: dict[str, int]) -> float | None:
+    """Pass/fail agreement recomputed from recorded judge scores; None if the ids differ."""
+    if not labels or set(scores) != set(labels):
+        return None
+    agree = 0
+    for cid, owner in labels.items():
+        got = scores[cid]
+        judge_pass = type(got) is int and got >= PASS_SCORE
+        agree += (owner >= PASS_SCORE) == judge_pass
+    return agree / len(labels)
+
+
 @dataclass(frozen=True)
 class CalibrationStatus:
     calibrated: bool
@@ -127,18 +156,62 @@ class CalibrationStatus:
     rubric_version: str | None = None
     timestamp: str | None = None
     reason: str = ""
+    inputs_hash: str | None = None
+    judge_scores: dict[str, int | None] | None = None  # recorded per-case judge output
 
-    def counts_for(self, judge_model: str, rubric_version: str = RUBRIC_VERSION) -> bool:
-        """True only for a passing record made with the current judge model and rubric."""
-        return (
-            self.calibrated
-            and self.judge_model == judge_model
-            and self.rubric_version == rubric_version
-        )
+    def counts_for(
+        self,
+        judge_model: str,
+        rubric_version: str = RUBRIC_VERSION,
+        *,
+        inputs_hash: str | None = None,
+        labels: dict[str, int] | None = None,
+    ) -> bool:
+        """True only for a passing record bound to the current inputs.
+
+        It must match the judge model, rubric version and the inputs hash (case texts, owner
+        labels, rubric, model), and agreement recomputed from the recorded judge scores and the
+        current labels must itself reach the gate. Callers that cannot supply the current hash and
+        labels get False.
+        """
+        try:
+            return self._counts_for(judge_model, rubric_version, inputs_hash, labels)
+        except Exception:  # a malformed record never counts and never raises
+            return False
+
+    def _counts_for(
+        self,
+        judge_model: str,
+        rubric_version: str,
+        inputs_hash: str | None,
+        labels: dict[str, int] | None,
+    ) -> bool:
+        if (
+            self.calibrated is not True
+            or self.judge_model != judge_model
+            or self.rubric_version != rubric_version
+            or inputs_hash is None
+            or labels is None
+            or self.inputs_hash != inputs_hash
+            or self.n_cases < CALIBRATION_MIN_CASES
+            or len(labels) < CALIBRATION_MIN_CASES
+            or not _is_number(self.agreement)
+            or self.agreement < CALIBRATION_MIN_AGREEMENT
+            or self.judge_scores is None
+        ):
+            return False
+        again = recorded_agreement(self.judge_scores, labels)
+        return again is not None and again >= CALIBRATION_MIN_AGREEMENT
 
 
 def evaluate_agreement(
-    agreement: float, n_cases: int, judge_model: str, now: datetime | None = None
+    agreement: float,
+    n_cases: int,
+    judge_model: str,
+    now: datetime | None = None,
+    *,
+    inputs_hash: str | None = None,
+    judge_scores: dict[str, int | None] | None = None,
 ) -> CalibrationStatus:
     """Used by iteration 30: turn a measured agreement into the status record."""
     ok = n_cases >= CALIBRATION_MIN_CASES and agreement >= CALIBRATION_MIN_AGREEMENT
@@ -150,6 +223,8 @@ def evaluate_agreement(
         rubric_version=RUBRIC_VERSION,
         timestamp=(now or datetime.now(UTC)).isoformat(timespec="seconds"),
         reason="" if ok else f"agreement {agreement:.0%} on {n_cases} cases is below the gate",
+        inputs_hash=inputs_hash,
+        judge_scores=judge_scores,
     )
 
 
@@ -158,18 +233,33 @@ def write_status(status: CalibrationStatus, path: Path = DEFAULT_STATUS_PATH) ->
     path.write_text(json.dumps(asdict(status), indent=2) + "\n", encoding="utf-8")
 
 
+def _is_number(v: Any) -> bool:
+    return isinstance(v, int | float) and not isinstance(v, bool)
+
+
 def load_status(path: Path = DEFAULT_STATUS_PATH) -> CalibrationStatus:
     """A missing or malformed file means uncalibrated, never an error."""
     try:
         data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+        n = data.get("n_cases", 0)
+        agreement = data.get("agreement")
+        scores = data.get("judge_scores")
+        if scores is not None and not (
+            isinstance(scores, dict)
+            and all(isinstance(k, str) and (v is None or type(v) is int) for k, v in scores.items())
+        ):
+            scores = None
+        h = data.get("inputs_hash")
         return CalibrationStatus(
-            calibrated=bool(data["calibrated"]),
-            agreement=data.get("agreement"),
-            n_cases=int(data.get("n_cases", 0)),
+            calibrated=data["calibrated"] is True,
+            agreement=agreement if _is_number(agreement) else None,
+            n_cases=n if type(n) is int else 0,
             judge_model=data.get("judge_model"),
             rubric_version=data.get("rubric_version"),
             timestamp=data.get("timestamp"),
             reason=str(data.get("reason", "")),
+            inputs_hash=h if isinstance(h, str) else None,
+            judge_scores=scores,
         )
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return CalibrationStatus(calibrated=False, reason="no calibration record")

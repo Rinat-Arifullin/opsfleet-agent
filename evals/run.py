@@ -504,6 +504,20 @@ def _rates(results: list[gates_mod.CaseResult]) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _calibration_binding(
+    cases_path: Path | None, judge_model: str
+) -> tuple[str | None, dict[str, int] | None]:
+    """Current calibration inputs hash and owner labels; (None, None) if labels are unusable."""
+    from evals.calibration import run as cal_run
+
+    try:
+        cases = cal_run.load_cases(cases_path or cal_run.CASES_PATH)
+        labels = cal_run.owner_labels(cases)
+        return judge_mod.inputs_hash(cases, labels, judge_model), labels
+    except Exception:
+        return None, None
+
+
 def main(
     argv: list[str] | None = None,
     *,
@@ -526,6 +540,7 @@ def main(
     ap.add_argument("--trace-dir", type=Path, default=Path("traces"))
     ap.add_argument("--models-yaml", type=Path, default=None)
     ap.add_argument("--calibration-file", type=Path, default=judge_mod.DEFAULT_STATUS_PATH)
+    ap.add_argument("--calibration-cases", type=Path, default=None)
     args = ap.parse_args(argv)
 
     try:
@@ -569,8 +584,16 @@ def main(
 
     judge_model = judge_mod.judge_model_from_models_yaml(args.models_yaml)
     cal = judge_mod.load_status(args.calibration_file)
-    judge_counts = cal.counts_for(judge_model)
-    cal_reason = cal.reason or ("record is for another judge model or rubric version")
+    bound_hash, bound_labels = _calibration_binding(args.calibration_cases, judge_model)
+    judge_counts = cal.counts_for(judge_model, inputs_hash=bound_hash, labels=bound_labels)
+    if args.calibration_cases is not None:
+        print(
+            f"WARNING: calibration cases from {args.calibration_cases}, not the shipped set",
+            file=out,
+        )
+    cal_reason = cal.reason or (
+        "record does not match the current labels, cases, rubric or judge model"
+    )
 
     run_dir = args.results_dir / t0.strftime("%Y%m%dT%H%M%SZ")
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -643,6 +666,9 @@ def main(
             "rubric_version": judge_mod.RUBRIC_VERSION,
             "calibrated": judge_counts,
             "reason": "" if judge_counts else cal_reason,
+            "calibration_cases": str(args.calibration_cases or "shipped"),
+            "inputs_hash": bound_hash,
+            "record_timestamp": cal.timestamp,
         },  # fmt: skip
         "gates": [asdict(g) for g in gate_results],
         "passed": passed,

@@ -122,18 +122,37 @@ def test_uncalibrated_judge_fails_golden_gate_and_is_reported(tmp_path):
 
 
 def test_calibrated_judge_scores_count(tmp_path):
-    J.write_status(
-        J.evaluate_agreement(0.9, 40, J.judge_model_from_models_yaml()), tmp_path / "cal.json"
+    from evals.calibration import run as C
+
+    model = J.judge_model_from_models_yaml()
+    cases = C.load_cases()
+    labels = {c["id"]: (5 if i % 2 == 0 else 1) for i, c in enumerate(cases)}  # synthetic
+    cases_file = tmp_path / "cal_cases.yaml"
+    import yaml
+
+    cases_file.write_text(
+        yaml.safe_dump({"cases": [dict(c, owner_score=labels[c["id"]]) for c in cases]})
     )
+    J.write_status(
+        J.evaluate_agreement(
+            0.9, 30, model, inputs_hash=J.inputs_hash(cases, labels, model),
+            judge_scores={k: (5 if v >= 4 else 1) for k, v in labels.items()},
+        ),
+        tmp_path / "cal.json",
+    )  # fmt: skip
     write_case(tmp_path / "c", "golden/j.yaml",
         "input: q\nexpect: {judge: {min_score: 4}}\n"
         "fake: {outcome: answered, text: fine, judge_score: 2}\n")  # fmt: skip
-    code, _ = run(tmp_path, "--offline", cases=tmp_path / "c")
+    code, _ = run(
+        tmp_path, "--offline", "--calibration-cases", str(cases_file), cases=tmp_path / "c"
+    )
     assert code == R.EXIT_GATE  # a low score fails now that it counts
     write_case(tmp_path / "c", "golden/j.yaml",
         "input: q\nexpect: {judge: {min_score: 4}}\n"
         "fake: {outcome: answered, text: fine, judge_score: 5}\n")  # fmt: skip
-    code, _ = run(tmp_path, "--offline", cases=tmp_path / "c")
+    code, _ = run(
+        tmp_path, "--offline", "--calibration-cases", str(cases_file), cases=tmp_path / "c"
+    )
     assert code == R.EXIT_OK
 
 
