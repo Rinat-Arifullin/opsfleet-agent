@@ -6,6 +6,7 @@ returns a typed BudgetExhausted; nothing here raises into the agent loop.
 
 from __future__ import annotations
 
+import math
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -230,6 +231,69 @@ class TurnBudget:
             return False
         self.escalated = True
         return True
+
+    # crash resume (HLD 4.0.6, R2-m6): the counters live in graph state, so a resumed turn
+    # continues the same budget instead of getting a fresh one
+    def snapshot(self) -> dict[str, Any]:
+        """JSON-safe counters for the checkpoint (no usage records, no clock)."""
+        return {
+            "kind": self.kind.value,
+            "calls": self.calls,
+            "sql_queries": self.sql_queries,
+            "retries": self.retries,
+            "escalated": self.escalated,
+            "role_calls": dict(self.role_calls),
+            "elapsed_s": round(max(0.0, self.elapsed()), 3),
+        }
+
+    def restore(self, snap: Any) -> bool:
+        """Continue from a snapshot. Never lowers a counter; values are clamped to the caps.
+
+        A malformed snapshot (wrong kind or types) fails closed: the budget is exhausted, so
+        the resumed turn can only reach force_answer's template. Returns False in that case.
+        """
+        caps = self.caps
+        ok = isinstance(snap, dict) and snap.get("kind") == self.kind.value
+        calls = _count(snap.get("calls"), caps.llm_calls) if ok else None
+        sql = _count(snap.get("sql_queries"), caps.sql_queries) if ok else None
+        retries = _count(snap.get("retries"), self._max_turn_retries) if ok else None
+        escalated = snap.get("escalated") if ok else None
+        elapsed = snap.get("elapsed_s") if ok else None
+        roles = snap.get("role_calls") if ok else None
+        valid = (
+            None not in (calls, sql, retries)
+            and isinstance(escalated, bool)
+            and isinstance(elapsed, int | float)
+            and not isinstance(elapsed, bool)
+            and math.isfinite(elapsed)
+            and isinstance(roles, dict)
+            and len(roles) <= _MAX_ROLES
+            and all(isinstance(k, str) and _count(v, 10**6) is not None for k, v in roles.items())
+        )
+        if not valid:
+            self.calls, self.sql_queries = caps.llm_calls, caps.sql_queries
+            self.retries, self.escalated = self._max_turn_retries, True
+            self._start = self._clock() - caps.deadline_s
+            return False
+        self.calls = max(self.calls, calls)
+        self.sql_queries = max(self.sql_queries, sql)
+        self.retries = max(self.retries, retries)
+        self.escalated = self.escalated or escalated
+        for role, n in roles.items():
+            self.role_calls[role] = max(self.role_calls[role], min(n, self.subcap(role)))
+        lost = min(max(0.0, float(elapsed)), caps.deadline_s)
+        self._start = min(self._start, self._clock() - lost)
+        return True
+
+
+_MAX_ROLES = 32
+
+
+def _count(value: Any, cap: int) -> int | None:
+    """A non-negative int clamped to ``cap``; None when it is not an int (bools rejected)."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return min(value, cap)
 
 
 def run_with_recursion_guard[T](invoke: Callable[[], T]) -> T | PartialAnswer:

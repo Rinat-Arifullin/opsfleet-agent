@@ -133,7 +133,9 @@ def run_light_path(
         detector=detector,
     )
     codes = frozenset(verdict.codes())
-    if verdict.allowed:
+    if verdict.allowed and not verdict.text.strip():  # e.g. "<b></b>": nothing left to show
+        text, source = _template(label, profile), "template"
+    elif verdict.allowed:
         text = verdict.text + suffix
     elif UNEXPECTED_ACTION in codes:  # the turn did something it must not: fail closed
         text, source = verdict.text, "blocked"

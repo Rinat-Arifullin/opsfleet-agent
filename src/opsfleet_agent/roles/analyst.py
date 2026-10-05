@@ -24,6 +24,7 @@ import json
 import logging
 import operator
 import re
+import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,6 +49,20 @@ from opsfleet_agent.graph.llm import (
 from opsfleet_agent.guards.output import normalise_for_display
 from opsfleet_agent.persona import PERSONA_LABEL, SAFETY_PREAMBLE, Persona, assemble_prompt
 from opsfleet_agent.tools.registry import RUN_SQL, tools_for
+
+# The role subgraphs are compiled with ``checkpointer=False`` and invoked with an explicit
+# ``durability="async"`` (see the runner); LangGraph warns that it has no effect, which is
+# exactly the intent. The runner silences only that message, only around that invoke.
+_DURABILITY_WARNING: Final = "`durability` has no effect when no checkpointer"
+
+
+def _invoke_subgraph(graph: Any, state: dict[str, Any]) -> Any:
+    """Invoke a role subgraph with ``durability="async"`` and only its known warning muted."""
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=_DURABILITY_WARNING, category=UserWarning)
+        # no checkpointer here; the parent's "sync" is inherited and breaks this
+        # subgraph in LangGraph 1.2.12 (_put_checkpoint_fut), so opt out explicitly
+        return graph.invoke(state, {"recursion_limit": RECURSION_LIMIT}, durability="async")
 
 __all__ = [
     "DEEP",
@@ -458,9 +473,9 @@ def run_analyst(
     try:
         graph = build_analyst_graph(role, deps)
         out = run_with_recursion_guard(
-            lambda: graph.invoke(
+            lambda: _invoke_subgraph(
+                graph,
                 {"messages": messages, "status": "running", "failed_sql": 0, "sql_calls": 0},
-                {"recursion_limit": RECURSION_LIMIT},
             )
         )
     except Exception as exc:  # unknown role exception: failed/internal, class only (HLD §4.0.5)

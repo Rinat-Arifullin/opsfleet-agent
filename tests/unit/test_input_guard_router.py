@@ -769,3 +769,13 @@ def test_router_unknown_wrapper_result_fails_open(monkeypatch) -> None:
     monkeypatch.setattr(llm, "call", lambda *a, **k: object())
     d = route(RouterInput(UserTurn("hi")), llm=llm, model=MODEL, invoke=FakeInvoke("x"))
     assert (d.label, d.route, d.status) == ("complex", "full", "unavailable")
+
+
+@pytest.mark.parametrize("reply", ["<b></b>", "​"])
+def test_light_path_empty_after_sanitising_uses_template(detector, reply) -> None:
+    # The output guard can strip a reply to nothing; the user still gets the template.
+    tracer = FakeTracer()
+    r = _light("smalltalk", "hello", detector, fake=FakeInvoke(reply), tracer=tracer)
+    assert (r.text, r.source) == (GREETING_TEMPLATE, "template")
+    [turn_span] = tracer.of("turn")
+    assert turn_span["outcome"] == "answered"

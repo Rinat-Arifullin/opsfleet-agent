@@ -93,9 +93,11 @@ __all__ = [
     "HISTORY_TURNS",
     "AgentGraph",
     "GraphServices",
+    "PendingTurn",
     "TurnResult",
     "build_checkpointer",
     "build_run_sql_tool",
+    "scope_snapshot",
 ]
 
 logger = logging.getLogger(__name__)
@@ -209,6 +211,10 @@ class TurnState(TypedDict, total=False):
     grounding_blocked: bool  # the guard blocked the draft before grounding: finalize refuses
     history: Annotated[list[dict[str, str]], _append_history]
     figures: Annotated[list[dict[str, Any]], merge_figures]
+    # crash resume (HLD 4.0.6): written at turn start / after every node, read by resume
+    scope_snapshot: dict[str, Any]  # the scope the turn started under (FR-76)
+    owner: str  # the profile user_id the turn started under; resume refuses any other user
+    turn_ctx: dict[str, Any]  # TurnBudget counters, SQL ledger, tool names, figures
 
 
 _TURN_RESET: Final[dict[str, Any]] = {
@@ -309,6 +315,150 @@ def _new_context(
         services, raw_text, session.profile, session.session_id, tid, sql_session, budget, llm,
         services.persona(),
     )  # fmt: skip
+
+
+# --- crash resume: per-turn context in state (HLD 4.0.6, R2-m6) ---------------------------------
+
+_SQL_FLAGS: Final = ("gave_up", "bq_unavailable")
+_SQL_COUNTS: Final = ("consecutive_failures", "empty_results")
+_MAX_SNAPSHOT_ITEMS: Final = 64  # bound on every restored list or map (a turn runs <= 6 queries)
+
+
+def scope_snapshot(scope: ProductScope) -> dict[str, Any]:
+    """JSON-safe snapshot of a scope (same shape as the iteration-15 memory snapshots)."""
+    if scope.all_products:
+        return {"all": True, "brands": []}
+    return {"all": False, "brands": sorted(scope.brands)}
+
+
+def _ctx_snapshot(ctx: TurnContext) -> dict[str, Any]:
+    """What a resumed turn needs from the non-serialised context. No raw text, no secrets."""
+    t = ctx.sql_turn
+    sql: dict[str, Any] = {
+        "seen": dict(t.seen),
+        "statements": dict(t.statements),
+        "ledger": [dict(e) for e in t.ledger],
+        "last_error": t.last_error,
+        **{f: getattr(t, f) for f in (*_SQL_FLAGS, *_SQL_COUNTS)},
+    }
+    return {
+        "turn_id": ctx.turn_id,
+        "budget": ctx.budget.snapshot(),
+        "sql": sql,
+        "tool_names": list(ctx.tool_names),
+        "new_figures": list(ctx.new_figures),
+        "guard_codes": sorted(ctx.guard_codes),
+        "notice": ctx.notice,
+    }
+
+
+def _str_map(obj: Any) -> dict[str, str | None] | None:
+    if not isinstance(obj, dict) or len(obj) > _MAX_SNAPSHOT_ITEMS:
+        return None
+    if not all(isinstance(k, str) and (v is None or isinstance(v, str)) for k, v in obj.items()):
+        return None
+    return dict(obj)
+
+
+_LEDGER_STR: Final = ("sql", "query_id", "sql_hash", "executed_sql_hash")
+_LEDGER_KEYS: Final = frozenset((*_LEDGER_STR, "purpose", "rows"))
+
+
+def _ledger(obj: Any) -> list[dict[str, Any]] | None:
+    """The run_sql ledger, with every entry in the exact shape ``RunSqlTool._account`` writes."""
+    entries = _dict_list(obj)
+    if entries is None:
+        return None
+    for e in entries:
+        rows = e.get("rows")
+        if (
+            set(e) != _LEDGER_KEYS
+            or not all(isinstance(e[k], str) for k in _LEDGER_STR)
+            or not (e["purpose"] is None or isinstance(e["purpose"], str))
+            or not isinstance(rows, int)
+            or isinstance(rows, bool)
+            or rows < 0
+        ):
+            return None
+    return entries
+
+
+def _dict_list(obj: Any) -> list[dict[str, Any]] | None:
+    if not isinstance(obj, list) or len(obj) > _MAX_SNAPSHOT_ITEMS:
+        return None
+    if not all(isinstance(e, dict) for e in obj):
+        return None
+    return [dict(e) for e in obj]
+
+
+def _restore_ctx(ctx: TurnContext, snap: Any) -> bool:
+    """Continue the interrupted turn's budget and SQL ledger in a fresh context.
+
+    Completed queries are restored into ``seen``/``statements``/``ledger``, so the run_sql
+    duplicate check stops them from running again. A malformed snapshot fails closed: the
+    budget is exhausted and run_sql gives up, so the turn ends on force_answer's template.
+    """
+    snap = snap if isinstance(snap, dict) else {}
+    budget_ok = ctx.budget.restore(snap.get("budget"))
+    sql = snap.get("sql") if isinstance(snap.get("sql"), dict) else {}
+    seen, statements = _str_map(sql.get("seen")), _str_map(sql.get("statements"))
+    ledger = _ledger(sql.get("ledger"))
+    figures = _dict_list(snap.get("new_figures"))
+    names, codes = snap.get("tool_names"), snap.get("guard_codes")
+    flags_ok = all(isinstance(sql.get(f), bool) for f in _SQL_FLAGS)
+    counts_ok = all(
+        isinstance(sql.get(f), int) and not isinstance(sql.get(f), bool) and sql[f] >= 0
+        for f in _SQL_COUNTS
+    )
+    lists_ok = all(
+        isinstance(x, list) and len(x) <= _MAX_SNAPSHOT_ITEMS and all(isinstance(i, str) for i in x)
+        for x in (names, codes)
+    )
+    notice = snap.get("notice")
+    last_error = sql.get("last_error")
+    valid = (
+        budget_ok
+        and None not in (seen, statements, ledger, figures)
+        and flags_ok
+        and counts_ok
+        and lists_ok
+        and (notice is None or isinstance(notice, str))
+        and (last_error is None or isinstance(last_error, str))
+    )
+    t = ctx.sql_turn
+    if not valid:
+        if budget_ok:
+            ctx.budget.restore(None)  # exhaust: a malformed ledger may hide completed queries
+        t.gave_up = True
+        return False
+    t.seen.update(seen)
+    t.statements.update(statements)
+    t.ledger[:] = ledger
+    t.last_error = last_error
+    for f in _SQL_FLAGS:
+        setattr(t, f, sql[f])
+    for f in _SQL_COUNTS:
+        setattr(t, f, sql[f])
+    ctx.tool_names[:] = names
+    ctx.new_figures[:] = figures
+    ctx.guard_codes |= set(codes)
+    ctx.notice = notice
+    return True
+
+
+def _snapshotting(ctx: TurnContext, fn: Callable[[TurnState], dict[str, Any]]):
+    """Add the context snapshot to every node update, so each checkpoint carries it."""
+
+    def run(state: TurnState) -> dict[str, Any]:
+        update = fn(state)
+        try:
+            snap = _ctx_snapshot(ctx)
+        except Exception as exc:  # never breaks a turn; resume then fails closed (empty)
+            logger.error("turn context snapshot failed: %s", type(exc).__name__)
+            return {**update, "turn_ctx": {}}  # a stale snapshot would under-count
+        return {**update, "turn_ctx": snap}
+
+    return run
 
 
 # --- nodes --------------------------------------------------------------------------------------
@@ -541,7 +691,9 @@ def _finalize(ctx: TurnContext, state: TurnState) -> dict[str, Any]:
     label = state.get("label", "")
     update: dict[str, Any] = {}
     if state.get("route") in ("refuse", "light"):
-        text = state.get("final_text", "") or ERROR_TEXT
+        text = state.get("final_text", "")
+        if not text:  # e.g. a resumed state without the light/refusal text: fail closed
+            text, update["outcome"] = ERROR_TEXT, "error"
     elif state.get("error"):
         text, update["outcome"] = ERROR_TEXT, "error"
     elif state.get("grounding_blocked"):
@@ -624,7 +776,7 @@ def _build(ctx: TurnContext, checkpointer: Any) -> Any:
     nodes = _make_nodes(ctx)
     g = StateGraph(TurnState)
     for name, fn in nodes.items():
-        g.add_node(name, _safe(name, fn))
+        g.add_node(name, _snapshotting(ctx, _safe(name, fn)))
     g.add_edge(START, "input_guard")
     g.add_conditional_edges("input_guard", _after_guard, ["finalize", "light", "load_context"])
     g.add_conditional_edges("load_context", _after_context, ["quick", "deep", "finalize"])
@@ -656,33 +808,92 @@ class AgentGraph:
             self._sql_sessions[session.session_id] = got
         return got
 
+    def _config(self, session_id: str) -> dict[str, Any]:
+        return {"configurable": {"thread_id": session_id}, "recursion_limit": RECURSION_LIMIT}
+
     def run_turn(
         self, raw_text: str, *, session: Session, turn_id: str | None = None
     ) -> TurnResult:
         """Run one turn. Never raises: any failure becomes a templated message."""
         tid = turn_id or uuid.uuid4().hex[:12]
         try:
-            ctx = _new_context(self.services, raw_text, session, self._sql_session(session), tid)
+            sql_session = self._sql_session(session)
+            ctx = _new_context(self.services, raw_text, session, sql_session, tid)
             graph = _build(ctx, self.checkpointer)
-            config = {
-                "configurable": {"thread_id": session.session_id},
-                "recursion_limit": RECURSION_LIMIT,
+            start = {
+                **_TURN_RESET,
+                "turn_id": tid,
+                "scope_snapshot": scope_snapshot(sql_session.scope),
+                "owner": session.profile.user_id,
+                "turn_ctx": {},
             }
-            out = run_with_recursion_guard(
-                lambda: graph.invoke({**_TURN_RESET, "turn_id": tid}, config)
-            )
+            config, durable = self._config(session.session_id), self._durability()
+            out = run_with_recursion_guard(lambda: graph.invoke(start, config, **durable))
         except Exception as exc:
             logger.error("turn failed: %s", type(exc).__name__)
             return TurnResult(ERROR_TEXT, outcome="error")
-        if isinstance(out, PartialAnswer):
-            return TurnResult(out.message, outcome="error", llm_calls=ctx.budget.calls)
-        return TurnResult(
-            text=out.get("final_text") or ERROR_TEXT,
-            label=out.get("label", ""),
-            route=out.get("route", ""),
-            outcome=out.get("outcome") or "answered",
-            notice=ctx.notice,
-            llm_calls=ctx.budget.calls,
-            sql_queries=ctx.budget.sql_queries,
-            guard_codes=frozenset(ctx.guard_codes),
-        )
+        return _result(ctx, out)
+
+    def _durability(self) -> dict[str, str]:
+        """``durability="sync"``: each node's checkpoint is on disk before the next node
+        starts, so a hard kill (no Python cleanup) loses at most the running node (OD-1).
+        Omitted when there is no checkpointer (LangGraph ignores it and warns)."""
+        return {"durability": "sync"} if self.checkpointer is not None else {}
+
+    def open_resume(self, session: Session) -> PendingTurn:
+        """Read the session's last checkpoint (decrypting it) for :func:`resume.resume_turn`.
+
+        Raises when the checkpoint cannot be read (a wrong ``LANGGRAPH_AES_KEY`` is a
+        ``ValueError`` from the MAC check): the caller refuses; nothing runs.
+        """
+        stored = self.checkpointer.get_tuple(self._config(session.session_id))
+        if stored is None:
+            return PendingTurn(self, session, None, (), {})
+        ctx = _new_context(self.services, "", session, self._sql_session(session), "")
+        graph = _build(ctx, self.checkpointer)
+        snap = graph.get_state(self._config(session.session_id))
+        return PendingTurn(self, session, (ctx, graph), tuple(snap.next), dict(snap.values))
+
+
+@dataclass
+class PendingTurn:
+    """The interrupted turn of a session, read from its checkpoint (not yet replayed)."""
+
+    agent: AgentGraph
+    session: Session
+    _built: tuple[TurnContext, Any] | None
+    next: tuple[str, ...]
+    values: dict[str, Any]
+
+    def finish(self) -> TurnResult:
+        """Finish ONLY the interrupted turn (``invoke(None)``), with its budget and ledger
+        restored. Never starts a new turn. Never raises."""
+        if self._built is None or not self.next:
+            return TurnResult(ERROR_TEXT, outcome="error")
+        ctx, graph = self._built
+        try:
+            ctx.turn_id = ctx.sql_turn.turn_id = str(self.values.get("turn_id") or "")
+            if not _restore_ctx(ctx, self.values.get("turn_ctx")):
+                logger.error("resume: turn context malformed; budget exhausted")
+            config = self.agent._config(self.session.session_id)
+            durable = self.agent._durability()
+            out = run_with_recursion_guard(lambda: graph.invoke(None, config, **durable))
+        except Exception as exc:
+            logger.error("resume failed: %s", type(exc).__name__)
+            return TurnResult(ERROR_TEXT, outcome="error")
+        return _result(ctx, out)
+
+
+def _result(ctx: TurnContext, out: Any) -> TurnResult:
+    if isinstance(out, PartialAnswer):
+        return TurnResult(out.message, outcome="error", llm_calls=ctx.budget.calls)
+    return TurnResult(
+        text=out.get("final_text") or ERROR_TEXT,
+        label=out.get("label", ""),
+        route=out.get("route", ""),
+        outcome=out.get("outcome") or "answered",
+        notice=ctx.notice,
+        llm_calls=ctx.budget.calls,
+        sql_queries=ctx.budget.sql_queries,
+        guard_codes=frozenset(ctx.guard_codes),
+    )
