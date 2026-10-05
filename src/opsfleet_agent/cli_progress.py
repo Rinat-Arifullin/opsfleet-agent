@@ -52,6 +52,7 @@ STAGE_LABELS: Final[dict[str, str]] = {
     "force_answer": "Writing the answer…",
     "grounding": "Checking the numbers…",
     "report_writer": "Writing the report…",
+    "retry_writer": "Writing the report…",  # iteration 33: "retry report"
     "confirm_save": "Preparing the report…",
     "delete_preview": "Preparing the delete preview…",
     "confirm_delete": "Checking the confirmation…",

@@ -8,7 +8,9 @@ Report commands (all owner-only and scope-checked in ``reports.library``): ``/re
 lists the user's own saved reports (titles only; the optional words use the delete matcher),
 ``/open <id | row n | title words>`` shows one, ``/search <words> [tag:x] [from:D] [to:D]``
 substring-searches them
-(iteration 18). ``/export`` belongs to 22a and stays a stub (OD-5 in iter19-ods.md).
+(iteration 18). ``/rename``, ``/export`` and ``/retry`` (iteration 33, ``commands.report_actions``)
+rename a report, write it as a Markdown file under ``<data dir>/exports/`` and re-run the
+report phase of this session's last failed report (no SQL).
 ``/delete`` (iteration 22a, ``commands.delete``) is registered at startup only when the delete
 service is ready; otherwise it stays unregistered (feature-off rollback path).
 """
@@ -59,6 +61,10 @@ class CommandContext:
     langfuse: Any = None
     # Iteration 39: store.preferences.SQLitePreferenceStore; None = /prefs unavailable.
     preference_store: Any = None
+    # Iteration 33: where /export writes (None = <data dir>/exports) and the PII detector the
+    # title guard uses (None = the process default).
+    export_dir: Path | None = None
+    detector: Any = None
 
 
 REPORTS_LIST_LIMIT: Final = 20
@@ -70,6 +76,8 @@ NO_MATCH_TEXT: Final = "No saved reports match."
 class CommandResult:
     text: str
     exit: bool = False
+    # Iteration 33: a fixed message the CLI runs as a chat turn (``/retry`` -> "retry report").
+    turn: str | None = None
 
 
 @dataclass(frozen=True)
@@ -251,11 +259,38 @@ def _search(args: str, ctx: CommandContext) -> CommandResult:
     return CommandResult(library.render_list(res, header=header, empty=NO_MATCH_TEXT))
 
 
-def _stub(name: str) -> Callable[[str, CommandContext], CommandResult]:
-    def handler(_args: str, _ctx: CommandContext) -> CommandResult:
-        return CommandResult(NOT_AVAILABLE_TEXT.format(name=name))
+def _rename(args: str, ctx: CommandContext) -> CommandResult:
+    if ctx.report_store is None:
+        return CommandResult(STORE_UNAVAILABLE_TEXT)
+    from opsfleet_agent.commands.report_actions import handle_rename
 
-    return handler
+    try:
+        return CommandResult(handle_rename(args, ctx, detector=ctx.detector))
+    except Exception as exc:  # a store failure never crashes the REPL
+        log.error("report rename failed: %s", type(exc).__name__)
+        return CommandResult("Could not rename that report right now.")
+
+
+def _export(args: str, ctx: CommandContext) -> CommandResult:
+    if ctx.report_store is None:
+        return CommandResult(STORE_UNAVAILABLE_TEXT)
+    from opsfleet_agent.commands.report_actions import handle_export
+
+    try:
+        return CommandResult(handle_export(args, ctx, export_dir=ctx.export_dir))
+    except Exception as exc:
+        log.error("report export failed: %s", type(exc).__name__)
+        return CommandResult("Could not export that report right now.")
+
+
+RETRY_TURN_TEXT: Final = "retry report"
+
+
+def _retry(args: str, _ctx: CommandContext) -> CommandResult:
+    """AC-21.15: one retry of the report phase, run by the graph as a fixed turn (no SQL)."""
+    if args.strip():
+        return CommandResult("Usage: /retry (re-runs the last failed report of this session)")
+    return CommandResult("", turn=RETRY_TURN_TEXT)
 
 
 def _table() -> dict[str, Command]:
@@ -282,11 +317,17 @@ def _table() -> dict[str, Command]:
         Command("/reports", "/reports [words]", "List your saved reports.", _reports),
         Command("/open", "/open <id|n|title>", "Open a saved report.", _open),
         Command("/search", "/search <words> [tag:x]", "Search saved reports.", _search),
+        Command(
+            "/rename", '/rename <id|n|"title"> <new title>', "Rename a saved report.", _rename
+        ),  # fmt: skip
+        Command(
+            "/export",
+            "/export <id|n|title> [name.md]",
+            "Write a saved report to data/exports as Markdown.",
+            _export,
+        ),  # fmt: skip
+        Command("/retry", "/retry", "Retry the last failed report (no new queries).", _retry),
     ]
-    for name, usage, text in (
-        ("/export", "/export <report_id>", "Export a saved report."),
-    ):
-        cmds.append(Command(name, usage, text, _stub(name), stub=True))
     return {c.name: c for c in cmds}
 
 

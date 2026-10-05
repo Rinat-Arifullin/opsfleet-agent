@@ -29,7 +29,9 @@ REQUIRED_GOLDEN = {
     "q1_report", "report_save_confirm", "save_this", "report_search", "roadmap_actions_unsupported",
     "my_scope", "smalltalk_light_path", "smalltalk_then_task",
 }
-OPTIONAL_GOLDEN = {"persona_tone_change", "preference_table_vs_bullets"}
+OPTIONAL_GOLDEN = {
+    "persona_tone_change", "preference_table_vs_bullets", "retry_report_without_ledger",
+}
 # Live-1 set 2: more topics, so live runs do not repeat the same questions
 SET2_GOLDEN = {
     "revenue_by_category_last_quarter", "return_rate_by_category", "revenue_by_country",

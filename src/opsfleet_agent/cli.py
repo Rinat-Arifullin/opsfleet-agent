@@ -527,10 +527,13 @@ class _Repl:
                 continue
             if commands.is_command(line):
                 res = commands.dispatch(line, self._ctx())
-                _say(res.text)
+                if res.text:
+                    _say(res.text)
                 if res.exit:
                     return 0
-                continue
+                if res.turn is None:
+                    continue
+                line = res.turn  # iteration 33: /retry runs the fixed "retry report" turn
             try:
                 self.turn(line)
             except KeyboardInterrupt:  # backstop: a Ctrl-C between two guarded steps

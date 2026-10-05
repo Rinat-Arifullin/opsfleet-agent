@@ -252,6 +252,23 @@ _SAVE_LAST_RE: Final = re.compile(
     r"^\s*save (?:this|that|the last answer|the answer)(?: as a report)?\s*[.!]?\s*$",
     re.I | re.A,
 )
+# iteration 33 (FR-40, AC-21.15): "retry report" re-runs only the writer and verifier of the
+# session's last failed or unsaved report on its stored ledger; no SQL, bounded attempts.
+RETRY_NODE: Final = "retry_writer"
+RETRY_LIMIT: Final = 3  # retries of one failed report; a new analysis turn resets it
+RETRY_MESSAGE: Final = "retry report"  # the history entry of a retry turn (code-owned text)
+MAX_RETRY_ANALYSIS_CHARS: Final = 6000  # report_writer.MAX_ANALYSIS_CHARS
+RETRY_HINT_TEXT: Final = (
+    "Report could not be generated; the analysis is above. Say *retry report*."
+)
+NO_RETRY_TEXT: Final = (
+    "There is no failed or unsaved report in this session to retry. Ask for a new report."
+)
+RETRY_FAILED_TEXT: Final = (
+    "The report could still not be generated; nothing was saved. You can say *retry report* "
+    "again or ask for a new report."
+)
+_RETRY_RE: Final = re.compile(r"^\s*retry(?: the)? report\s*[.!]?\s*$", re.I | re.A)
 _AES_LENGTHS: Final = (16, 24, 32)
 
 
@@ -369,6 +386,10 @@ class TurnState(TypedDict, total=False):
     # D-162: sticky aggregate-only mode. Set by the first customer-ranking turn of the session
     # and never cleared: every later turn runs run_sql in bands-only mode. Not in _TURN_RESET.
     aggregate_only: bool
+    # iteration 33: the session's last failed or unsaved report (question, analysis, scrubbed
+    # ledger, scope, attempts) that "retry report" re-runs. Not in _TURN_RESET: a later
+    # analysis turn replaces or clears it in finalize; a save clears it.
+    failed_report: dict[str, Any]
 
 
 _TURN_RESET: Final[dict[str, Any]] = {
@@ -456,6 +477,8 @@ class TurnContext:
     forced_label: str | None = None  # iteration 17: "revise" re-runs the turn as a report
     delete_request: Any = None  # iteration 22a: a parsed delete selector routes START -> preview
     delete_turn: int = 0  # iteration 22a: the session's user-turn number (confirm = preview + 1)
+    report_failed: bool = False  # iteration 33: the writer produced no draft on a report turn
+    retry: bool = False  # iteration 33: a "retry report" turn routes START -> retry_writer
 
     def __post_init__(self) -> None:
         self.sql_turn = RunSqlTurn(self.turn_id, sql_counter=self.budget)
@@ -584,6 +607,8 @@ def _restore_ctx(ctx: TurnContext, snap: Any) -> bool:
     b = snap.get("budget")
     if isinstance(b, dict) and b.get("kind") == TurnKind.REPORT.value:
         _promote_report(ctx)  # iteration 17: a report turn resumes under the REPORT caps
+    elif isinstance(b, dict) and b.get("kind") == TurnKind.RETRY_REPORT.value:
+        _switch_budget(ctx, TurnKind.RETRY_REPORT)  # iteration 33: a retry draft resumes
     budget_ok = ctx.budget.restore(b)
     sql = snap.get("sql") if isinstance(snap.get("sql"), dict) else {}
     seen, statements = _str_map(sql.get("seen")), _str_map(sql.get("statements"))
@@ -638,14 +663,21 @@ def _promote_report(ctx: TurnContext) -> None:
 
     Idempotent. The new budget continues the QA counters (``restore`` never lowers them), the
     start time and the usage records, and replaces the budget everywhere it is referenced."""
+    _switch_budget(ctx, TurnKind.REPORT)
+
+
+def _switch_budget(ctx: TurnContext, kind: TurnKind) -> None:
+    """Switch the turn to the ``kind`` caps (REPORT or RETRY_REPORT) with the report role
+    subcaps, keeping every count. Idempotent. Iteration 33: a retry turn starts as QA (no call
+    yet) and switches to RETRY_REPORT (8 calls, 0 SQL) before the graph runs."""
     old = ctx.budget
-    if old.kind is TurnKind.REPORT:
+    if old.kind is kind:
         return
     new = TurnBudget(
-        TurnKind.REPORT, clock=old._clock, role_subcaps=dict(_REPORT_ROLE_SUBCAPS),
+        kind, clock=old._clock, role_subcaps=dict(_REPORT_ROLE_SUBCAPS),
         time_bounded=old.time_bounded,
     )  # fmt: skip
-    new.restore({**old.snapshot(), "kind": TurnKind.REPORT.value})
+    new.restore({**old.snapshot(), "kind": kind.value})
     new._start = old._start
     new.usage = old.usage
     ctx.budget = ctx.llm.budget = ctx.sql_turn.sql_counter = new
@@ -989,9 +1021,37 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
             extra_notes=(PARTIAL_REPORT_NOTE,) if status == "partial" else (),
         )  # fmt: skip
         if rep is None:
+            ctx.report_failed = True  # iteration 33: finalize offers "retry report"
             return {}
         text = f"{rep['markdown']}\n\n{REPORT_PROMPT}"
         return {"report": rep, "route": "report", "final_text": text, "outcome": "report_pending"}
+
+    def retry_writer(state: TurnState) -> dict[str, Any]:
+        # Iteration 33 (FR-40, AC-21.15): only code routes here ("retry report", checked in
+        # AgentGraph._run). Writer + verifier + output guard on the stored scrubbed ledger of
+        # the session's last failed or unsaved report; no analyst, no run_sql (0 SQL cap).
+        scope = ctx.sql_session.scope
+        marker = _retry_marker(state.get("failed_report"), scope)
+        if marker is None:  # re-checked: _run validated it, but state is the source of truth
+            return {"route": "retry", "label": "report", "final_text": NO_RETRY_TEXT,
+                    "outcome": "refused"}  # fmt: skip
+        attempts = marker["attempts"] + 1
+        kept = {**marker, "attempts": attempts}
+        _record(ctx, "role", RETRY_NODE, agent=RETRY_NODE, retries=attempts, sql=0)
+        memory = _with_stored_preferences(ctx, SessionMemory.from_state(state.get("memory")))
+        rep = _build_report(
+            ctx, question=marker["question"], analysis=marker["analysis"],
+            ledger=[dict(e) for e in marker["ledger"]],
+            figures=scoped_figures(state.get("figures"), scope),
+            extra_notes=(PARTIAL_REPORT_NOTE,) if marker["partial"] else (),
+            preferences=render_preferences(memory),
+        )  # fmt: skip
+        if rep is None:
+            return {"route": "retry", "label": "report", "final_text": RETRY_FAILED_TEXT,
+                    "outcome": "report_failed", "failed_report": kept}  # fmt: skip
+        text = f"{rep['markdown']}\n\n{REPORT_PROMPT}"
+        return {"report": rep, "route": "report", "label": "report", "final_text": text,
+                "outcome": "report_pending", "failed_report": kept}  # fmt: skip
 
     def confirm_save(state: TurnState) -> dict[str, Any]:
         # Re-runs from the top on resume (LangGraph), so everything before interrupt() is
@@ -1072,6 +1132,7 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
         "force_answer": force_answer,
         "grounding": grounding,
         "report_writer": report_writer,  # iteration 17
+        RETRY_NODE: retry_writer,  # iteration 33
         CONFIRM_NODE: confirm_save,  # iteration 17
         "delete_preview": delete_preview,  # iteration 22a
         DELETE_CONFIRM_NODE: confirm_delete,
@@ -1217,17 +1278,21 @@ def _build_report(
     ledger: list[dict[str, Any]],
     figures: list[dict[str, Any]],
     extra_notes: tuple[str, ...] = (),
+    preferences: str | None = None,
 ) -> dict[str, Any] | None:
     """Writer + verifier (bounded, budgeted), then the output guard on the rendered body.
-    None when no draft passes: the caller falls back to the analysis answer; nothing is saved."""
+    None when no draft passes: the caller falls back to the analysis answer; nothing is saved.
+    ``preferences`` overrides the rendered preferences of load_context (a retry has none)."""
     sv = ctx.services
+    if preferences is None:
+        preferences = render_preferences(ctx.assembled.memory) if ctx.assembled else ""
     res = produce_report(
         question=question, analysis=analysis, sql_ledger=ledger, figures=figures,
         scope_label=ctx.profile.scope_label, window=sv.window(), llm=ctx.llm,
         invoke=sv.analyst_invoke,
         models={r: model_ids_from_settings(sv.settings, r) for r in (WRITER_ROLE, VERIFIER_ROLE)},
         persona=ctx.persona, deadline_hit=ctx.budget.deadline_hit, extra_notes=extra_notes,
-        preferences=render_preferences(ctx.assembled.memory) if ctx.assembled else "",
+        preferences=preferences,
     )  # fmt: skip
     if not res.ok or res.draft is None:
         _record(ctx, "guard", "report", verdict="no_draft")
@@ -1498,7 +1563,7 @@ def _assumptions(ctx: TurnContext, state: TurnState, text: str) -> str:
 def _finalize(ctx: TurnContext, state: TurnState) -> dict[str, Any]:
     label = state.get("label", "")
     update: dict[str, Any] = {}
-    if state.get("route") in ("refuse", "light", "clarify", "report", "delete"):
+    if state.get("route") in ("refuse", "light", "clarify", "report", "delete", "retry"):
         text = state.get("final_text", "")
         if not text:  # e.g. a resumed state without the light/refusal/clarify text: fail closed
             text, update["outcome"] = ERROR_TEXT, "error"
@@ -1530,6 +1595,10 @@ def _finalize(ctx: TurnContext, state: TurnState) -> dict[str, Any]:
                 codes.add(ASSUMPTIONS_ADDED)
         ctx.guard_codes |= codes
         update["outcome"] = "answered" if verdict.allowed else "blocked"
+        if ctx.report_failed and verdict.allowed:  # iteration 33: the analysis stays shown
+            if ctx.can_confirm:  # a retry needs the session checkpoint for its marker
+                text = f"{text.rstrip()}\n\n{RETRY_HINT_TEXT}"
+            update["outcome"] = "report_failed"
         _record(ctx, "guard", "output", verdict="allow" if verdict.allowed else "block",
                 rule_hits=sorted(codes))  # fmt: skip
     outcome = update.get("outcome") or state.get("outcome") or "answered"
@@ -1566,7 +1635,63 @@ def _finalize(ctx: TurnContext, state: TurnState) -> dict[str, Any]:
         if ctx.sql_turn.ledger:  # prior-turn grounding set for follow-ups (AC-07.1/07.2)
             scope = ctx.sql_session.scope
             update["prior_ledger"] = [ledger_entry_for_state(e, scope) for e in ctx.sql_turn.ledger]
+    marker = _next_retry_marker(ctx, state, label, outcome)
+    if marker is not None:
+        update["failed_report"] = marker
     return update
+
+
+def _next_retry_marker(
+    ctx: TurnContext, state: TurnState, label: str, outcome: str
+) -> dict[str, Any] | None:
+    """Iteration 33: the "retry report" marker after this turn, or None to leave it as is.
+
+    Saved or cancelled clears it (a cancelled draft is never retried, m5). A report turn
+    whose writer failed, or whose save failed, records its question, analysis and scrubbed
+    ledger. Any other analysis turn (one that ran SQL) clears it; a light, clarify or
+    refused turn, and a retry turn (retry_writer keeps the attempt count), leave it."""
+    if outcome in ("report_saved", "report_cancelled"):
+        return {}
+    if ctx.retry or not ctx.sql_turn.ledger:
+        return None
+    if label != "report" or outcome not in ("report_failed", "report_unsaved"):
+        return {}
+    scope = ctx.sql_session.scope
+    ledger = [
+        {k: v for k, v in ledger_entry_for_state(e, scope).items() if k != "scope"}
+        for e in ctx.sql_turn.ledger
+    ][-MAX_PRIOR_LEDGER:]
+    return {
+        "question": str(state.get("context_message") or state.get("message") or ""),
+        "analysis": str(state.get("draft") or "")[:MAX_RETRY_ANALYSIS_CHARS],
+        "partial": state.get("status") == "partial",
+        "scope": snapshot_of(scope),
+        "ledger": ledger,
+        "turn_id": ctx.turn_id,
+        "attempts": 0,
+    }
+
+
+def _retry_marker(obj: Any, scope: ProductScope) -> dict[str, Any] | None:
+    """The stored retry marker when it is well formed, covered by the current scope and not
+    out of attempts; None otherwise (fail closed: "nothing to retry")."""
+    if not isinstance(obj, dict) or not obj or not covers(scope, obj.get("scope")):
+        return None
+    ledger, attempts = obj.get("ledger"), obj.get("attempts")
+    if (
+        not isinstance(ledger, list)
+        or not 0 < len(ledger) <= MAX_PRIOR_LEDGER
+        or not all(isinstance(e, dict) and isinstance(e.get("sql"), str) for e in ledger)
+        or not isinstance(obj.get("question"), str)
+        or not obj["question"].strip()
+        or not isinstance(obj.get("analysis"), str)
+        or not obj["analysis"].strip()
+        or not isinstance(attempts, int)
+        or isinstance(attempts, bool)
+        or not 0 <= attempts < RETRY_LIMIT
+    ):
+        return None
+    return {**obj, "partial": obj.get("partial") is True}
 
 
 # --- supervisor ---------------------------------------------------------------------------------
@@ -1663,9 +1788,14 @@ def _build(ctx: TurnContext, checkpointer: Any) -> Any:
     # iteration 22a: only code (a parsed user request) routes a turn into the delete flow
     g.add_conditional_edges(
         START,
-        lambda _s: "delete_preview" if ctx.delete_request is not None else "input_guard",
-        ["delete_preview", "input_guard"],
+        lambda _s: (
+            "delete_preview" if ctx.delete_request is not None
+            else RETRY_NODE if ctx.retry  # iteration 33: only code (a parsed "retry report")
+            else "input_guard"
+        ),  # fmt: skip
+        ["delete_preview", RETRY_NODE, "input_guard"],
     )
+    g.add_conditional_edges(RETRY_NODE, _after_writer, [CONFIRM_NODE, "finalize"])
     g.add_conditional_edges(
         "delete_preview",
         lambda s: (
@@ -1789,6 +1919,12 @@ class AgentGraph:
                     return self._answer_draft(ctx, graph, values, raw_text, session, tid)
                 if check_pending and _SAVE_LAST_RE.match(_reply_forms(raw_text)[0]):
                     return self._save_last(ctx, values, session, tid)
+                # iteration 33: "retry report" (or /retry) re-runs writer + verifier only
+                if check_pending and delete_req is None and _RETRY_RE.match(raw_text):
+                    return self._start_retry(ctx, graph, values, session, tid)
+            elif check_pending and delete_req is None and _RETRY_RE.match(raw_text):
+                return TurnResult(NO_RETRY_TEXT, label="report", route="report",
+                                  outcome="refused")  # fmt: skip
             if delete_req is None and check_pending:  # deterministic: never the model
                 delete_req = delete_flow.parse_delete_request(raw_text)
             if delete_req is not None:
@@ -1935,6 +2071,38 @@ class AgentGraph:
         resume("cancel")  # an unrelated message: the draft is dropped and the agent says so
         res = self._run(raw, session, tid, check_pending=False)
         return dataclasses.replace(res, text=f"{NOT_SAVED_TEXT}\n\n{res.text}")
+
+    def start_retry(self, *, session: Session, turn_id: str | None = None) -> TurnResult:
+        """``/retry`` (iteration 33): the same as saying "retry report". Never raises."""
+        return self.run_turn(RETRY_MESSAGE, session=session, turn_id=turn_id)
+
+    def _start_retry(
+        self, ctx: TurnContext, graph: Any, values: dict[str, Any], session: Session, tid: str
+    ) -> TurnResult:
+        """AC-21.15: one bounded writer + verifier attempt (RETRY_REPORT caps: 8 LLM calls,
+        0 SQL) on the stored ledger of this session's last failed or unsaved report, then the
+        usual Save / Revise / Cancel. No analyst and no SQL; the raw text never enters state."""
+        if values.get("owner") != session.profile.user_id:  # M1: defence in depth
+            return TurnResult(NO_RETRY_TEXT, label="report", route="report", outcome="refused")
+        marker = _retry_marker(values.get("failed_report"), ctx.sql_session.scope)
+        if marker is None:
+            return TurnResult(NO_RETRY_TEXT, label="report", route="report", outcome="refused")
+        ctx.retry = True
+        _switch_budget(ctx, TurnKind.RETRY_REPORT)
+        start = {
+            **_TURN_RESET,
+            "turn_id": tid,
+            "scope_snapshot": scope_snapshot(ctx.sql_session.scope),
+            "owner": session.profile.user_id,
+            "turn_ctx": {},
+            "pending_action": {},
+            "message": RETRY_MESSAGE,
+            "label": "report",
+            "context_message": marker["question"],  # Revise rebuilds from the question
+        }
+        config, durable = self._config(session.session_id), self._durability()
+        out = run_with_recursion_guard(lambda: graph.invoke(start, config, **durable))
+        return _result(ctx, out)
 
     def _save_last(
         self, ctx: TurnContext, values: dict[str, Any], session: Session, tid: str

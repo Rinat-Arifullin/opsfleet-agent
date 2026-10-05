@@ -881,8 +881,8 @@ These iterations run in the reverse of the drop order: the most protected item (
 - `src/opsfleet_agent/commands/report_actions.py`
 - `tests/unit/test_report_actions.py`
 **Done criteria**:
-- [ ] Named tests: `test_rename_export_retry_owner_only_audited`, `test_retry_report_reuses_ledger_no_sql`
-- [ ] [std]
+- [x] Named tests: `test_rename_export_retry_owner_only_audited`, `test_retry_report_reuses_ledger_no_sql`
+- [x] [std]
 **Effort**: M (1) · **Depends on**: 17, 18, 21 · **Risk**: low
 
 ## Iteration 36: Triage CLI (drop 4)

@@ -13,7 +13,8 @@ Rules enforced here, in code:
   :meth:`store_items` hand out only fenced or fence-on-render forms. The raw body is for the
   owner's own display (iteration 19's view command), never for a prompt.
 
-No delete method: deletion is iteration 22a's audited flow (audit record first).
+No delete method: deletion is iteration 22a's audited flow (audit record first). The only
+update is :meth:`ReportStore.rename` (iteration 33), owner-checked and guarded.
 """
 
 from __future__ import annotations
@@ -209,6 +210,29 @@ class ReportStore:
             f"SELECT {_COLS} FROM saved_report WHERE idempotency_key=? AND owner_user_id=?",
             (str(idempotency_key), str(owner_user_id)),
         ).fetchone()
+        return _row(row) if row else None
+
+    def rename(
+        self, report_id: str, owner_user_id: str, title: str, guard: BodyGuard
+    ) -> SavedReport | None:
+        """Iteration 33 (AC-21.12): set the owner's report title. None when the id is not the
+        owner's (another user's report is "not found", never touched). The title passes the
+        same guard and secret scrub as at save time; the caller validates length and
+        control characters first."""
+        new_title = _guarded(guard, _req("title", title, 200), "title", 200)
+        if not new_title.strip():
+            raise ReportError("title is required")
+        with write_tx(self.conn):
+            cur = self.conn.execute(
+                "UPDATE saved_report SET title=? WHERE report_id=? AND owner_user_id=?",
+                (new_title, str(report_id), str(owner_user_id)),
+            )
+            if cur.rowcount != 1:
+                return None
+            row = self.conn.execute(
+                f"SELECT {_COLS} FROM saved_report WHERE report_id=? AND owner_user_id=?",
+                (str(report_id), str(owner_user_id)),
+            ).fetchone()
         return _row(row) if row else None
 
     def get_fenced(self, report_id: str, owner_user_id: str) -> str | None:

@@ -286,6 +286,9 @@ with `/` is a command and never reaches the LLM. Any other line is a turn with i
 | `/reports [words]` | List your saved reports, optionally filtered |
 | `/open <id \| n \| title>` | Show a saved report (by id, list number or title) |
 | `/search <words> [tag:x] [from:YYYY-MM-DD] [to:YYYY-MM-DD]` | Word search over your reports' titles and bodies |
+| `/rename <id \| n \| "title"> <new title>` | Rename one of your saved reports (at most 120 characters; audited) |
+| `/export <id \| n \| title> [name.md]` | Write a saved report as Markdown to `data/exports/` (no other folder; works with the LLM down; audited) |
+| `/retry` (or type "retry report") | Retry the last failed or unsaved report of this session: re-runs only the writer and verifier on the kept results, no new queries; at most 3 tries |
 | `/delete <id \| words \| this session>` | Start a two-phase delete (same as typing "delete …") |
 | `/feedback up\|down [reason] [comment]` | Rate the last answer |
 | `/trace [turn_id]` | Show the trace of the last (or a given) turn, with the Langfuse link if enabled |
