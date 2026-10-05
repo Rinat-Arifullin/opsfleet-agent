@@ -25,7 +25,7 @@ limits:
   models:
     gemini-3.8-flash:      {rpm: 5,  rpd: 20,  tpm: 250000}
     gemini-3.1-flash-lite: {rpm: 15, rpd: 500, tpm: 250000}
-    # Embedding limits are an assumption, unconfirmed (Q-5); the iteration-2 spike confirms.
+    # Embedding limits confirmed by the owner in the AI Studio dashboard on 2026-10-05 (Q-5).
     gemini-embedding-001:  {rpm: 100, rpd: 1000, tpm: 30000}
 
 # Policy and BigQuery tunables (HLD 4.0.7). Both keys are optional; these are the defaults.
