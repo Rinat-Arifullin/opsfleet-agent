@@ -23,3 +23,14 @@ fake:
   judge_score: 5
   sql:
   - SELECT 1 /* recorded placeholder */
+
+# D-160 profile matrix: the scope named in the answer follows the profile.
+per_profile:
+  analyst_b:
+    fake:
+      text: Monthly revenue for Carhartt and Levi's over the last 12 months. The current month is
+        partial. Revenue counts completed and shipped items, excluding cancelled and returned.
+  ceo_demo:
+    fake:
+      text: Monthly revenue across all products over the last 12 months. The current month is partial.
+        Revenue counts completed and shipped items, excluding cancelled and returned.

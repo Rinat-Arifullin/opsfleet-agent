@@ -77,4 +77,6 @@ It works the same with `OPSFLEET_LLM_PROVIDER=lmstudio`.
 
 To run Langfuse locally with Docker, see [infra/langfuse/README.md](infra/langfuse/README.md).
 That README also shows how to upload the golden eval cases as a Langfuse dataset and run them live (`evals/langfuse_dataset.py upload` / `run`).
+
+Golden eval cases run once per profile (`analyst_a`, `analyst_b`, `ceo_demo`), with scope invariants checked in code for each run. `uv run python evals/run.py --offline --profile ceo_demo` keeps one profile, and the summary prints a case x profile matrix (`docs/process/iter-d160-ods.md`).
 Design and the exact list of fields sent: [docs/process/iter40-ods.md](docs/process/iter40-ods.md).

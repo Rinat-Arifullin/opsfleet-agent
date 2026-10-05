@@ -50,17 +50,29 @@ It needs Docker with Compose v2 and about 4 GB of free RAM.
 With the server running and `LANGFUSE_*` set (step 4), you can upload the golden cases as a
 dataset and run them live against the real agent. Each run appears under **Datasets ->
 opsfleet-golden -> Runs**. Every item is linked to its turn trace and gets a `pass` score plus
-one `check:<name>` score per eval check.
+one `check:<name>` score per eval check (the `scope:*` checks are the profile scope
+invariants).
+
+Golden cases run under every profile (`analyst_a`, `analyst_b`, `ceo_demo`) unless a case
+declares a subset, so there is one item per (case, profile) run. The item id is
+`<case>@<profile>`, and `metadata.profile` and `metadata.base_case_id` carry the parts.
 
 ```bash
-# upsert evals/cases/golden as dataset "opsfleet-golden" (item id = case id; safe to repeat)
+# upsert evals/cases/golden as dataset "opsfleet-golden" (item id = case@profile; safe to repeat)
 uv run python evals/langfuse_dataset.py upload
+# upload only one profile's runs (a partial upload: nothing is reported stale)
+uv run python evals/langfuse_dataset.py upload --profile ceo_demo
+# archive items no current run produces (renamed or removed cases, pre-matrix ids)
+uv run python evals/langfuse_dataset.py upload --archive-stale
 
 # run the live agent on every item; the run name defaults to <short commit>-<UTC timestamp>
 OPSFLEET_LLM_PROVIDER=lmstudio uv run python evals/langfuse_dataset.py run
 # a quick check: one item, or chosen cases (--case is repeatable)
 OPSFLEET_LLM_PROVIDER=lmstudio uv run python evals/langfuse_dataset.py run --limit 1
 OPSFLEET_LLM_PROVIDER=lmstudio uv run python evals/langfuse_dataset.py run --case churn_last_month
+# --case takes a case id (all its profiles) or one run id; --profile keeps one profile
+OPSFLEET_LLM_PROVIDER=lmstudio uv run python evals/langfuse_dataset.py run --case q1_report@ceo_demo
+OPSFLEET_LLM_PROVIDER=lmstudio uv run python evals/langfuse_dataset.py run --profile analyst_b
 
 # the same live agent through the plain eval runner (results under evals/results/)
 OPSFLEET_LLM_PROVIDER=lmstudio uv run python evals/run.py \
@@ -74,6 +86,11 @@ saved reports, quota, JSONL traces) goes to `OPSFLEET_EVAL_DATA_DIR` (default
 `<OPSFLEET_DATA_DIR or data>/eval-live`), never to your own CLI store. Each case is capped at
 8 turns and at `OPSFLEET_EVAL_CASE_TIMEOUT_S` seconds (default 600). Cases that seed saved
 reports, a persona or preferences fail with a clear reason. See `docs/process/iter40b-ods.md`.
+
+**Stale items.** A full `upload` lists the dataset items that no current (case, profile) run
+produces, for example items from before the profile matrix whose id has no `@<profile>`,
+and leaves them alone. `--archive-stale` sets them to ARCHIVED, and `run` skips archived
+items. Nothing is ever deleted. See `docs/process/iter-d160-ods.md`.
 
 ## Stop or reset
 

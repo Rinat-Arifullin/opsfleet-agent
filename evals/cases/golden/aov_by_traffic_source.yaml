@@ -29,3 +29,18 @@ fake:
   judge_score: 5
   sql:
   - SELECT 1 /* recorded placeholder */
+
+# D-160 profile matrix: the scope named in the answer follows the profile.
+per_profile:
+  analyst_b:
+    expect:
+      must_contain: [traffic source, Carhartt, Levi's]
+    fake:
+      text: Average order value by traffic source for Carhartt and Levi's items only, over the stated
+        window. Revenue excludes cancelled and returned items.
+  ceo_demo:
+    expect:
+      must_contain: [traffic source, all products]
+    fake:
+      text: Average order value by traffic source across all products, over the stated window. Revenue
+        excludes cancelled and returned items.

@@ -36,3 +36,5 @@ fake:
   judge_score: 5
   sql:
   - SELECT 1 /* recorded placeholder */
+profiles: [analyst_a]
+profiles_reason: D-159 is reworking this case; per-profile overrides follow once it lands

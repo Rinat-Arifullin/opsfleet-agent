@@ -25,3 +25,18 @@ fake:
   judge_score: 5
   sql:
   - SELECT 1 /* recorded placeholder */
+
+# D-160 profile matrix: "by brand" lists only the profile's brands; the CEO sees every brand.
+per_profile:
+  analyst_a:
+    expect:
+      must_contain: [Calvin Klein]
+      must_not_contain: [Carhartt, Levi's]
+    fake:
+      text: 'Year-to-date revenue by brand (in scope: Calvin Klein), as of today.'
+  ceo_demo:
+    expect:
+      must_contain: [brand, all products]
+      must_not_contain: []
+    fake:
+      text: Year-to-date revenue by brand across all products, as of today.

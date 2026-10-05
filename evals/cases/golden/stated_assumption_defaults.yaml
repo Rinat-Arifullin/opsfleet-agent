@@ -26,3 +26,18 @@ fake:
   judge_score: 5
   sql:
   - SELECT 1 /* recorded placeholder */
+
+# D-160 profile matrix: the scope named in the answer follows the profile.
+per_profile:
+  analyst_b:
+    expect:
+      must_contain: [quarter, revenue, Carhartt, Levi's]
+    fake:
+      text: Revenue last quarter (the most recent completed quarter, with its year stated), for
+        Carhartt and Levi's. Revenue excludes cancelled and returned items.
+  ceo_demo:
+    expect:
+      must_contain: [quarter, revenue, all products]
+    fake:
+      text: Revenue last quarter (the most recent completed quarter, with its year stated), across all
+        products. Revenue excludes cancelled and returned items.

@@ -117,7 +117,7 @@ def test_uncalibrated_judge_fails_golden_gate_and_is_reported(tmp_path):
     assert "UNCALIBRATED" in out
     summary = json.loads(next((tmp_path / "res").glob("*/summary.json")).read_text())
     assert summary["judge"]["calibrated"] is False
-    rec = json.loads(next((tmp_path / "res").glob("*/golden__j.json")).read_text())
+    rec = json.loads(next((tmp_path / "res").glob("*/golden__j__analyst_a.json")).read_text())
     assert rec["judge"]["counted"] is False
 
 
@@ -219,9 +219,16 @@ def test_offline_run_writes_results_with_trace_links_and_exits_zero(tmp_path):
     assert code == R.EXIT_OK and "RESULT: PASS" in out
     run_dir = next((tmp_path / "res").iterdir())
     files = list(run_dir.glob("*.json"))
-    assert (run_dir / "summary.json") in files and len(files) == 10
-    rec = json.loads((run_dir / "golden__top_category.json").read_text())
+    # 8 single runs + 2 golden cases x 3 profiles (D-160 matrix) + summary.json
+    assert (run_dir / "summary.json") in files and len(files) == 15
+    rec = json.loads((run_dir / "golden__top_category__analyst_a.json").read_text())
     assert rec["trace_id"] and rec["trace_path"].endswith(".jsonl")
+    assert rec["profile"] == "analyst_a" and rec["base_case_id"] == "golden/top_category"
+    summary = json.loads((run_dir / "summary.json").read_text())
+    assert summary["matrix"]["golden/matrix_scope"] == {
+        "analyst_a": "pass", "analyst_b": "pass", "ceo_demo": "pass"
+    }  # fmt: skip
+    assert "Profile matrix (6 runs)" in out
 
 
 def test_failing_case_makes_exit_nonzero(tmp_path):
@@ -234,7 +241,13 @@ def test_failing_case_makes_exit_nonzero(tmp_path):
 
 def test_suite_and_case_filters(tmp_path):
     code, out = run(tmp_path, "--offline", "--suite", "golden")
-    assert code == R.EXIT_OK and out.count("[PASS]") == 1
+    assert code == R.EXIT_OK and out.count("[PASS]") == 6  # 2 golden cases x 3 profiles
+    code, out = run(tmp_path, "--offline", "--case", "golden/top_category")
+    assert out.count("[PASS]") == 3  # a base case id selects all its profile runs
+    code, out = run(tmp_path, "--offline", "--suite", "golden", "--profile", "ceo_demo")
+    assert out.count("[PASS]") == 2 and "@analyst_a" not in out
+    code, out = run(tmp_path, "--offline", "--profile", "nobody")
+    assert code == R.EXIT_REFUSED and "unknown --profile" in out
     code, out = run(tmp_path, "--offline", "--case", "resilience/bq_timeout")
     assert out.count("[PASS]") == 1
 

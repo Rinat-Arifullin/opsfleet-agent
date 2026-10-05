@@ -32,3 +32,14 @@ fake:
   judge_score: 5
   sql:
   - SELECT 1 /* recorded placeholder */
+
+# D-160 profile matrix: "my brands" resolves to each profile's scope.
+per_profile:
+  analyst_b:
+    fake:
+      text: 'Using your definition for this session: churn = no purchase of Carhartt or Levi''s items
+        in 60 days. The month before compares as follows.'
+  ceo_demo:
+    fake:
+      text: 'Using your definition for this session: churn = no purchase of any product (all products)
+        in 60 days. The month before compares as follows.'

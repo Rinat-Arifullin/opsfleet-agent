@@ -37,3 +37,24 @@ fake:
   - SELECT 1 /* recorded placeholder */
   tools:
   - run_sql
+
+# D-160 profile matrix: the scope named in the report follows the profile.
+per_profile:
+  analyst_b:
+    expect:
+      must_contain: [Summary, Key metrics, Insights, Action items, Q1, Carhartt, Levi's, Save, Revise,
+        Cancel]
+    fake:
+      text: 'Draft report for Carhartt and Levi''s: Q1 of the most recent completed year (year stated).
+        Summary. Key metrics. Insights 1-3 each citing a figure. Action items (3): 1) Rebalance
+        promotions toward the best category (insight 1; metric: category share; owner: Merchandising;
+        next quarter). Limitations & hypotheses. Save / Revise / Cancel.'
+  ceo_demo:
+    expect:
+      must_contain: [Summary, Key metrics, Insights, Action items, Q1, all products, Save, Revise,
+        Cancel]
+    fake:
+      text: 'Draft report for all products: Q1 of the most recent completed year (year stated).
+        Summary. Key metrics. Insights 1-3 each citing a figure. Action items (3): 1) Rebalance
+        promotions toward the best category (insight 1; metric: category share; owner: Merchandising;
+        next quarter). Limitations & hypotheses. Save / Revise / Cancel.'
