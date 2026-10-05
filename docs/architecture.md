@@ -1876,6 +1876,7 @@ They are different stores with different jobs, and data moves between them only 
   - Each scope service account has `bigquery.dataViewer` on its authorized-view dataset only.
   - The ingestion service account has dry-run access, the DLP user role and writes to the Golden tables.
   - The team-tooling service account is used by the IAM-gated jobs (access, triage, audit viewer, erasure).
+- **Maintainer identity (D-234):** in production the person running triage or erasure is the authenticated IAM principal of the IAM-gated job (the IdP identity behind it, with MFA at the IdP), recorded in Cloud Audit Logs and used as the audit `actor_user_id`. The prototype's `--as <id>` flag checked against `config/maintainers.yaml` is a local convenience on a machine the maintainer already controls, not an authentication mechanism, and is not carried to production.
 - **Network:** a VPC Service Controls perimeter around BigQuery, Cloud SQL, GCS and Secret Manager. Cloud SQL has a private IP only. Langfuse is reachable only inside the perimeter and through IAP for the support team.
 
 ### 10.4 Privacy

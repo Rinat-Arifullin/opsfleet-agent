@@ -94,7 +94,8 @@ def test_golden_cases_shape(cases):
 def test_optional_cases_marked(cases):
     g = _golden(cases)
     assert g["preference_table_vs_bullets"].skip
-    assert "iteration 39" in g["preference_table_vs_bullets"].skip
+    skip = g["preference_table_vs_bullets"].skip
+    assert "eval seeder" in skip and "not shipped" not in skip  # 39 has shipped (D-233)
     assert not g["persona_tone_change"].skip
 
 

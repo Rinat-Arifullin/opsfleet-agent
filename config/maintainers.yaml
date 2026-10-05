@@ -1,6 +1,8 @@
-# Maintainers allowed to run the feedback triage CLI (iteration 36, FR-47, D-216).
+# Maintainers allowed to run the feedback triage and erase CLIs (iteration 36, FR-47, D-216).
 # Synthetic ids only. This is a support-team allowlist for a local tool, not an application
 # role: the chat never reads it, and a data scope (`all_products`) does not grant it.
 # Override the location with OPSFLEET_MAINTAINERS_YAML (a file path, never a list of ids).
+# `--as <id>` is not authentication: production uses the IAM principal of the job (D-234).
+# `support_demo` is a synthetic demo id used by the README examples and tests.
 maintainers:
   - support_demo

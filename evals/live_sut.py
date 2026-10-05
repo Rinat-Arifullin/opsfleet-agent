@@ -47,7 +47,8 @@ FLUSH_BOUND_S: Final = 5.0
 ENV_DATA_DIR: Final = "OPSFLEET_EVAL_DATA_DIR"
 ENV_CASE_TIMEOUT: Final = "OPSFLEET_EVAL_CASE_TIMEOUT_S"
 UNATTRIBUTED: Final = "unattributed"  # LLM calls the trace does not name a model for
-# Seeds applied live (evals/live_seed.py); `preferences` is not (iteration 39 has no store).
+# Seeds applied live (evals/live_seed.py); `preferences` is not yet (they persist in
+# user_preferences since iteration 39).
 SUPPORTED_SESSION_KEYS: Final = live_seed.SUPPORTED_SESSION_KEYS
 
 

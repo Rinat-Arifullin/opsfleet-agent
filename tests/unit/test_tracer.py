@@ -206,6 +206,17 @@ def test_pattern_scrubs_unregistered_credentials(text):
         assert frag not in out
 
 
+def test_pattern_scrubs_aws_access_key_ids():
+    # D-233: the key-shaped strings are built at runtime so no literal sits in the repo.
+    body = "EXAMPLE" + "Z" * 9
+    for prefix in ("AK" + "IA", "AS" + "IA"):
+        key = prefix + body
+        out = tr.scrub_text(f"aws_key {key} done")
+        assert key not in out and body not in out and "[secret]" in out
+    near = "AK" + "IA" + "Z" * 15  # one char short: not a key id
+    assert tr.scrub_text(near) == near
+
+
 def test_url_encoded_registered_secret_scrubbed():
     s = "pa ss/w+rd&x"
     tr.register_secret(s)

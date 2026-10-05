@@ -118,10 +118,12 @@ SPAN_FIELDS: dict[str, tuple[str, ...]] = {
 LLM_TEXT_FIELDS = ("prompt_redacted", "completion_redacted")
 
 _EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
-# Unregistered credential shapes: Google API keys, OAuth access tokens, bearer tokens,
+# Unregistered credential shapes: Google API keys, OAuth access tokens, AWS key ids, bearer tokens,
 # and key/token query or assignment parameters.
 _API_KEY_SHAPE = re.compile(r"AIza[0-9A-Za-z_-]{35}")
 _OAUTH_TOKEN = re.compile(r"ya29\.[0-9A-Za-z_.~+/=-]+")
+# D-233: AWS access key ids (long-term AKIA, temporary ASIA): 4-letter prefix + 16 [0-9A-Z].
+_AWS_KEY_ID = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
 _BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
 _KV_PARAM = re.compile(
     r"(?i)\b((?:[a-z0-9_-]*(?:key|token|secret|password|passwd|signature))=)[^&\s\"',;]+"
@@ -151,6 +153,7 @@ def scrub_text(text: str, max_len: int = MAX_STR) -> str:
             text = text.replace(form, SECRET)
     text = _API_KEY_SHAPE.sub(SECRET, text)
     text = _OAUTH_TOKEN.sub(SECRET, text)
+    text = _AWS_KEY_ID.sub(SECRET, text)
     text = _BEARER.sub(f"Bearer {SECRET}", text)
     text = _KV_PARAM.sub(lambda m: m.group(1) + SECRET, text)
     text = _EMAIL.sub("[email]", text)

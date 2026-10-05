@@ -18,7 +18,8 @@ Seeds go through the production APIs, never raw SQL:
 * ``setup_turns`` are played as real turns before the case's own turns; their results and
   spans are not scored.
 
-``preferences`` (iteration 39 has no persisted store) and unknown keys raise ``CaseError``.
+``preferences`` (not seeded yet; they persist in ``user_preferences`` since iteration 39)
+and unknown keys raise ``CaseError``.
 All seed text is synthetic.
 """
 
