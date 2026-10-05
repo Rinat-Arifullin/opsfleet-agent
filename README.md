@@ -61,8 +61,8 @@ prompt:
 
 ## Requirements coverage
 
-The prototype must support R2, R3, R5 and R7 (§D3). It also covers the rest at prototype
-level. The production design for every requirement is in
+The prototype must support R2, R3, R5 and R7 (§D3). It also covers R1, R6 and R8, and R4
+in part (see the R4 rows). The production design for every requirement is in
 [architecture.md §6](docs/architecture.md).
 
 | Requirement | Prototype implementation | Where |
@@ -70,7 +70,8 @@ level. The production design for every requirement is in
 | **R1** Hybrid intelligence (Golden Bucket) | Expert question → SQL → report trios in `config/golden_seed.yaml`. They are embedded with `gemini-embedding-001`; the top 3 with cosine ≥ 0.6 go into the analyst prompt as worked examples. Vectors are cached by content hash. | `golden/`, `graph/context.py` |
 | **R2** Safety and PII masking | The SQL policy (25 rules, sqlglot AST) blocks PII columns and every table outside the 4 allowed ones. A brand-scope rewrite turns every table into a PII-free CTE filtered by `@scope_brands`. A small-cell rule (k = 5) and a differencing guard stop re-identification. Regex plus Presidio/spaCy scrub inputs, rows, outputs and traces. The input guard and output guard block injection and unexpected actions. | `guards/`, `tools/run_sql.py` |
 | **R3** High-stakes oversight | A report is saved only after the user replies Save, Revise or Cancel. Deleting is two-phase: a preview, then a confirmation proven with an HMAC token that expires after 600 s. The audit record is written first, in the same transaction as the delete; if the audit write fails, nothing is deleted. The model has no delete tool. | `graph/graph.py`, `delete/`, `store/audit.py` |
-| **R4** Continuous improvement | `/feedback up\|down [reason] [comment]` is stored per turn. The trace links feedback to the turn. Golden examples are a YAML file the analytics team edits. | `commands/feedback.py`, `store/feedback.py` |
+| **R4.1** User-level learning (preferences) | Partly built. Code-side validation of format, depth and chart preferences exists (`set_preference`: enumerated values only, nothing that widens scope or asks for PII), but no role can call it yet, and preferences are not persisted across sessions. See [Not built](#not-built-and-known-gaps). | `graph/memory.py` |
+| **R4.2** System-level learning | `/feedback up\|down [reason] [comment]` is stored per turn with a triage state, and the trace links feedback to the turn, so a bad answer can be traced to the failing step. Golden examples are a YAML file the analytics team edits; a new trio is added there and checked by the eval suite. The triage CLI (`promote`, `add-eval`) is not built. | `commands/feedback.py`, `store/feedback.py`, `config/golden_seed.yaml` |
 | **R5** Resilience | Every LLM call goes through a deadline-aware wrapper: 2 retries with backoff, then the fallback model, which stays on for the rest of the turn. Budgets cap LLM calls, SQL calls and wall time per turn. On a budget or deadline hit, a forced partial answer is written. When the LLM is down, `/reports`, `/open` and `/search` still work (degraded mode). Each BigQuery 503 gets one bounded retry. | `graph/llm.py`, `graph/budget.py`, `graph/degraded.py` |
 | **R6** Quality assurance | Golden, router and adversarial eval suites run per profile, with gates: golden ≥ 80%, adversarial 100%, PII recall ≥ 95%. An LLM judge is calibrated against human labels. CI runs lint, unit tests and the offline eval. | `evals/`, `.github/workflows/ci.yml` |
 | **R7** Observability | Each turn is written as JSONL traces to `data/traces/` with PII and secrets masked by key and by pattern. Langfuse tracing is optional. `/trace` shows a turn and `/audit` the audit log. | `obs/`, `commands/trace.py`, `commands/audit.py` |
@@ -85,6 +86,9 @@ level. The production design for every requirement is in
 | D4 CLI chat | `opsfleet-agent --user <profile>` |
 | D5 Runs on another machine | uv **or** pip, your own `GOOGLE_CLOUD_PROJECT`, ADC, key in `.env` |
 | D6 Framework choice and experience | [Framework choice and experience](#framework-choice-and-experience) |
+| Public GitHub repository with docs, code and the architecture diagram | [github.com/Rinat-Arifullin/opsfleet-agent](https://github.com/Rinat-Arifullin/opsfleet-agent): this README, `docs/`, `src/` |
+| BigQuery integration: SQL built dynamically against the 4 tables | The analyst writes the SQL; `run_sql` checks it, rewrites it for scope, dry-runs it and runs it with a byte cap ([The SQL path](#the-sql-path-what-happens-to-every-query-the-model-writes)) |
+| A newer Gemini model within the free-tier limits | `gemini-3.8-flash` and `gemini-3.1-flash-lite` per role, with a client-side rate limiter at 80% of the quota ([Gemini free-tier limits](#gemini-free-tier-limits)) |
 
 ---
 
@@ -514,7 +518,7 @@ SQLite runs in WAL mode with `secure_delete`, and the folder is git-ignored.
 ### 1. Get the code
 
 ```bash
-git clone <this-repo-url> opsfleet-data-agent
+git clone https://github.com/Rinat-Arifullin/opsfleet-agent.git opsfleet-data-agent
 ```
 
 ```bash
@@ -659,6 +663,14 @@ $ uv run opsfleet-agent --user analyst_b
 > Show me customer emails for my top buyers
   [refused: personal contact data is not available; offers spend bands instead]
 
+> /trace
+  [the spans of the last turn: router label, analyst role and model, each SQL check and the
+   BigQuery job with bytes, timings, status; a failed step is marked]
+
+> /audit
+  [this session's audit events, newest first: the delete preview, the confirmation and the
+   delete, each with report ids and outcome]
+
 > /exit
   Session: <session_id>
   Goodbye.
@@ -802,6 +814,8 @@ design.
 
 | Item | Status | Design |
 |---|---|---|
+| User preferences (R4.1): set by the user, applied to formatting, kept across sessions | Validation code exists (`graph/memory.py`); no role calls `set_preference` yet, and there is no preferences store | architecture.md §6.4 |
+| Feedback triage CLI (R4.2): root-cause classes, `promote` to a Golden candidate, `add-eval` | Feedback rows carry a triage state; the CLI is not built, so triage is done by reading `/trace` and editing `config/golden_seed.yaml` or the eval cases by hand | architecture.md §6.4 |
 | Library agent (separate LLM role for the report library) | Not built; library commands are plain code and the analyst handles library questions | [architecture.md §4.0](docs/architecture.md) |
 | Semantic and full-text report search | Not built; `/search` is a word match plus `tag:`/`from:`/`to:` | architecture.md §6.3.2 |
 | `retry report` (rewrite from the stored evidence, no SQL) | Not built | architecture.md §2.3 |
