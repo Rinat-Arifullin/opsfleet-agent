@@ -287,7 +287,7 @@ with `/` is a command and never reaches the LLM. Any other line is a turn with i
 | `/open <id \| n \| title>` | Show a saved report (by id, list number or title) |
 | `/search <words> [tag:x] [from:YYYY-MM-DD] [to:YYYY-MM-DD]` | Hybrid search over your own in-scope reports, best match first: full-text (SQLite FTS5, bm25, every word must match) fused by Reciprocal Rank Fusion with meaning (Gemini embeddings of title, summary and tags), so a synonym also finds a report. Without embeddings it degrades to the full-text ranking, and without FTS5 to a word match |
 | `/rename <id \| n \| "title"> <new title>` | Rename one of your saved reports (at most 120 characters; audited) |
-| `/export <id \| n \| title> [name.md]` | Write a saved report as Markdown to `data/exports/` (no other folder; works with the LLM down; audited) |
+| `/export <id \| n \| title> [name.md]` | Write a saved report as Markdown to your own folder under `data/exports/` (no other folder; never overwrites an existing file; works with the LLM down; audited) |
 | `/retry` (or type "retry report") | Retry the last failed or unsaved report of this session: re-runs only the writer and verifier on the kept results, no new queries; at most 3 tries |
 | `/delete <id \| words \| this session>` | Start a two-phase delete (same as typing "delete …") |
 | `/feedback up\|down [reason] [comment]` | Rate the last answer |
@@ -754,6 +754,9 @@ uv run python evals/run.py --sut evals.live_sut:live_harness --cases-dir evals/c
 
 `/feedback` ratings are triaged outside the chat with a maintainer CLI. Only ids listed in
 `config/maintainers.yaml` may run it; anyone else is refused before any data is read.
+`--as` is a local-prototype convenience (`support_demo` is a synthetic id): it is not an
+authenticated identity. In production the maintainer is the IAM principal of the IAM-gated job
+(see `docs/architecture.md`, Security).
 
 ```bash
 uv run python -m opsfleet_agent.commands.triage --as support_demo list --state new
@@ -794,10 +797,12 @@ uv run python -m opsfleet_agent.commands.erase --as support_demo --user <user id
 - Erased: saved reports with their full-text and vector rows, preferences, feedback, quota
   rows, differencing fingerprints (one transaction in `app.db`), then the user's checkpoint
   threads, local trace files, export files and Golden candidates built from their feedback.
-- The `erase.executed` audit row is written first and names the user only by a random
-  pseudonym; the user's earlier audit rows are rewritten to that pseudonym. If the audit write
-  fails, nothing is deleted. A file that cannot be deleted is printed, audited as
-  `erase.failed`, and the command exits 1.
+- An `erase.attempted` audit row is committed first and names the user only by a random
+  pseudonym; `erase.executed` is then written at the start of the delete transaction, and the
+  user's earlier audit rows are rewritten to that pseudonym. If the audit write fails, nothing is deleted. If a
+  delete fails, the transaction is rolled back, `erase.failed` is audited, the CLI says
+  "Erase FAILED and was rolled back" and exits 1. A file that cannot be deleted after commit
+  is printed, audited as `erase.failed`, and the command exits 1.
 - Listed for a person, not erased: regression-case drafts in `evals/cases/`, the user's entry
   in `config/profiles.yaml`, checkpoint threads that cannot be decrypted, remote Langfuse
   traces and backups.
@@ -818,7 +823,7 @@ uv run python -m opsfleet_agent.commands.erase --as support_demo --user <user id
 | `OPSFLEET_DATA_DIR` | no | `data` | Where `app.db`, `checkpoints.db` and traces live |
 | `OPSFLEET_MODELS_YAML` | no | `config/models.yaml` | Alternative models and limits file |
 | `OPSFLEET_PROFILES_YAML` | no | `config/profiles.yaml` | Alternative profiles file |
-| `OPSFLEET_MAINTAINERS_YAML` | no | `config/maintainers.yaml` | Maintainer allowlist for the triage CLI |
+| `OPSFLEET_MAINTAINERS_YAML` | no | `config/maintainers.yaml` | Maintainer allowlist for the triage and erase CLIs |
 | `OPSFLEET_LLM_PROVIDER` | no | `gemini` | `lmstudio` for a local model (dev only) |
 | `OPSFLEET_LLM_BASE_URL` | no | `http://127.0.0.1:1234/v1` | LM Studio endpoint |
 | `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST` | no | | Langfuse tracing; on only when all three are set |

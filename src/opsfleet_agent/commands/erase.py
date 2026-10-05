@@ -12,9 +12,11 @@ secret kept in the app store's ``meta`` table; it expires after :data:`CONFIRM_T
    must match the CURRENT plan and not be expired, ``--retype`` must repeat ``--user``, the
    checkpoint store (when it exists) must open with the configured key, and every bounded
    scan must stay under its bound.
-2. ``store.audit.audited_erase``: ``erase.executed`` first (pseudonymous), then every app.db
-   row of the user in ONE transaction, the user's audit rows pseudonymised; if the audit write
-   fails nothing is deleted.
+2. ``store.audit.audited_erase``: ``erase.attempted`` in its own transaction (D-230), then
+   ``erase.executed`` first (pseudonymous) and every app.db row of the user in ONE
+   transaction, the user's audit rows pseudonymised; if an audit write fails nothing is
+   deleted. A step that fails inside the transaction rolls it all back, appends
+   ``erase.failed`` and exits 1 with "Erase FAILED and was rolled back" (not a refusal).
 3. After COMMIT: checkpoint threads owned by the user, the user's local trace files, export
    files of the user's reports and golden candidates built from the user's feedback. Each
    failing store appends ``erase.failed`` and the command exits 1.
@@ -43,6 +45,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, TextIO
 
+from opsfleet_agent.commands.report_actions import owner_folder_name
 from opsfleet_agent.commands.triage import CANDIDATES_DIR, CASES_DIR, load_maintainers
 from opsfleet_agent.session import default_data_dir
 from opsfleet_agent.store.audit import (
@@ -51,6 +54,7 @@ from opsfleet_agent.store.audit import (
     AuditLog,
     EraseError,
     ErasePlan,
+    EraseRolledBackError,
     audited_erase,
     erase_plan,
     record_erase_failure,
@@ -79,7 +83,9 @@ NOT_COVERED: Final = (
     "backups of the data dir, and the user's entry in config/profiles.yaml."
 )
 
-_EXPORT_HEAD_RE: Final = re.compile(r"\nReport R-([A-Za-z0-9]{1,64}),")
+#: The export header line only (``render_export``: "# title", blank line, "Report R-<id>, ...").
+#: A report id named later in the body does not make a file match (D-228).
+_EXPORT_HEAD_RE: Final = re.compile(r"# [^\n]*\n\nReport R-([A-Za-z0-9]{1,64}),")
 _CANDIDATE_HEAD_RE: Final = re.compile(r"^# Golden candidate from feedback ([A-Za-z0-9]{1,64}) ")
 
 
@@ -208,9 +214,18 @@ def plan_outside(
     out.files["traces"] = [p for p in _scan_dir(trace_dir, "*.jsonl") if p.name in safe]
     reports = set(plan.report_ids)
     exports: list[Path] = []
-    for p in _scan_dir(data_dir / EXPORTS_DIR, "*.md"):
-        stem = p.name[2:-3] if p.name.startswith("R-") else None
-        if stem in reports or any(m in reports for m in _EXPORT_HEAD_RE.findall(_head(p))):
+    base = data_dir / EXPORTS_DIR
+    # D-228: every file in the user's own export folder is theirs. A symlinked folder is not
+    # followed; it is listed for the maintainer instead.
+    folder = base / owner_folder_name(user)
+    if folder.is_symlink():
+        out.listed.append("the user's export folder is a symlink; check it by hand")
+    else:
+        exports.extend(_scan_dir(folder, "*.md"))
+    # Exports written before D-228 sit directly in exports/: matched on the header line only.
+    for p in _scan_dir(base, "*.md"):
+        m = _EXPORT_HEAD_RE.match(_head(p))
+        if m and m.group(1) in reports:
             exports.append(p)
     out.files["exports"] = exports
     feedback = set(plan.feedback_ids)
@@ -353,6 +368,11 @@ def main(
     except EraseRefused as exc:
         print(str(exc), file=out)
         return EXIT_REFUSED
+    except EraseRolledBackError as exc:  # D-230: a failure, not a refusal
+        print(f"Erase FAILED and was rolled back ({exc}); no data was deleted. "
+              "The failure is in the audit log (erase.failed); fix the cause and retry.",
+              file=out)  # fmt: skip
+        return EXIT_FAIL
     except EraseError as exc:
         print(f"Refused: {exc}. Nothing was deleted.", file=out)
         return EXIT_REFUSED

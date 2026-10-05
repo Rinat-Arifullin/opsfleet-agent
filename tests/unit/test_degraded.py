@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from opsfleet_agent import commands
+from opsfleet_agent.commands.report_actions import owner_folder_name
 from opsfleet_agent.graph import graph as gr
 from opsfleet_agent.graph.degraded import (
     AI_UNAVAILABLE_TEXT,
@@ -194,7 +195,9 @@ def test_degraded_mode_lists_and_searches_reports_when_llm_down(
     assert down.calls == calls_before  # the library commands never touched an LLM
     # iteration 33: export works with the LLM down too (AC-21.14 export clause)
     exported = commands.dispatch(f"/export {rid}", ctx).text
-    assert exported.startswith("Exported") and (tmp_path / "exports" / f"R-{rid}.md").is_file()
+    assert exported.startswith("Exported") and (
+        tmp_path / "exports" / owner_folder_name(PROFILE.user_id) / f"R-{rid}.md"
+    ).is_file()
     assert down.calls == calls_before
 
 

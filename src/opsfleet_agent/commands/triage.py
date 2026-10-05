@@ -595,7 +595,8 @@ class Triage:
     def _promote_sql(self, rec: FeedbackRecord, sql_file: Path | None) -> str:
         if sql_file is not None:
             try:
-                data = sql_file.read_bytes()[: MAX_SQL_FILE_BYTES + 1]
+                with sql_file.open("rb") as fh:  # D-231: bounded read, never the whole file
+                    data = fh.read(MAX_SQL_FILE_BYTES + 1)
             except OSError:
                 raise TriageRefused("Cannot read --sql-file.", "sql_source") from None
             if len(data) > MAX_SQL_FILE_BYTES:

@@ -10,7 +10,7 @@ lists the user's own saved reports (titles only; the optional words use the dele
 searches them
 (iteration 18; ranked FTS5 bm25 since iteration 37, substring fallback).
 ``/rename``, ``/export`` and ``/retry`` (iteration 33, ``commands.report_actions``)
-rename a report, write it as a Markdown file under ``<data dir>/exports/`` and re-run the
+rename a report, write it as a Markdown file under ``<data dir>/exports/<owner>/`` and re-run the
 report phase of this session's last failed report (no SQL).
 ``/delete`` (iteration 22a, ``commands.delete``) is registered at startup only when the delete
 service is ready; otherwise it stays unregistered (feature-off rollback path).
@@ -362,7 +362,7 @@ def _table() -> dict[str, Command]:
         Command(
             "/export",
             "/export <id|n|title> [name.md]",
-            "Write a saved report to data/exports as Markdown.",
+            "Write a saved report as Markdown to your data/exports folder (never overwrites).",
             _export,
         ),  # fmt: skip
         Command("/retry", "/retry", "Retry the last failed report (no new queries).", _retry),

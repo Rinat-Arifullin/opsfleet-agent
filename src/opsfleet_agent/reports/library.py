@@ -104,6 +104,9 @@ class ListEntry:
     title: str | None  # None: masked (scope drift)
     tags: tuple[str, ...]
     masked: bool
+    # D-232: why a hybrid (semantic) search returned it: "words" (the lexical list), "similar"
+    # (the cosine list only) or "words+similar"; None outside a semantic search
+    match: str | None = None
 
 
 @dataclass(frozen=True)
@@ -129,12 +132,17 @@ def _line(text: str, n: int = TITLE_CHARS) -> str:
     return _one_line(text, n)
 
 
-def _entry(r: SavedReport, scope: ProductScope | None) -> ListEntry:
+MATCH_WORDS: Final = "words"
+MATCH_SIMILAR: Final = "similar"
+MATCH_BOTH: Final = "words+similar"
+
+
+def _entry(r: SavedReport, scope: ProductScope | None, match: str | None = None) -> ListEntry:
     if not in_scope(r, scope):
         return ListEntry(r.report_id, r.created_at, r.session_id, None, (), True)
     return ListEntry(
         r.report_id, r.created_at, r.session_id, _line(r.title),
-        tuple(_line(t, 40) for t in r.tags), False,
+        tuple(_line(t, 40) for t in r.tags), False, match,
     )  # fmt: skip
 
 
@@ -259,13 +267,19 @@ def search_reports(
     ]
     limit = max(1, min(int(limit), MAX_RESULTS))
     unavailable = False
+    why: dict[str, str] = {}
     if mode == "semantic" and needle is not None:
-        hits, path, unavailable, truncated = _hybrid(
+        lexical_ids = {r.report_id for r in hits}
+        hits, path, unavailable, truncated, similar = _hybrid(
             store, owner, scope, needle, hits, path, want_tags, date_from, date_to, truncated
         )
-    return ListResult(
-        tuple(_entry(r, scope) for r in hits[:limit]), len(hits), truncated, path, unavailable
-    )
+        for r in hits:  # D-232: say per entry which list found it
+            word, sim = r.report_id in lexical_ids, r.report_id in similar
+            why[r.report_id] = (
+                MATCH_BOTH if word and sim else MATCH_WORDS if word else MATCH_SIMILAR
+            )
+    entries = tuple(_entry(r, scope, why.get(r.report_id)) for r in hits[:limit])
+    return ListResult(entries, len(hits), truncated, path, unavailable)
 
 
 def _hybrid(
@@ -279,8 +293,9 @@ def _hybrid(
     date_from: str | None,
     date_to: str | None,
     truncated: bool,
-) -> tuple[list[SavedReport], str, bool, bool]:
-    """RRF of the lexical hits and the cosine hits over the filtered, in-scope owner rows."""
+) -> tuple[list[SavedReport], str, bool, bool, frozenset[str]]:
+    """RRF of the lexical hits and the cosine hits over the filtered, in-scope owner rows.
+    The last item is the ids the cosine list returned (empty when degraded)."""
     rows, more = owner_rows(store, owner)
     candidates = [
         r
@@ -294,13 +309,13 @@ def _hybrid(
     search = getattr(store, "semantic_search", None)
     sem = search(owner, candidates, needle) if callable(search) else None
     if sem is None:  # degrade: FTS ranked, or word match without an index
-        return lexical, lexical_path, True, truncated
+        return lexical, lexical_path, True, truncated, frozenset()
     by_id = {r.report_id: r for r in candidates}
     by_id.update((r.report_id, r) for r in lexical)
     semantic_ids = [rid for rid, _score in sem if rid in by_id]
     fused = rrf_fuse([r.report_id for r in lexical], semantic_ids)
     path = "hybrid" if lexical_path == "ranked" else "hybrid_substring"
-    return [by_id[rid] for rid in fused], path, False, truncated or more
+    return [by_id[rid] for rid in fused], path, False, truncated or more, frozenset(semantic_ids)
 
 
 def view_report(store, owner: str, scope: ProductScope | None, report_id: str) -> ViewResult:
@@ -345,8 +360,10 @@ def render_list(result: ListResult, *, header: str, empty: str) -> str:
             lines.append(f"  {e.report_id}  {e.created_at[:10]}  ({DRIFT_LABEL})")
             continue
         tags = f"  [{', '.join(e.tags)}]" if e.tags else ""
+        why = f"  (match: {e.match})" if e.match else ""
         lines.append(
-            f"  {e.report_id}  {e.created_at[:10]}  {e.title}{tags}  session {e.session_id[:12]}"
+            f"  {e.report_id}  {e.created_at[:10]}  {e.title}{tags}  "
+            f"session {e.session_id[:12]}{why}"
         )
     if result.total > len(result.entries):
         more = result.total - len(result.entries)

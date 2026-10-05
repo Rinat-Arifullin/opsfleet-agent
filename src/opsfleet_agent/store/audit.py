@@ -51,10 +51,12 @@ Contract:
 
 Erasure (iteration 35; SEC-18, AC-28.6, FR-59; D-223/D-224; HLD §7 retention/erasure): the
 audit trail outlives a user's data (1 year), so on an erasure request the user's audit rows are
-pseudonymised, never deleted. :func:`audited_erase` runs ONE ``BEGIN IMMEDIATE`` transaction:
-it writes ``erase.executed`` first (actor = the maintainer, ``details.target_user`` = a fresh
-random ``erased-<16 hex>`` pseudonym, no erased content), deletes the user's rows in every
-per-user app.db table (FTS rows verified gone and optimized), drops ``audit_event_no_update``,
+pseudonymised, never deleted. :func:`audited_erase` first appends ``erase.attempted`` in its
+own transaction (D-230; the erase is aborted if that write fails), then runs ONE
+``BEGIN IMMEDIATE`` transaction: it writes ``erase.executed`` first (actor = the maintainer,
+``details.target_user`` = a fresh random ``erased-<16 hex>`` pseudonym, no erased content),
+deletes the user's rows in every per-user app.db table (FTS rows verified gone and optimized),
+drops ``audit_event_no_update``,
 rewrites only ``actor_user_id`` and ``details.target_user`` for that user to the pseudonym,
 recreates the trigger from the canonical DDL and checks the exact audit schema before COMMIT
 (DDL is transactional in SQLite), so no other column can change and a failure leaves the
@@ -129,6 +131,9 @@ GUARDRAIL_PII_BLOCK: Final = input_guard.AUDIT_PII_BLOCK
 TOOL_RUN_SQL: Final = "tool.run_sql"
 ERASE_EXECUTED: Final = "erase.executed"  # iteration 35: user erasure (SEC-18, D-223)
 ERASE_FAILED: Final = "erase.failed"
+# D-230: written in its own transaction BEFORE the erase transaction, so a rolled-back erase
+# (its erase.executed row gone with it) still leaves a start row that its erase.failed matches.
+ERASE_ATTEMPTED: Final = "erase.attempted"
 
 EVENT_TYPES: Final = frozenset(
     {
@@ -144,6 +149,7 @@ EVENT_TYPES: Final = frozenset(
         TOOL_RUN_SQL,
         ERASE_EXECUTED,
         ERASE_FAILED,
+        ERASE_ATTEMPTED,
         "scope.changed",
         "persona.changed",
         "golden.promoted",
@@ -748,7 +754,7 @@ class DeleteOutcome:
 
 # Written only by audited_delete/_record_failure (M-A) and audited_erase (iteration 35, D-223).
 _AUDITED_DELETE_ONLY: Final = frozenset(
-    {DELETE_EXECUTED, DELETE_FAILED, ERASE_EXECUTED, ERASE_FAILED}
+    {DELETE_EXECUTED, DELETE_FAILED, ERASE_EXECUTED, ERASE_FAILED, ERASE_ATTEMPTED}
 )
 MAX_DEPENDENTS: Final = 8
 # Whole-word, case-insensitive (L4): "collated_by" / "deleted_at" do not match.
@@ -1279,6 +1285,11 @@ class EraseError(AuditError):
     """An erasure was refused or did not match its plan; nothing was deleted."""
 
 
+class EraseRolledBackError(EraseError):
+    """A step inside the erase transaction failed after ``erase.executed`` was inserted; the
+    whole transaction was rolled back and ``erase.failed`` appended (D-230). Not a refusal."""
+
+
 @dataclass(frozen=True)
 class ErasePlan:
     """What an erasure of one user would remove (read-only scan; ids are never printed)."""
@@ -1472,6 +1483,11 @@ def audited_erase(
 ) -> EraseOutcome:
     """Erase every app.db row of ``user_id`` in ONE transaction, audit first (SEC-18, D-224).
 
+    Before the transaction, ``erase.attempted`` is appended on its own (D-230): actor, session,
+    turn and pseudonym are the ones the ``erase.executed`` / ``erase.failed`` rows reuse, so a
+    rolled-back erase still has a durable start row matched by its ``erase.failed``. If that
+    write fails, nothing else happens (``AuditError``).
+
     Order inside ``BEGIN IMMEDIATE``: scan the plan (refused if ``expected_digest`` differs),
     insert ``erase.executed`` (actor = the maintainer, ``details.target_user`` = a fresh random
     pseudonym, ``count`` = rows to delete), delete the FTS rows of the user's reports (verified
@@ -1480,7 +1496,8 @@ def audited_erase(
     re-read the executed row, COMMIT, then ``wal_checkpoint(TRUNCATE)``.
 
     * Audit insert failure (or anything before it): rollback, nothing deleted, ``AuditError``.
-    * Failure after the insert: rollback, ``erase.failed`` appended best effort, re-raised.
+    * Any failure after ``erase.attempted`` (including a refused plan digest): rollback,
+      ``erase.failed`` appended best effort, re-raised.
     * A second erase of the same user deletes nothing and still writes ``erase.executed``
       (count 0, a new pseudonym): idempotent and audited.
     """
@@ -1497,6 +1514,23 @@ def audited_erase(
     if open_tx:
         raise AuditError("connection already has an open transaction; erase aborted")
 
+    try:  # D-230: the attempt is durable before anything can be deleted
+        attempted = log._append(  # private path: public record refuses erase.attempted
+            log._build(
+                ERASE_ATTEMPTED,
+                actor_user_id=actor,
+                session_id=uuid.uuid4().hex,
+                turn_id=uuid.uuid4().hex[:12],
+                details={"source": "erase", "target_user": pseudonym},
+            )
+        )
+    except AuditError:
+        raise
+    except Exception as err:  # noqa: BLE001 - bad clock / validation
+        raise AuditError("audit write failed; erase aborted") from err
+    if attempted is None:
+        raise AuditError("audit write ignored; erase aborted")
+
     stage = "begin"  # begin -> insert -> delete -> committing -> committed
     event: AuditEvent | None = None
     result: EraseOutcome | None = None
@@ -1509,8 +1543,8 @@ def audited_erase(
         event = log._build(  # private path: public build refuses erase.executed (D-223)
             ERASE_EXECUTED,
             actor_user_id=actor,
-            session_id=uuid.uuid4().hex,
-            turn_id=uuid.uuid4().hex[:12],
+            session_id=attempted.session_id,
+            turn_id=attempted.turn_id,
             count=plan.total,
             outcome="ok",
             details={"source": "erase", "target_user": pseudonym},
@@ -1556,11 +1590,12 @@ def audited_erase(
         ):
             raise
         _rollback(conn)
+        # D-230: every attempt gets an outcome row (erase.executed rolled back with the deletes)
+        _append_erase_failure(log, attempted, store="app_db", error_type=type(err).__name__)
         if stage in ("delete", "committing") and event is not None:
-            _append_erase_failure(log, event, store="app_db", error_type=type(err).__name__)
             if isinstance(err, AuditError) or not isinstance(err, Exception):
                 raise
-            raise EraseError("a delete failed; rolled back") from err
+            raise EraseRolledBackError("a delete failed; rolled back") from err
         if isinstance(err, AuditError) or not isinstance(err, Exception):
             raise
         if stage == "begin":

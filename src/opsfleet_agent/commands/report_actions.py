@@ -13,8 +13,12 @@ If the change then fails, a best-effort ``failed`` row follows.
 The new title is checked in code: at most :data:`MAX_TITLE_CHARS` characters, no control or
 format characters, the secret scrub (``tracer.scrub_text``) and the output guard's PII scan.
 An export never calls a model (it works with the LLM down): code builds the path under
-``<data dir>/exports/`` and refuses any other location (no separators, no ``..``, no absolute
-path, the resolved file must sit directly in that directory). SQL is stripped (D-151a).
+``<data dir>/exports/<owner folder>/`` and refuses any other location (no separators, no ``..``,
+no absolute path, the resolved file must sit directly in that folder). SQL is stripped (D-151a).
+D-228: the owner folder name is a hash of the user id, neither folder may be a symlink, both
+are set to 0700 on every export, and a file is created with ``O_EXCL``: an existing file is
+never overwritten (a named export that exists is refused; a default name gets a ``-2`` ...
+suffix).
 
 ``/retry`` is not a tool: it hands the fixed text "retry report" to the graph, which re-runs
 only the report writer and verifier on this session's scrubbed ledger (no SQL, D-185).
@@ -23,10 +27,11 @@ only the report writer and verifier on this session's scrubbed ledger (no SQL, D
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
 import os
 import re
-import tempfile
+import stat
 import unicodedata
 import uuid
 from collections.abc import Sequence
@@ -62,6 +67,8 @@ __all__ = [
     "do_rename",
     "export_report",
     "exports_dir",
+    "owner_export_dir",
+    "owner_folder_name",
     "handle_export",
     "handle_rename",
     "rename_report",
@@ -71,6 +78,8 @@ __all__ = [
 MAX_TITLE_CHARS: Final = 120
 EXPORTS_DIR_NAME: Final = "exports"
 MAX_EXPORT_NAME_CHARS: Final = 100
+#: How many ``-2`` ... suffixes a default export name may try before it gives up (D-228).
+MAX_DEFAULT_NAME_TRIES: Final = 99
 RENAMED: Final = "report.renamed"
 EXPORTED: Final = "report.exported"
 
@@ -116,6 +125,45 @@ class Resolved:
 def exports_dir(data_dir: Path | None = None) -> Path:
     """``<data dir>/exports``: the only directory an export may write to."""
     return Path(data_dir if data_dir is not None else default_data_dir()) / EXPORTS_DIR_NAME
+
+
+def owner_folder_name(owner: str) -> str:
+    """The per-owner folder under ``exports``: a hash of the user id, so the id is never a
+    path component (D-228). ``commands.erase`` uses the same name to find a user's files."""
+    return "u-" + hashlib.sha256(str(owner).encode("utf-8")).hexdigest()[:24]
+
+
+def owner_export_dir(base: Path, owner: str) -> Path:
+    return base / owner_folder_name(owner)
+
+
+_SYMLINK_TEXT: Final = "Exports are written only to the exports folder (a folder is a symlink)."
+_EXISTS_TEXT: Final = "A file with that name is already in your exports folder; pick another name."
+
+
+def _private_dir(path: Path) -> None:
+    """Create ``path`` (0700) if missing; refuse a symlink or a non-folder; re-apply 0700."""
+    with contextlib.suppress(FileExistsError):
+        os.mkdir(path, 0o700)
+    st = os.lstat(path)
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        raise ActionError(INVALID_ARGS, _SYMLINK_TEXT)
+    os.chmod(path, 0o700)
+
+
+def prepare_owner_dir(base: Path, owner: str) -> Path:
+    """``base`` and the owner's folder, both checked and 0700 (D-228). Raises ActionError."""
+    try:
+        base.parent.mkdir(parents=True, exist_ok=True)
+        _private_dir(base)
+        folder = owner_export_dir(base, owner)
+        _private_dir(folder)
+    except ActionError:
+        raise
+    except OSError as exc:
+        log.error("export folder check failed: %s", type(exc).__name__)
+        raise ActionError(EXPORT_FAILED) from None
+    return folder
 
 
 def _own_in_scope(store: Any, owner: str, scope: Any, report_id: str) -> SavedReport:
@@ -280,6 +328,15 @@ def export_path(base: Path, name: str | None, report_id: str) -> Path:
     target = (root / fname).resolve()
     if target.parent != root:
         raise ActionError(INVALID_ARGS, "Exports are written only to the exports folder.")
+    if name is None:  # a default name never overwrites: R-<id>-2.md, R-<id>-3.md, ...
+        n = 1
+        while os.path.lexists(target):
+            n += 1
+            if n > MAX_DEFAULT_NAME_TRIES:
+                raise ActionError(INVALID_ARGS, _EXISTS_TEXT)
+            target = root / f"{display_id(report_id)}-{n}.md"
+    elif os.path.lexists(root / fname):
+        raise ActionError(INVALID_ARGS, _EXISTS_TEXT)
     return target
 
 
@@ -299,21 +356,19 @@ def render_export(rec: SavedReport) -> str:
 
 
 def _write_export(path: Path, text: str) -> None:
-    """Atomic write (temp file, fsync, replace), dir 0700, file 0600."""
-    tmp_name = None
+    """A new file only (``O_EXCL``, no symlink follow), 0600, fsync. A partial file is
+    removed on failure. An existing file is never replaced (D-228)."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=".export-", suffix=".tmp")
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp_name, path)
-        tmp_name = None
-    finally:
-        if tmp_name:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp_name)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+        raise
 
 
 def do_export(
@@ -331,7 +386,7 @@ def do_export(
         log.error("export lookup failed: %s", type(exc).__name__)
         raise ActionError(STORE_UNAVAILABLE) from None
     base = export_dir if export_dir is not None else exports_dir()
-    target = export_path(base, name, rec.report_id)
+    target = export_path(prepare_owner_dir(base, owner), name, rec.report_id)
     kw = {"owner": owner, "session_id": session_id, "turn_id": turn_id,
           "report_id": rec.report_id}  # fmt: skip
     _audit_first(audit, EXPORTED, **kw)

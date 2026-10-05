@@ -42,6 +42,10 @@ def _ctx(store, audit, tmp_path, detector, user="analyst_a", scope=ACME):
     )  # fmt: skip
 
 
+def _own(tmp_path, user="analyst_a"):
+    return tmp_path / "exports" / ra.owner_folder_name(user)
+
+
 def _events(audit, user="analyst_a") -> list[tuple[str, str, tuple[str, ...]]]:
     return [
         (e.event_type, e.outcome, tuple(e.target_ids))
@@ -62,7 +66,7 @@ def test_rename_export_retry_owner_only_audited(store, audit, tmp_path, detector
     assert store.get(rid, "analyst_a").title == "Weekly synthetic orders"
 
     out = commands.dispatch(f"/export R-{rid}", mine).text
-    path = tmp_path / "exports" / f"R-{rid}.md"
+    path = _own(tmp_path) / f"R-{rid}.md"
     assert out == f"Exported R-{rid} to {path.resolve()}" and path.is_file()
     text = path.read_text(encoding="utf-8")
     assert text.startswith("# Weekly synthetic orders\n") and f"R-{rid}" in text
@@ -73,7 +77,7 @@ def test_rename_export_retry_owner_only_audited(store, audit, tmp_path, detector
     assert commands.dispatch(f"/rename {theirs} Mine now", mine).text == NOT_FOUND_TEXT
     assert commands.dispatch(f"/export {theirs}", mine).text == NOT_FOUND_TEXT
     assert store.get(theirs, "analyst_b").title == "Synthetic other"
-    assert not (tmp_path / "exports" / f"R-{theirs}.md").exists()
+    assert not (_own(tmp_path) / f"R-{theirs}.md").exists()
     assert _events(audit) == [
         (ra.RENAMED, "ok", (rid,)),
         (ra.EXPORTED, "ok", (rid,)),
@@ -119,18 +123,19 @@ def test_export_refuses_traversal(store, audit, tmp_path, detector) -> None:
     out = commands.dispatch(f"/export {rid} ../escape.md", ctx).text
     assert "exports folder" in out
     assert not (tmp_path / "escape.md").exists()
-    # a symlink planted in the exports folder that points outside is refused too
-    base.mkdir()
-    (base / "link.md").symlink_to(tmp_path / "outside.md")
+    # a symlink planted in the owner's export folder that points outside is refused too
+    own = _own(tmp_path)
+    own.mkdir(parents=True, exist_ok=True)
+    (own / "link.md").symlink_to(tmp_path / "outside.md")
     with pytest.raises(ra.ActionError):
-        ra.export_path(base, "link.md", rid)
+        ra.export_path(own, "link.md", rid)
     assert commands.dispatch(f"/export {rid} link.md", ctx).text.startswith("Exports are")
     assert not (tmp_path / "outside.md").exists()
     assert _events(audit) == []  # a refused export writes no audit row
-    # a plain name is fine, and a re-export overwrites in place
+    # a plain name is fine; D-228: a second export to the same name is refused, not overwritten
     assert commands.dispatch(f"/export {rid} weekly.md", ctx).text.startswith("Exported")
-    assert commands.dispatch(f"/export {rid} weekly.md", ctx).text.startswith("Exported")
-    assert sorted(p.name for p in base.iterdir()) == ["link.md", "weekly.md"]
+    assert commands.dispatch(f"/export {rid} weekly.md", ctx).text == ra._EXISTS_TEXT
+    assert sorted(p.name for p in own.iterdir()) == ["link.md", "weekly.md"]
 
 
 def test_rename_title_is_validated_in_code(store, audit, tmp_path, detector) -> None:
@@ -158,7 +163,7 @@ def test_audit_first_failure_aborts(store, audit, tmp_path, detector, monkeypatc
     assert commands.dispatch(f"/rename {rid} Changed", ctx).text == ra.AUDIT_FAILED_TEXT
     assert commands.dispatch(f"/export {rid}", ctx).text == ra.AUDIT_FAILED_TEXT
     assert store.get(rid, "analyst_a").title == "Synthetic orders"
-    assert not (tmp_path / "exports" / f"R-{rid}.md").exists()
+    assert not (_own(tmp_path) / f"R-{rid}.md").exists()
     # no audit log at all: fail closed as well
     none = commands.CommandContext(user_id="analyst_a", session_id=SID, report_store=store,
                                    scope=ACME, export_dir=tmp_path / "exports")  # fmt: skip
@@ -253,3 +258,51 @@ def test_retry_is_capped(make_env, store, monkeypatch) -> None:
     assert env.ask("retry report").text == gr.NO_RETRY_TEXT  # out of attempts
     assert len(env.client.calls) == sql_before and store.count() == 0
     assert PROFILE.user_id  # the session owner ran every retry
+
+
+# --- D-228: per-owner export folder, symlink refusal, 0700, never overwrite ----------------------
+
+
+def test_exports_are_per_owner_and_never_overwrite(store, audit, tmp_path, detector) -> None:
+    import os
+
+    mine = _add(store, "k1", title="Synthetic orders")
+    theirs = _add(store, "k2", owner="analyst_b", title="Synthetic other")
+    a = _ctx(store, audit, tmp_path, detector)
+    b = _ctx(store, audit, tmp_path, detector, user="analyst_b")
+    # the same file name for two owners lands in two folders; the folder name hides the id
+    assert commands.dispatch(f"/export {mine} weekly.md", a).text.startswith("Exported")
+    assert commands.dispatch(f"/export {theirs} weekly.md", b).text.startswith("Exported")
+    pa, pb = _own(tmp_path) / "weekly.md", _own(tmp_path, "analyst_b") / "weekly.md"
+    assert f"R-{mine}" in pa.read_text() and f"R-{theirs}" in pb.read_text()
+    assert "analyst" not in ra.owner_folder_name("analyst_a")
+    # a default name never overwrites: the second export gets a -2 suffix
+    assert commands.dispatch(f"/export {mine}", a).text.endswith(f"R-{mine}.md")
+    assert commands.dispatch(f"/export {mine}", a).text.endswith(f"R-{mine}-2.md")
+    # 0700 is re-applied on every use
+    os.chmod(tmp_path / "exports", 0o755)
+    os.chmod(_own(tmp_path), 0o755)
+    assert commands.dispatch(f"/export {mine} again.md", a).text.startswith("Exported")
+    assert oct((tmp_path / "exports").stat().st_mode & 0o777) == oct(0o700)
+    assert oct(_own(tmp_path).stat().st_mode & 0o777) == oct(0o700)
+    n_events = len(_events(audit))
+    # a symlinked owner folder is refused before the audit row and nothing is written
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    c = _ctx(store, audit, tmp_path, detector, user="analyst_c")
+    rc = _add(store, "k3", owner="analyst_c", title="Synthetic third")
+    _own(tmp_path, "analyst_c").symlink_to(outside)
+    assert commands.dispatch(f"/export {rc}", c).text == ra._SYMLINK_TEXT
+    assert list(outside.iterdir()) == [] and len(_events(audit)) == n_events
+    # a symlinked exports folder is refused too
+    other = tmp_path / "other"
+    (other / "exports").mkdir(parents=True)
+    (other / "real").mkdir()
+    (other / "exports").rmdir()
+    (other / "exports").symlink_to(other / "real")
+    d = commands.CommandContext(
+        user_id="analyst_a", session_id=SID, report_store=store, scope=ACME, audit_log=audit,
+        export_dir=other / "exports", detector=detector,
+    )  # fmt: skip
+    assert commands.dispatch(f"/export {mine}", d).text == ra._SYMLINK_TEXT
+    assert list((other / "real").iterdir()) == []

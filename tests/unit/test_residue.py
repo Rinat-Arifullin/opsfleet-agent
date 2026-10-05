@@ -25,6 +25,7 @@ import pytest
 from langgraph.checkpoint.base import empty_checkpoint
 
 from opsfleet_agent.commands import erase as E
+from opsfleet_agent.commands.report_actions import owner_folder_name
 from opsfleet_agent.commands.triage import CANDIDATES_DIR
 from opsfleet_agent.graph import graph as gr
 from opsfleet_agent.reports import fts
@@ -136,9 +137,11 @@ def seed_user(conn: sqlite3.Connection, data_dir: Path, cases_dir: Path, user: s
     saver.conn.close()
     files: dict[str, list[Path]] = {}
     trace = data_dir / E.TRACES_DIR / f"{sess}.jsonl"
+    own = data_dir / E.EXPORTS_DIR / owner_folder_name(user)  # D-228 per-owner folder
     exports = [
-        data_dir / E.EXPORTS_DIR / f"R-{rid}.md",
-        data_dir / E.EXPORTS_DIR / f"custom-{user}.md",  # custom name: matched by its header
+        own / f"R-{rid}.md",
+        own / f"custom-{user}.md",
+        data_dir / E.EXPORTS_DIR / f"legacy-{user}.md",  # pre-D-228 flat file: by its header
     ]
     cand = data_dir / CANDIDATES_DIR / f"candidate-{user}.yaml"
     for p in (trace, *exports, cand):

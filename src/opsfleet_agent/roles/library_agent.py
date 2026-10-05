@@ -20,6 +20,10 @@ Enforced in code, not in the prompt:
   parsed request to the graph, which runs ``delete_preview`` and pauses in ``confirm_delete``.
   Only the user's NEXT message can confirm; nothing here can. A step that mixes the delete
   with any other tool is refused as a whole (``delete_flow.gate_step``);
+* ``rename_report`` and ``export_report`` (D-229) need the action word in the USER's own
+  message (a report body that says "rename all reports" is not enough), a target the user
+  reached by its id or a title word, or the only report in scope, and, for a rename, a new
+  title made of the user's own words. Otherwise the call is refused with a short reason;
 * ``set_preference`` goes through ``graph.memory.set_preference`` and the same per-user
   store as ``/prefs`` (D-195);
 * on any failure the caller shows :data:`LIBRARY_UNAVAILABLE_TEXT`; there is no fallback to
@@ -55,6 +59,7 @@ from opsfleet_agent.reports.library import (
     display_id,
     list_reports,
     search_reports,
+    strip_display_prefix,
     view_report,
 )
 from opsfleet_agent.reports.matcher import MatchError
@@ -106,6 +111,7 @@ STORE_UNAVAILABLE: Final = "STORE_UNAVAILABLE"
 DELETE_UNAVAILABLE: Final = "DELETE_UNAVAILABLE"
 DELETE_REFUSED: Final = "DELETE_REFUSED"
 PREFERENCE_REJECTED: Final = "PREFERENCE_REJECTED"
+ACTION_REFUSED: Final = "ACTION_REFUSED"  # D-229: rename/export not asked for by the user
 
 _SQL_TOOL_NAMES: Final = READ_TOOLS | {RUN_SQL}
 _ROLE_TEXT: Final = (
@@ -114,6 +120,13 @@ _ROLE_TEXT: Final = (
 )
 _RESET_RE: Final = re.compile(r"\b(?:reset|clear|forget)\b", re.I)
 _WORD_RE: Final = re.compile(r"[a-z0-9]+")
+# D-229: the user's own message must ask for the action (folded, case-insensitive)
+_RENAME_INTENT_RE: Final = re.compile(r"\b(?:re-?name|re-?title|title|call|name)", re.I | re.A)
+_EXPORT_INTENT_RE: Final = re.compile(r"\b(?:export|download|markdown)|\.md\b", re.I | re.A)
+# title words too common to show which report the user meant
+_COMMON_WORDS: Final = frozenset(
+    {"the", "and", "for", "with", "from", "report", "reports", "saved", "synthetic", "data"}
+)
 
 
 def _str(desc: str) -> dict[str, str]:
@@ -291,6 +304,7 @@ def _entries(res: Any) -> dict[str, Any]:
             "title": e.title if not e.masked else "(outside your current product scope)",
             "created": e.created_at[:10],
             "tags": list(e.tags),
+            **({"match": e.match} if getattr(e, "match", None) else {}),  # D-232
         }
         for e in res.entries
     ]
@@ -376,9 +390,42 @@ def make_library_executors(
             return _err(NOT_FOUND, res.text, "Check the id with list_reports.")
         return {"ok": True, "status": res.status, "report": res.text}
 
+    def reachable(report_id: Any) -> bool:
+        """D-229: the user named this report (its id or a title word), or it is the only
+        report in scope. An unknown id passes here and gets NOT_FOUND from the action."""
+        if not isinstance(report_id, str):
+            return True
+        rid = strip_display_prefix(report_id.strip()).lower()
+        if not rid:
+            return True
+        if rid in delete_flow._fold(user_message).lower():
+            return True
+        try:
+            rec = store.get(rid, owner)
+            if rec is None:
+                return True
+            title_words = {w for w in _words(rec.title) if len(w) >= 3} - _COMMON_WORDS
+            if title_words & _words(user_message):
+                return True
+            only = list_reports(store, owner, scope, None, 2)
+        except Exception:  # noqa: BLE001 - a store failure refuses the action
+            return False
+        return only.total == 1 and [e.report_id for e in only.entries] == [rec.report_id]
+
+    def refused(why: str) -> dict[str, Any]:
+        return _err(ACTION_REFUSED, why,
+                    "Tell the user to ask for it in their own words, or to use the command.")
+
     def rename_tool(args: dict[str, Any]) -> dict[str, Any]:
         if store is None:
             return no_store()
+        if _RENAME_INTENT_RE.search(delete_flow._fold(user_message)) is None:
+            return refused("The user did not ask to rename a report.")
+        title = args.get("title")
+        if isinstance(title, str) and not _words(title) <= _words(user_message):
+            return refused("The new title is not in the user's words.")
+        if not reachable(args.get("report_id")):
+            return refused("The user did not name this report.")
         return rename_report(
             store=store, audit=audit, owner=owner, scope=scope, session_id=session_id,
             turn_id=turn_id, report_id=args.get("report_id"), title=args.get("title"),
@@ -388,6 +435,10 @@ def make_library_executors(
     def export_tool(args: dict[str, Any]) -> dict[str, Any]:
         if store is None:
             return no_store()
+        if _EXPORT_INTENT_RE.search(delete_flow._fold(user_message)) is None:
+            return refused("The user did not ask to export a report.")
+        if not reachable(args.get("report_id")):
+            return refused("The user did not name this report.")
         return export_report(
             store=store, audit=audit, owner=owner, scope=scope, session_id=session_id,
             turn_id=turn_id, report_id=args.get("report_id"), export_dir=export_dir,

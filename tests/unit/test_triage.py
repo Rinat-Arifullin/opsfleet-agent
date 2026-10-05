@@ -150,6 +150,15 @@ def test_maintainers_file_fails_closed(tmp_path):
     assert "support_demo" in tg.load_maintainers(ROOT / "config" / "maintainers.yaml")
 
 
+def test_production_maintainer_identity_is_documented_as_iam_not_as_flag():
+    # D-234: `--as` is a local convenience; the HLD names the IAM principal as the identity.
+    hld = (ROOT / "docs" / "architecture.md").read_text(encoding="utf-8")
+    note = next(line for line in hld.splitlines() if "Maintainer identity (D-234)" in line)
+    assert "IAM principal" in note and "--as" in note and "not an authentication" in note
+    cfg = (ROOT / "config" / "maintainers.yaml").read_text(encoding="utf-8")
+    assert "not authentication" in cfg and "synthetic" in cfg
+
+
 # --- list / show -----------------------------------------------------------------------------
 
 
@@ -368,3 +377,42 @@ def test_promote_eligibility_and_sql_source(env):
         "--sql-file", str(sql_file),
     )  # fmt: skip
     assert code == tg.EXIT_REFUSED and "figures" in out
+
+
+def test_promote_sql_file_read_is_bounded(env, monkeypatch):
+    """D-231: --sql-file reads at most MAX_SQL_FILE_BYTES + 1 bytes, never the whole file."""
+    fid = _add(env, rating="up")
+    _clean_turn(env)
+    big = env["tmp"] / "big.sql"
+    big.write_bytes(b"-- " + b"x" * (tg.MAX_SQL_FILE_BYTES * 4))
+    sizes: list[int] = []
+    real_open = Path.open
+
+    class Spy:
+        def __init__(self, fh):
+            self.fh = fh
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return self.fh.__exit__(*exc)
+
+        def read(self, n=-1):
+            sizes.append(n)
+            return self.fh.read(n)
+
+    def spy_open(self, *a, **kw):
+        fh = real_open(self, *a, **kw)
+        return Spy(fh) if self == big else fh
+
+    def no_whole_read(self):
+        raise AssertionError("the whole file was read")
+
+    monkeypatch.setattr(Path, "open", spy_open)
+    monkeypatch.setattr(Path, "read_bytes", no_whole_read)
+    code, out = _promote(env, fid, big, eval_gate=lambda: True)
+    monkeypatch.undo()
+    assert code == tg.EXIT_REFUSED and "too large" in out
+    assert sizes == [tg.MAX_SQL_FILE_BYTES + 1]
+    assert _state(env, fid) == "new"

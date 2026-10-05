@@ -177,11 +177,68 @@ def test_erase_rolls_back_when_a_delete_fails_after_the_audit_row(world: World) 
         "BEGIN SELECT RAISE(ABORT, 'synthetic'); END"
     )
     code, text = world.run("--user", USER_A, "--confirm", token, "--retype", USER_A)
-    assert code != E.EXIT_OK and "Nothing was deleted" in text
+    # D-230: a failure, not a refusal; the message says it was rolled back
+    assert code == E.EXIT_FAIL and "Erase FAILED and was rolled back" in text
+    assert "Refused" not in text
     assert _rows(world, USER_A) == before
     assert not _events(world, A.ERASE_EXECUTED)  # rolled back with the deletes
     failed = _events(world, A.ERASE_FAILED)
     assert len(failed) == 1 and failed[0].details.get("store") == "app_db"
+    (attempted,) = _events(world, A.ERASE_ATTEMPTED)  # the durable start row it matches
+    assert (attempted.session_id, attempted.turn_id) == (failed[0].session_id, failed[0].turn_id)
+    assert attempted.details["target_user"] == failed[0].details["target_user"]
+    assert attempted.actor_user_id == MAINTAINER and attempted.seq < failed[0].seq
+
+
+def test_failure_after_the_audit_trigger_is_dropped_rolls_back_and_restores_it(
+    world: World, monkeypatch
+) -> None:
+    """D-230: the pseudonymisation drops audit_event_no_update; a failure after the drop
+    rolls back the deletes, the rewrite and the DROP, so the trigger is back."""
+    before = _rows(world, USER_A)
+    audit_before = [(e.event_id, e.actor_user_id) for e in A.AuditLog(world.conn).events()]
+    token = _token(world.run("--user", USER_A)[1])
+    real = A._no_update_trigger
+
+    def broken() -> str:  # the recreate statement fails after the DROP and the UPDATEs ran
+        real()
+        raise RuntimeError("synthetic failure after the trigger drop")
+
+    monkeypatch.setattr(A, "_no_update_trigger", broken)
+    code, text = world.run("--user", USER_A, "--confirm", token, "--retype", USER_A)
+    monkeypatch.undo()
+    assert code == E.EXIT_FAIL and "rolled back" in text
+    assert _rows(world, USER_A) == before
+    kept = {e.event_id: e.actor_user_id for e in A.AuditLog(world.conn).events()}
+    assert all(kept[i] == actor for i, actor in audit_before)  # no row pseudonymised
+    assert world.conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' "
+        "AND name = 'audit_event_no_update'"
+    ).fetchone()[0] == 1
+    with pytest.raises(Exception, match="(?i)audit"):  # the trigger still blocks an UPDATE
+        world.conn.execute("UPDATE audit_event SET actor_user_id = 'x' WHERE seq = 1")
+    assert [e.details.get("store") for e in _events(world, A.ERASE_FAILED)] == ["app_db"]
+    assert world.erase(USER_A)[0] == E.EXIT_OK  # and the next erase works
+
+
+def test_attempted_row_is_written_first_and_aborts_when_it_fails(
+    world: World, monkeypatch
+) -> None:
+    before = _rows(world, USER_A)
+    token = _token(world.run("--user", USER_A)[1])
+
+    def boom(self, event):  # only the out-of-transaction erase.attempted append fails
+        raise A.AuditError("synthetic audit failure")
+
+    monkeypatch.setattr(A.AuditLog, "_append", boom)
+    code, text = world.run("--user", USER_A, "--confirm", token, "--retype", USER_A)
+    monkeypatch.undo()
+    assert code == E.EXIT_FAIL and "Nothing was deleted" in text
+    _untouched(world, before)
+    assert not _events(world, A.ERASE_ATTEMPTED)
+    with pytest.raises(A.DeleteEventRefusedError):  # not forgeable through the public API
+        A.AuditLog(world.conn).build(A.ERASE_ATTEMPTED, actor_user_id=MAINTAINER,
+                                     session_id="s", turn_id="t")  # fmt: skip
 
 
 def test_second_erase_is_noop_and_audited(world: World) -> None:
@@ -190,6 +247,7 @@ def test_second_erase_is_noop_and_audited(world: World) -> None:
     assert code == E.EXIT_OK and "saved_report             0 deleted" in text
     executed = sorted(_events(world, A.ERASE_EXECUTED), key=lambda e: e.seq)
     assert [e.count for e in executed][1:] == [0] and len(executed) == 2
+    assert len(_events(world, A.ERASE_ATTEMPTED)) == 2 and not _events(world, A.ERASE_FAILED)
 
 
 def test_missing_stores_tolerated(tmp_path: Path) -> None:
@@ -231,7 +289,7 @@ def test_file_delete_failure_is_audited_and_reported(world: World, monkeypatch) 
     real = Path.unlink
 
     def flaky(self: Path, missing_ok: bool = False) -> None:
-        if self.parent.name == E.EXPORTS_DIR and USER_A in self.name:
+        if E.EXPORTS_DIR in self.parts and USER_A in self.name:
             raise PermissionError("synthetic")
         real(self, missing_ok=missing_ok)
 
@@ -256,3 +314,18 @@ def test_token_helpers() -> None:
     assert not E.check_token(key, tok, MAINTAINER, USER_A, "d" * 64, T0 + E.CONFIRM_TTL_S + 1)
     far = f"{int(T0) + 10 * E.CONFIRM_TTL_S}.{'0' * 32}"  # expiry beyond the TTL window
     assert not E.check_token(key, far, MAINTAINER, USER_A, "d" * 64, T0)
+
+
+def test_legacy_export_matches_on_header_line_only(world: World) -> None:
+    """D-228: a flat (pre-D-228) export is matched by its header line, not by a report id
+    that appears later in the body. User B's export mentioning A's report id is kept."""
+    rid_a = world.users[USER_A].report_id
+    rid_b = world.users[USER_B].report_id
+    decoy = world.data_dir / E.EXPORTS_DIR / "mentions-other.md"
+    decoy.write_text(f"# Synthetic\n\nReport R-{rid_b}, created 2026-01-01."
+                     f"\n\nQuoted:\nReport R-{rid_a}, created 2026-01-01.\n")
+    code, text = world.erase(USER_A)
+    assert code == E.EXIT_OK, text
+    assert decoy.exists()
+    assert not any(p.exists() for p in world.users[USER_A].files["exports"])
+    assert all(p.exists() for p in world.users[USER_B].files["exports"])

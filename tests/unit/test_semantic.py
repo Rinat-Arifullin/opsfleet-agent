@@ -359,3 +359,33 @@ def test_pack_roundtrip() -> None:
     assert semantic.unpack(semantic.pack(vec), 3) == vec
     assert semantic.unpack(b"\x00" * 5, 3) is None
     assert semantic.unpack(struct.pack("<2f", 1.0, 2.0), 3) is None
+
+
+def test_hybrid_entries_say_why_they_matched(store, emb) -> None:
+    """D-232: each hybrid hit says which list found it, in the tool result and in /search."""
+    both = _add(store, "k1", title="Medlar medlar harvest")
+    meaning = _add(store, "k3", title="Loquat outlook")
+    res = _hybrid(store, "medlar harvest")
+    why = {e.report_id: e.match for e in res.entries}
+    assert why[both] == library.MATCH_BOTH and why[meaning] == library.MATCH_SIMILAR
+    assert all(m in {library.MATCH_WORDS, library.MATCH_SIMILAR, library.MATCH_BOTH}
+               for m in why.values())  # fmt: skip
+    out = commands.dispatch("/search medlar harvest", _ctx(store)).text
+    assert f"(match: {library.MATCH_SIMILAR})" in out and f"(match: {library.MATCH_BOTH})" in out
+    # the library agent's tool result carries the same field
+    ex = make_library_executors(
+        store=store, audit=None, owner="analyst_a", scope=ACME, session_id="s", turn_id="t",
+        user_message="search medlar harvest", tools_used=lambda: (), pending=None,
+        request_delete=None,
+    )  # fmt: skip
+    found = ex["search_reports"]({"text": "medlar harvest"})
+    rows = {r["id"]: r.get("match") for r in found["reports"]}
+    assert set(rows.values()) <= {library.MATCH_SIMILAR, library.MATCH_BOTH, library.MATCH_WORDS}
+    assert library.MATCH_SIMILAR in rows.values()
+    # degraded (no embeddings): every hit came from the words
+    emb.fail = True
+    res = _hybrid(store, "medlar")
+    assert res.semantic_unavailable and {e.match for e in res.entries} == {library.MATCH_WORDS}
+    # a plain (non-semantic) search carries no match label
+    res = library.search_reports(store, "analyst_a", ACME, text="medlar")
+    assert {e.match for e in res.entries} == {None}

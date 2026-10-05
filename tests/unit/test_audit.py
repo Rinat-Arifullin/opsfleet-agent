@@ -755,7 +755,8 @@ def test_delete_keyboard_interrupt_after_audit_insert(
 
 
 @pytest.mark.parametrize(
-    "event_type", [A.DELETE_EXECUTED, A.DELETE_FAILED, A.ERASE_EXECUTED, A.ERASE_FAILED]
+    "event_type", [A.DELETE_EXECUTED, A.DELETE_FAILED, A.ERASE_EXECUTED, A.ERASE_FAILED,
+                   A.ERASE_ATTEMPTED]
 )
 def test_delete_outcome_events_cannot_be_forged(
     log: A.AuditLog, conn: sqlite3.Connection, rec, event_type: str
