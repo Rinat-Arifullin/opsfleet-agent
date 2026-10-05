@@ -102,6 +102,12 @@ from opsfleet_agent.store.audit_schema import (
     DELETE_FAILED_EVENT,
 )
 from opsfleet_agent.store.db import StoreError, write_tx
+from opsfleet_agent.store.feedback import (
+    DISMISS_REASONS,
+    ROOT_CAUSES,
+    TRIAGE_GATES,
+    TRIAGE_STATES,
+)
 
 # --- event types -------------------------------------------------------------------------
 
@@ -132,6 +138,9 @@ EVENT_TYPES: Final = frozenset(
         "scope.changed",
         "persona.changed",
         "golden.promoted",
+        "feedback.triaged",  # iteration 36: triage CLI state changes (D-218)
+        "feedback.dismissed",
+        "eval.case_added",
         "report.renamed",
         "report.exported",
         "differencing.suspected",
@@ -362,6 +371,11 @@ DETAIL_FIELDS: Final[Mapping[str, Callable[[str, object], Any]]] = {
     "to_version": _id(VERSION_RE),
     "smoke": _member(frozenset({"pass", "fail", "skipped"})),
     "reason": _member(PERSONA_REASONS),
+    # iteration 36: triage CLI (D-217/D-218); enum members only, never free text
+    "root_cause": _member(frozenset(ROOT_CAUSES)),
+    "dismiss_reason": _member(frozenset(DISMISS_REASONS)),
+    "gate": _member(frozenset(TRIAGE_GATES)),
+    "triage_state": _member(frozenset(TRIAGE_STATES)),
 }
 
 

@@ -22,6 +22,15 @@ RATINGS = ("up", "down")
 REASONS = ("wrong_numbers", "misunderstood", "wrong_format", "slow", "other")
 TRIAGE_STATES = ("new", "triaged", "promoted", "dismissed")
 MAX_COMMENT = 500
+# Iteration 36 (FR-47, D-217/D-218): triage vocabularies, shared with the audit validators.
+# Root causes are computed from the trace by `commands.triage.root_cause`, never stored here.
+ROOT_CAUSES = (
+    "no_trace", "guardrail_block", "sql_error", "model_down", "verifier_fail",
+    "empty_result", "misroute", "slow", "intent_or_format", "clean",
+)  # fmt: skip
+DISMISS_REASONS = ("duplicate", "not_a_bug", "cannot_reproduce", "out_of_scope")
+TRIAGE_GATES = ("eligibility", "sql_source", "validate", "pii", "dry_run", "eval", "write")
+MAX_LIST = 500
 
 FEEDBACK_MIGRATION: tuple[str, ...] = (
     "CREATE TABLE IF NOT EXISTS feedback ("
@@ -168,6 +177,39 @@ class FeedbackStore:
         sql += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
         args.append(max(1, int(limit)))
         return [FeedbackRecord(*r) for r in self.conn.execute(sql, args).fetchall()]
+
+    def list_items(
+        self, *, state: str | None = None, rating: str | None = None, limit: int = 50
+    ) -> list[FeedbackRecord]:
+        """Newest first, optionally filtered by triage state and rating; at most MAX_LIST rows."""
+        if state is not None and state not in TRIAGE_STATES:
+            raise FeedbackError(f"state must be one of: {', '.join(TRIAGE_STATES)}")
+        if rating is not None and rating not in RATINGS:
+            raise FeedbackError(f"rating must be one of: {', '.join(RATINGS)}")
+        sql = f"SELECT {_COLS} FROM feedback WHERE 1=1"
+        args: list[Any] = []
+        if state is not None:
+            sql += " AND triage_state=?"
+            args.append(state)
+        if rating is not None:
+            sql += " AND rating=?"
+            args.append(rating)
+        sql += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
+        args.append(min(MAX_LIST, max(1, int(limit))))
+        return [FeedbackRecord(*r) for r in self.conn.execute(sql, args).fetchall()]
+
+    def set_state(self, feedback_id: str, new_state: str, *, expected: tuple[str, ...]) -> bool:
+        """Compare-and-set the triage state: True only if the row was in one of `expected`."""
+        if new_state not in TRIAGE_STATES or not set(expected) <= set(TRIAGE_STATES):
+            raise FeedbackError("unknown triage state")
+        marks = ",".join("?" * len(expected))
+        with write_tx(self.conn):
+            cur = self.conn.execute(
+                f"UPDATE feedback SET triage_state=? WHERE feedback_id=? "
+                f"AND triage_state IN ({marks})",
+                (new_state, feedback_id, *expected),
+            )
+            return cur.rowcount == 1
 
     def delete_user(self, user_id: str) -> int:
         """Erasure hook for iteration 35: remove every feedback row of one user."""

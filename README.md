@@ -71,7 +71,7 @@ in part (see the R4 rows). The production design for every requirement is in
 | **R2** Safety and PII masking | The SQL policy (25 rules, sqlglot AST) blocks PII columns and every table outside the 4 allowed ones. A brand-scope rewrite turns every table into a PII-free CTE filtered by `@scope_brands`. A small-cell rule (k = 5) and a differencing guard stop re-identification. Regex plus Presidio/spaCy scrub inputs, rows, outputs and traces. The input guard and output guard block injection and unexpected actions. | `guards/`, `tools/run_sql.py` |
 | **R3** High-stakes oversight | A report is saved only after the user replies Save, Revise or Cancel. Deleting is two-phase: a preview, then a confirmation proven with an HMAC token that expires after 600 s. The audit record is written first, in the same transaction as the delete; if the audit write fails, nothing is deleted. The model has no delete tool. | `graph/graph.py`, `delete/`, `store/audit.py` |
 | **R4.1** User-level learning (preferences) | Partly built. Code-side validation of format, depth and chart preferences exists (`set_preference`: enumerated values only, nothing that widens scope or asks for PII), but no role can call it yet, and preferences are not persisted across sessions. See [Not built](#not-built-and-known-gaps). | `graph/memory.py` |
-| **R4.2** System-level learning | `/feedback up\|down [reason] [comment]` is stored per turn with a triage state, and the trace links feedback to the turn, so a bad answer can be traced to the failing step. Golden examples are a YAML file the analytics team edits; a new trio is added there and checked by the eval suite. The triage CLI (`promote`, `add-eval`) is not built. | `commands/feedback.py`, `store/feedback.py`, `config/golden_seed.yaml` |
+| **R4.2** System-level learning | `/feedback up\|down [reason] [comment]` is stored per turn with a triage state, and the trace links feedback to the turn, so a bad answer can be traced to the failing step. Golden examples are a YAML file the analytics team edits; a new trio is added there and checked by the eval suite. A maintainer triage CLI (`python -m opsfleet_agent.commands.triage`) classifies each item's root cause from its trace, drafts a regression eval case (`add-eval`) and writes a Golden candidate (`promote`) only after a PII scan, a BigQuery dry run and a green offline eval run; every state change is audited first. | `commands/feedback.py`, `commands/triage.py`, `store/feedback.py`, `config/golden_seed.yaml` |
 | **R5** Resilience | Every LLM call goes through a deadline-aware wrapper: 2 retries with backoff, then the fallback model, which stays on for the rest of the turn. Budgets cap LLM calls, SQL calls and wall time per turn. On a budget or deadline hit, a forced partial answer is written. When the LLM is down, `/reports`, `/open` and `/search` still work (degraded mode). Each BigQuery 503 gets one bounded retry. | `graph/llm.py`, `graph/budget.py`, `graph/degraded.py` |
 | **R6** Quality assurance | Golden, router and adversarial eval suites run per profile, with gates: golden ≥ 80%, adversarial 100%, PII recall ≥ 95%. An LLM judge is calibrated against human labels. CI runs lint, unit tests and the offline eval. | `evals/`, `.github/workflows/ci.yml` |
 | **R7** Observability | Each turn is written as JSONL traces to `data/traces/` with PII and secrets masked by key and by pattern. Langfuse tracing is optional. `/trace` shows a turn and `/audit` the audit log. | `obs/`, `commands/trace.py`, `commands/audit.py` |
@@ -749,6 +749,34 @@ uv run python evals/run.py --sut evals.live_sut:live_harness --cases-dir evals/c
 - the offline eval;
 - a check that `requirements.txt` matches `uv.lock`.
 
+### Feedback triage (maintainers)
+
+`/feedback` ratings are triaged outside the chat with a maintainer CLI. Only ids listed in
+`config/maintainers.yaml` may run it; anyone else is refused before any data is read.
+
+```bash
+uv run python -m opsfleet_agent.commands.triage --as support_demo list --state new
+uv run python -m opsfleet_agent.commands.triage --as support_demo show <id>       # 8+ hex chars
+uv run python -m opsfleet_agent.commands.triage --as support_demo classify <id>
+uv run python -m opsfleet_agent.commands.triage --as support_demo dismiss <id> --reason duplicate
+uv run python -m opsfleet_agent.commands.triage --as support_demo add-eval <id> \
+    --question "Which categories sold best last quarter?"
+uv run python -m opsfleet_agent.commands.triage --as support_demo promote <id> \
+    --question "..." --summary "..." --sql-file reviewed.sql
+```
+
+- The root cause (`guardrail_block`, `sql_error`, `model_down`, `verifier_fail`,
+  `empty_result`, `misroute`, `slow`, `intent_or_format`, `no_trace`, `clean`) is computed
+  from the turn's trace in `data/traces/`; `list --class <cause>` filters by it.
+- `add-eval` writes a skipped draft case to `evals/cases/regression/`; the question is
+  PII-scrubbed and refused if the PII detector still finds anything.
+- `promote` accepts only an up-rated turn with a clean trace. It runs the Golden seed
+  validator, the PII detector, a BigQuery dry run (needs `GOOGLE_CLOUD_PROJECT` and ADC) and the
+  offline golden eval, in that order, and writes `data/golden_candidates/<trio_id>.yaml`. A
+  human reviews the candidate and copies it into `config/golden_seed.yaml`.
+- Every state change writes an audit row first (`/audit` shows it); if that fails, nothing
+  changes. The CLI prints only scrubbed text.
+
 ---
 
 ## Configuration reference
@@ -763,6 +791,7 @@ uv run python evals/run.py --sut evals.live_sut:live_harness --cases-dir evals/c
 | `OPSFLEET_DATA_DIR` | no | `data` | Where `app.db`, `checkpoints.db` and traces live |
 | `OPSFLEET_MODELS_YAML` | no | `config/models.yaml` | Alternative models and limits file |
 | `OPSFLEET_PROFILES_YAML` | no | `config/profiles.yaml` | Alternative profiles file |
+| `OPSFLEET_MAINTAINERS_YAML` | no | `config/maintainers.yaml` | Maintainer allowlist for the triage CLI |
 | `OPSFLEET_LLM_PROVIDER` | no | `gemini` | `lmstudio` for a local model (dev only) |
 | `OPSFLEET_LLM_BASE_URL` | no | `http://127.0.0.1:1234/v1` | LM Studio endpoint |
 | `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST` | no | | Langfuse tracing; on only when all three are set |
@@ -819,7 +848,7 @@ design.
 | Item | Status | Design |
 |---|---|---|
 | User preferences (R4.1): set by the user, applied to formatting, kept across sessions | Validation code exists (`graph/memory.py`); no role calls `set_preference` yet, and there is no preferences store | architecture.md §6.4 |
-| Feedback triage CLI (R4.2): root-cause classes, `promote` to a Golden candidate, `add-eval` | Feedback rows carry a triage state; the CLI is not built, so triage is done by reading `/trace` and editing `config/golden_seed.yaml` or the eval cases by hand | architecture.md §6.4 |
+| Feedback triage CLI (R4.2): root-cause classes, `promote` to a Golden candidate, `add-eval` | Built (iteration 36) as a maintainer CLI, see [Feedback triage](#feedback-triage-maintainers). Not built: auto-flagging failed turns without a rating, clustering similar items, and copying a reviewed candidate into `config/golden_seed.yaml` (a human does that) | architecture.md §6.4 |
 | Library agent (separate LLM role for the report library) | Built: natural-language library questions go to the Library agent (list, search, view, rename, export, delete preview, preferences; no SQL). It cannot save a report; saving goes through Save / Revise / Cancel | [architecture.md §4.0](docs/architecture.md) |
 | Semantic report search | Built as hybrid search (FTS5 bm25 + embeddings, RRF k=60) over a per-report vector table in SQLite with a brute-force cosine scan over at most 200 of the owner's reports; no vector index or ANN service | architecture.md §6.3.2 |
 | `retry report` (rewrite from the stored evidence, no SQL) | Not built | architecture.md §2.3 |

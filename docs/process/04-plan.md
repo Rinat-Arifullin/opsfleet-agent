@@ -893,8 +893,8 @@ These iterations run in the reverse of the drop order: the most protected item (
 - `src/opsfleet_agent/commands/triage.py`
 - `tests/unit/test_triage.py`
 **Done criteria**:
-- [ ] Named tests: `test_add_eval_writes_case`, `test_promote_blocked_on_eval_regression`, `test_promote_runs_pii_scan_and_dry_run`, `test_triage_root_cause_rules`
-- [ ] [std]
+- [x] Named tests: `test_add_eval_writes_case`, `test_promote_blocked_on_eval_regression`, `test_promote_runs_pii_scan_and_dry_run`, `test_triage_root_cause_rules`
+- [x] [std] (promote writes a Golden candidate for human review rather than editing the seed; see iter36-ods.md D-220)
 **Effort**: M (1) · **Depends on**: 27, 31, 32 · **Risk**: medium
 
 ## Iteration 37: Ranked full-text report search (drop 3)
