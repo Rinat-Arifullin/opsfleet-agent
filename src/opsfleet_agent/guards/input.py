@@ -541,3 +541,8 @@ def check_input(raw: object, *, detector: PiiDetector | None = None) -> InputDec
         pii_types=pii_types,
         pii_notice=PII_NOTICE if pii_types else None,
     )
+
+
+def scan_injection(text: str) -> str | None:
+    """Public alias of the rule scan: the first rule code hit by ``text``, or None."""
+    return _scan(text)

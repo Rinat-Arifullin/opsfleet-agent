@@ -1,0 +1,142 @@
+# Golden query seed (iteration 31, HLD 6.1). Synthetic question/SQL/pattern trios.
+# Rules: SQL passes guards.sql_policy at load; summaries describe a pattern and carry NO figures;
+# no personal data. `brands: [agnostic]` means usable by any scope; otherwise a brand list.
+version: 1
+trios:
+  - trio_id: top-categories-by-revenue
+    version: 1
+    brands: [agnostic]
+    tags: [revenue, category, ranking]
+    question: Which product categories bring in the most revenue?
+    sql: |
+      SELECT p.category, SUM(oi.sale_price) AS revenue
+      FROM `bigquery-public-data.thelook_ecommerce.order_items` AS oi
+      JOIN `bigquery-public-data.thelook_ecommerce.products` AS p ON oi.product_id = p.id
+      WHERE oi.status NOT IN ('Cancelled', 'Returned')
+      GROUP BY p.category
+      ORDER BY revenue DESC
+      LIMIT 10
+    report_summary: Rank categories by summed sale price, excluding cancelled and returned lines, then name the leaders and how concentrated the revenue is.
+  - trio_id: monthly-revenue-trend
+    version: 1
+    brands: [agnostic]
+    tags: [revenue, trend, monthly]
+    question: How has monthly revenue changed over time?
+    sql: |
+      SELECT DATE_TRUNC(DATE(oi.created_at), MONTH) AS month, SUM(oi.sale_price) AS revenue
+      FROM `bigquery-public-data.thelook_ecommerce.order_items` AS oi
+      WHERE oi.status NOT IN ('Cancelled', 'Returned')
+      GROUP BY month
+      ORDER BY month
+    report_summary: Show revenue per month as a series, call out the direction of the trend, peaks and any sharp drops, and state the period covered.
+  - trio_id: order-status-mix
+    version: 1
+    brands: [agnostic]
+    tags: [orders, status, share]
+    question: What share of orders is in each status?
+    sql: |
+      SELECT o.status, COUNT(*) AS orders
+      FROM `bigquery-public-data.thelook_ecommerce.orders` AS o
+      GROUP BY o.status
+      ORDER BY orders DESC
+    report_summary: Count orders per status and express each as a share of all orders, noting which statuses dominate.
+  - trio_id: return-rate-by-category
+    version: 1
+    brands: [agnostic]
+    tags: [returns, category, rate]
+    question: Which categories have the highest return rate?
+    sql: |
+      SELECT p.category,
+             COUNTIF(oi.status = 'Returned') AS returned_items,
+             COUNT(*) AS total_items,
+             SAFE_DIVIDE(COUNTIF(oi.status = 'Returned'), COUNT(*)) AS return_rate
+      FROM `bigquery-public-data.thelook_ecommerce.order_items` AS oi
+      JOIN `bigquery-public-data.thelook_ecommerce.products` AS p ON oi.product_id = p.id
+      GROUP BY p.category
+      ORDER BY return_rate DESC
+      LIMIT 10
+    report_summary: Compare return rate per category with the item volume behind it, and warn when a high rate rests on few items.
+  - trio_id: average-order-value
+    version: 1
+    brands: [agnostic]
+    tags: [aov, orders]
+    question: What is the average order value?
+    sql: |
+      SELECT AVG(order_total) AS average_order_value
+      FROM (
+        SELECT oi.order_id, SUM(oi.sale_price) AS order_total
+        FROM `bigquery-public-data.thelook_ecommerce.order_items` AS oi
+        WHERE oi.status NOT IN ('Cancelled', 'Returned')
+        GROUP BY oi.order_id
+      )
+    report_summary: Total each order first, then average the totals; state which statuses were excluded and the definition of an order.
+  - trio_id: delivery-time-by-department
+    version: 1
+    brands: [agnostic]
+    tags: [delivery, fulfilment, department]
+    question: How long does delivery take on average per department?
+    sql: |
+      SELECT p.department,
+             AVG(TIMESTAMP_DIFF(oi.delivered_at, oi.created_at, DAY)) AS avg_days_to_deliver
+      FROM `bigquery-public-data.thelook_ecommerce.order_items` AS oi
+      JOIN `bigquery-public-data.thelook_ecommerce.products` AS p ON oi.product_id = p.id
+      WHERE oi.delivered_at IS NOT NULL
+      GROUP BY p.department
+      ORDER BY avg_days_to_deliver DESC
+    report_summary: Average days from order creation to delivery per department, only for delivered items; mention that undelivered items are excluded.
+  - trio_id: gross-margin-by-brand
+    version: 1
+    brands: [agnostic]
+    tags: [margin, brand, profitability]
+    question: Which brands have the best gross margin?
+    sql: |
+      SELECT p.brand,
+             SUM(oi.sale_price - p.cost) AS gross_margin,
+             SUM(oi.sale_price) AS revenue
+      FROM `bigquery-public-data.thelook_ecommerce.order_items` AS oi
+      JOIN `bigquery-public-data.thelook_ecommerce.products` AS p ON oi.product_id = p.id
+      WHERE oi.status NOT IN ('Cancelled', 'Returned')
+      GROUP BY p.brand
+      ORDER BY gross_margin DESC
+      LIMIT 10
+    report_summary: Margin is sale price minus product cost; rank brands by absolute margin and show margin relative to revenue.
+  - trio_id: ck-monthly-units
+    version: 1
+    brands: [Calvin Klein]
+    tags: [brand, units, monthly]
+    question: How many Calvin Klein items were sold each month?
+    sql: |
+      SELECT DATE_TRUNC(DATE(oi.created_at), MONTH) AS month, COUNT(*) AS units
+      FROM `bigquery-public-data.thelook_ecommerce.order_items` AS oi
+      JOIN `bigquery-public-data.thelook_ecommerce.products` AS p ON oi.product_id = p.id
+      WHERE p.brand = 'Calvin Klein' AND oi.status NOT IN ('Cancelled', 'Returned')
+      GROUP BY month
+      ORDER BY month
+    report_summary: Monthly unit counts for one brand as a series, with the trend and any seasonality worth noting.
+  - trio_id: workwear-denim-category-split
+    version: 1
+    brands: [Carhartt, Levi's]
+    tags: [brand, category, comparison]
+    question: How does revenue split across categories for Carhartt versus Levi's?
+    sql: |
+      SELECT p.brand, p.category, SUM(oi.sale_price) AS revenue
+      FROM `bigquery-public-data.thelook_ecommerce.order_items` AS oi
+      JOIN `bigquery-public-data.thelook_ecommerce.products` AS p ON oi.product_id = p.id
+      WHERE p.brand IN ('Carhartt', "Levi's") AND oi.status NOT IN ('Cancelled', 'Returned')
+      GROUP BY p.brand, p.category
+      ORDER BY p.brand, revenue DESC
+    report_summary: Side-by-side category revenue for two brands; point out where one brand leans on a category the other barely sells.
+  - trio_id: brand-return-rate-by-month
+    version: 1
+    brands: [Carhartt, Levi's]
+    tags: [brand, returns, monthly]
+    question: What is the monthly return rate for Carhartt and Levi's items?
+    sql: |
+      SELECT DATE_TRUNC(DATE(oi.created_at), MONTH) AS month, p.brand,
+             SAFE_DIVIDE(COUNTIF(oi.status = 'Returned'), COUNT(*)) AS return_rate
+      FROM `bigquery-public-data.thelook_ecommerce.order_items` AS oi
+      JOIN `bigquery-public-data.thelook_ecommerce.products` AS p ON oi.product_id = p.id
+      WHERE p.brand IN ('Carhartt', "Levi's")
+      GROUP BY month, p.brand
+      ORDER BY month, p.brand
+    report_summary: Return rate per brand and month, with the volume behind each point; flag months with too few items to be meaningful.
