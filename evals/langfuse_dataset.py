@@ -1,7 +1,8 @@
 """Golden eval cases as a Langfuse dataset, and live dataset runs (iteration 40b).
 
     uv run python evals/langfuse_dataset.py upload [--cases-dir DIR] [--dataset NAME]
-                                                   [--profile ID ...] [--archive-stale]
+                                                   [--case ID ...] [--profile ID ...]
+                                                   [--archive-stale]
     uv run python evals/langfuse_dataset.py run [--dataset NAME] [--run-name NAME]
                                                 [--limit N] [--case ID ...] [--profile ID ...]
 
@@ -10,6 +11,8 @@
 place. Items in the dataset that no current run produces (a case renamed, removed or narrowed
 to fewer profiles, or a pre-D-160 item without ``@<profile>``) are listed as stale and left
 alone; ``--archive-stale`` archives them (status ARCHIVED; ``run`` skips archived items).
+``--case`` uploads a subset, e.g. a small smoke dataset for slow local models:
+``upload --dataset opsfleet-smoke --case monthly_revenue_12m --case ...``.
 
 ``run`` runs the live system under test (:mod:`evals.live_sut`) on each item, links the item
 to the turn's Langfuse trace as a dataset run, and pushes the eval scorers' checks
@@ -189,11 +192,26 @@ def _active(item: Any) -> bool:
 # --------------------------------------------------------------------------- upload
 
 
+def select_cases(cases: Sequence[Case], wanted: Sequence[str]) -> list[Case]:
+    """Keep the runs whose run id (``case@profile``) or case id is in ``wanted``.
+
+    An unknown id is an error, so a typo never uploads a silently smaller dataset."""
+    if not wanted:
+        return list(cases)
+    known = {c.id for c in cases} | {c.base_id or c.id for c in cases}
+    unknown = sorted(set(wanted) - known)
+    if unknown:
+        raise DatasetError(f"error: unknown case(s): {', '.join(unknown)}.")
+    keep = set(wanted)
+    return [c for c in cases if keep & {c.id, c.base_id or c.id}]
+
+
 def upload(client: Any, cases: Sequence[Case], dataset: str, cases_dir: Path,
            out: TextIO, *, archive_stale: bool = False, partial: bool = False) -> int:  # fmt: skip
     """Upsert one item per run; report (or archive) items no current run produces.
 
-    ``partial`` (a ``--profile`` filter) uploads a subset, so nothing is called stale."""
+    ``partial`` (a ``--case`` or ``--profile`` filter) uploads a subset, so nothing is
+    called stale."""
     if len(cases) > MAX_ITEMS:
         raise DatasetError(f"error: {len(cases)} cases > cap {MAX_ITEMS}.")
     existing = _existing_ids(client, dataset)
@@ -459,6 +477,8 @@ def build_parser() -> argparse.ArgumentParser:
     up = sub.add_parser("upload", help="upsert the cases as dataset items")
     up.add_argument("--cases-dir", type=Path, default=GOLDEN_DIR)
     up.add_argument("--dataset", default=DEFAULT_DATASET)
+    up.add_argument("--case", action="append", default=[],
+                    help="upload only this case (case id or case@profile); repeatable")  # fmt: skip
     up.add_argument("--profile", action="append", default=[],
                     help="upload only the runs under this profile; repeatable")  # fmt: skip
     up.add_argument("--archive-stale", action="store_true",
@@ -502,8 +522,10 @@ def main(
                                      all_golden=_is_golden_dir(args.cases_dir))  # fmt: skip
             except (CaseError, Exception) as exc:  # noqa: BLE001
                 raise DatasetError(f"error: cannot load cases: {exc}") from None
+            cases = select_cases(cases, args.case)
             return upload(client, cases, args.dataset, args.cases_dir, out,
-                          archive_stale=args.archive_stale, partial=bool(args.profile))  # fmt: skip
+                          archive_stale=args.archive_stale,
+                          partial=bool(args.profile or args.case))  # fmt: skip
         sut = (sut_factory or _live_sut)()
         try:
             from evals.live_sut import eval_data_dir

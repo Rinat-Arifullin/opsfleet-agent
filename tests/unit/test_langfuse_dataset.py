@@ -205,6 +205,31 @@ def test_upload_golden_cases_round_trip():
         assert item.metadata["file"] and item.metadata["file"].startswith("evals/cases/golden/")
 
 
+def test_upload_case_filter_builds_a_small_dataset(cases_dir):
+    client = FakeClient()
+    args = ["upload", "--cases-dir", str(cases_dir), "--dataset", "smoke", "--case", "alpha"]
+    code, out = main([*args, "--case", "beta"], client)
+    assert code == D.EXIT_OK and "2 created" in out and "Stale" not in out
+    assert sorted(client.items) == ["smoke.alpha", "smoke.beta"]
+
+
+def test_upload_case_filter_on_golden_keeps_every_profile_run():
+    client = FakeClient()
+    code, out = main(["upload", "--dataset", "smoke", "--case", "monthly_revenue_12m",
+                      "--case", "customer_contact_request@ceo_demo"], client)  # fmt: skip
+    assert code == D.EXIT_OK
+    ids = sorted(client.items)
+    assert "smoke.customer_contact_request@ceo_demo" in ids
+    assert not any(i.startswith("smoke.customer_contact_request@analyst") for i in ids)
+    assert sum(i.startswith("smoke.monthly_revenue_12m@") for i in ids) >= 2
+
+
+def test_upload_unknown_case_is_refused(cases_dir):
+    client = FakeClient()
+    code, out = main(["upload", "--cases-dir", str(cases_dir), "--case", "alhpa"], client)
+    assert code == D.EXIT_REFUSED and "unknown case(s): alhpa" in out and not client.items
+
+
 # --------------------------------------------------------------------------- run
 
 
