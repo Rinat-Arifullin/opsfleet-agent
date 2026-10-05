@@ -684,3 +684,39 @@ def test_resume_after_real_process_kill(tmp_path, settings, detector, target) ->
     assert router.calls == []  # input_guard (the router) is not re-run either
     assert ANSWER in out.result.text and out.result.outcome == "answered"
     assert parent_next(resumed) == ()
+
+
+# --- iteration 15: cross-turn context survives a resume ---
+
+
+@pytest.mark.parametrize("target", ["quick", "deep"])
+def test_resume_rebuilds_turn_context(tmp_path, settings, detector, monkeypatch, target) -> None:
+    """A resumed turn starts at quick/deep with a fresh TurnContext: the analyst still gets
+    the earlier turns and the code-built context section, not a bare message."""
+    key = new_key()
+    first = "How many complete orders are there?"
+    analyst = Scripted(
+        ModelTurn(ANSWER),
+        sql_call(SIMPLE, "c1"), ModelTurn("[[ESCALATE]]"), sql_call(SIMPLE, "c2"),
+        ModelTurn(ANSWER),
+    )  # fmt: skip
+    router = Router("simple")
+    env = Env(tmp_path, settings, detector, router, analyst, saver=saver(tmp_path, key))
+    assert env.ask(first).outcome == "answered"
+    router.calls.clear()  # the fake router labels only its first call
+    crash_on_entry(monkeypatch, target)
+    with pytest.raises(_Crash):
+        env.ask("And how many were cancelled?")
+
+    resumed = Env(
+        tmp_path, settings, detector, router, analyst,
+        client=env.client, saver=saver(tmp_path, key),
+    )  # fmt: skip
+    n = len(analyst.calls)
+    out = rs.resume_turn(resumed.graph, SID, PROFILE)
+    assert out.kind is rs.ResumeKind.RESUMED and out.result is not None
+    assert out.result.outcome == "answered" and ANSWER in out.result.text
+    messages = analyst.calls[n][1]  # the first analyst call after the resume
+    assert "## Context for this turn" in messages[0]["content"]
+    assert any(first in m["content"] for m in messages[1:-1])  # the earlier turn is there
+    assert "And how many were cancelled?" in messages[-1]["content"]

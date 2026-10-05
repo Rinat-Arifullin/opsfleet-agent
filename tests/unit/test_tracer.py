@@ -63,6 +63,7 @@ def test_trace_has_all_span_types(tmp_path):
         "sql",
         "delete",
         "error",
+        "context",
     }
     t = tr.Tracer(tmp_path, "s1")
     for st in tr.SPAN_TYPES:

@@ -24,7 +24,9 @@ from sqlglot import exp
 
 log = logging.getLogger(__name__)
 
-SPAN_TYPES = ("turn", "router", "role", "llm", "tool", "guard", "sql", "delete", "error")
+SPAN_TYPES = (
+    "turn", "router", "role", "llm", "tool", "guard", "sql", "delete", "error", "context",
+)  # fmt: skip
 
 DROPPED = "[dropped]"
 SECRET = "[secret]"
@@ -104,6 +106,8 @@ SPAN_FIELDS: dict[str, tuple[str, ...]] = {
     ),
     "delete": ("event", "pending_action_id", "count", "audit_event_id"),
     "error": ("code", "message"),
+    # Iteration 15 (load_context, HLD line 1737): counts and versions only, never content.
+    "context": ("history_turns", "context_dropped", "persona_version", "prefs_version", "golden"),
 }
 # Only when capture_llm_text is on (dev / eval runs).
 LLM_TEXT_FIELDS = ("prompt_redacted", "completion_redacted")

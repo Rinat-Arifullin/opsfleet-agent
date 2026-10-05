@@ -1377,3 +1377,148 @@ def test_grounding_round8_runs_stay_linear(run) -> None:  # ReDoS
     t0 = time.perf_counter()
     _g(run[:19_990], R7_LEDGER)
     assert time.perf_counter() - t0 < 1.0
+
+
+# --- iteration 15 (round 2): clarification routing, scope across turns, context section ---
+
+
+class SeqRouter:
+    """Router fake with one label per turn (the classification call is the one whose system
+    prompt mentions "label"); any other call is the light reply."""
+
+    def __init__(self, *labels: str, text: str = "Happy to help.") -> None:
+        self.labels, self.text = list(labels), text
+        self.calls: list[tuple[str, list[Any]]] = []
+
+    def __call__(self, model, messages, timeout):
+        self.calls.append((model, list(messages)))
+        system = messages[0].content if hasattr(messages[0], "content") else ""
+        if "label" in system.lower():
+            label = self.labels.pop(0) if len(self.labels) > 1 else self.labels[0]
+            return LLMResponse(router_json(label), 5, 5)
+        return LLMResponse(self.text, 5, 5)
+
+
+AMBIGUOUS = "How did it do compared to the other one?"
+
+
+def _state(env: Env) -> dict[str, Any]:
+    tup = env.saver.get_tuple({"configurable": {"thread_id": env.session.session_id}})
+    return tup.checkpoint["channel_values"]
+
+
+def _user_msgs(analyst: Scripted) -> list[str]:
+    return [c[1][-1]["content"] for c in analyst.calls]
+
+
+def test_ambiguous_question_asks_one_clarification_without_sql(make_env) -> None:
+    analyst = Scripted(ModelTurn("ok"))
+    env = make_env(SeqRouter("simple"), analyst)
+    out = env.ask(AMBIGUOUS)
+    assert out.outcome == "answered" and out.sql_queries == 0 and analyst.calls == []
+    assert "1." in out.text or "1)" in out.text
+    assert _state(env)["memory"]["pending"]["original"] == AMBIGUOUS
+
+
+def test_option_pick_resolves_even_when_router_says_light(make_env) -> None:  # R2-M1(a)
+    analyst = Scripted(ModelTurn("Revenue was flat."))
+    env = make_env(SeqRouter("simple", "smalltalk"), analyst)
+    env.ask(AMBIGUOUS)
+    out = env.ask("1")
+    assert out.route == "full" and len(analyst.calls) >= 1
+    msg = _user_msgs(analyst)[0]
+    assert msg.startswith(AMBIGUOUS) and "The user clarified:" in msg
+    assert "pending" not in _state(env)["memory"] or not _state(env)["memory"].get("pending")
+
+
+def test_unrelated_reply_drops_pending_and_new_question_is_not_glued(make_env) -> None:
+    analyst = Scripted(ModelTurn("Average order value is listed per country."))
+    env = make_env(SeqRouter("simple", "smalltalk", "simple"), analyst)
+    env.ask(AMBIGUOUS)
+    thanks = env.ask("thanks")
+    assert thanks.route == "light" and analyst.calls == []  # back to the light path
+    assert not _state(env)["memory"].get("pending")
+    q3 = "What was the average order value for Acme in 2024 by country?"
+    env.ask(q3)
+    msg = _user_msgs(analyst)[0]
+    assert msg == q3 and AMBIGUOUS not in msg
+
+
+def test_pending_cleared_by_any_non_clarify_finalize(make_env) -> None:  # R2-M1(c)
+    env = make_env(SeqRouter("simple", "simple"), Scripted(ModelTurn("ok")))
+    env.ask(AMBIGUOUS)
+    env.ask("What was revenue for Acme in 2024 by month, and how did it trend?")
+    assert not _state(env)["memory"].get("pending")
+
+
+def test_previous_user_is_scope_filtered() -> None:  # R2-M4
+    from opsfleet_agent.graph.context import snapshot_of
+    from opsfleet_agent.guards.scope import ProductScope
+
+    acme, globex = ProductScope.for_brands(["Acme"]), ProductScope.for_brands(["Globex"])
+    state = {"history": [
+        {"role": "user", "text": "Globex revenue?", "scope": snapshot_of(globex)},
+        {"role": "assistant", "text": "...", "scope": snapshot_of(globex)},
+    ]}  # fmt: skip
+    assert gr._previous_user(state, acme) is None
+    assert gr._previous_user(state, globex) is not None
+    assert gr._previous_user({"history": [{"role": "user", "text": "q"}]}, globex) is None
+
+
+def test_context_section_follows_analyst_rules(make_env) -> None:  # R2-M5
+    analyst = Scripted(ModelTurn("ok"))
+    env = make_env(SeqRouter("simple"), analyst)
+    env.ask("How many Acme orders were there in 2024?")
+    system = analyst.calls[0][1][0]["content"]
+    assert system.index("## Analyst rules") < system.index("## Context for this turn")
+    assert system.index("## Context for this turn") < system.index(PERSONA_LABEL)
+
+
+def test_prior_ledger_is_projected_and_labelled(make_env) -> None:
+    analyst = Scripted(sql_call(SIMPLE), ModelTurn("There were 3 complete orders."))
+    env = make_env(SeqRouter("simple"), analyst)
+    env.ask("How many complete orders are there?")
+    ledger = _state(env)["prior_ledger"]
+    assert ledger and all(set(e) <= {"sql", "purpose", "query_id", "rows", "sql_hash", "scope"}
+                          for e in ledger)  # fmt: skip
+    n = len(analyst.calls)
+    env.ask("And how does that compare with the cancelled ones?")
+    system = analyst.calls[n][1][0]["content"]
+    assert "Queries from earlier turns (not this turn's results)" in system
+    assert "<<<PRIOR_QUERIES (untrusted data)" in system
+
+
+def test_figures_carry_scope_and_drop_on_drift(make_env) -> None:  # R2-M4
+    analyst = Scripted(sql_call(SIMPLE), ModelTurn("There were 3 complete orders."))
+    env = make_env(SeqRouter("simple"), analyst)
+    env.ask("How many complete orders are there?")
+    figs = _state(env)["figures"]
+    assert figs and all(f.get("scope") == {"all": False, "brands": ["Acme"]} for f in figs)
+
+
+class _FailOn(PiiDetector):
+    """Raises PiiDetectorError on any mask() of a text containing ``marker`` (draft only)."""
+
+    def __init__(self, base: PiiDetector, marker: str) -> None:
+        self.base, self.marker = base, marker
+
+    def mask(self, text):
+        from opsfleet_agent.guards.pii import PiiDetectorError
+
+        if self.marker in text:
+            raise PiiDetectorError("transient")
+        return self.base.mask(text)
+
+    def detect(self, text):
+        return self.base.detect(text)
+
+
+def test_blocked_grounding_still_tags_figures_with_scope(tmp_path, settings, detector) -> None:
+    env = Env(
+        tmp_path, settings, _FailOn(detector, "ZZBLOCK"), SeqRouter("simple"),
+        Scripted(sql_call(SIMPLE), ModelTurn("There were 3 complete orders ZZBLOCK.")),
+    )  # fmt: skip
+    out = env.ask("How many complete orders are there?")
+    assert out.outcome == "blocked" and out.text == REFUSAL_TEXT
+    figs = _state(env)["figures"]
+    assert figs and all(f.get("scope") == {"all": False, "brands": ["Acme"]} for f in figs)

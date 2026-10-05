@@ -64,6 +64,7 @@ def _invoke_subgraph(graph: Any, state: dict[str, Any]) -> Any:
         # subgraph in LangGraph 1.2.12 (_put_checkpoint_fut), so opt out explicitly
         return graph.invoke(state, {"recursion_limit": RECURSION_LIMIT}, durability="async")
 
+
 __all__ = [
     "DEEP",
     "ESCALATE_SENTINEL",
@@ -226,14 +227,21 @@ def build_system_prompt(
     window: tuple[str, str],
     prior_queries: Sequence[Mapping[str, Any]] = (),
     prompt: str | None = None,
+    context_section: str = "",
 ) -> str:
-    """Code-built safety preamble first, then the rules, then the fenced persona (layers 1..7)."""
+    """Code-built safety preamble first, then the rules, then the fenced persona (layers 1..7).
+
+    ``context_section`` is iteration 15's code-assembled turn context (defaults, fenced
+    restatement, prior queries, store blocks). It goes after the rules, never before them.
+    """
     body = prompt if prompt is not None else load_analyst_prompt()
     mode = _MODE_TEXT[role]
     scope = f"Your data access: {scope_label}. The data covers {window[0]} to {window[1]}."
     sections = [("Scope", scope), ("Role", mode), ("Analyst rules", body)]
     if prior_queries:
         sections.insert(2, ("Queries already run this turn", _fenced_queries(prior_queries)))
+    if context_section:
+        sections.append(("Context for this turn", context_section))
     return assemble_prompt(sections, persona)
 
 

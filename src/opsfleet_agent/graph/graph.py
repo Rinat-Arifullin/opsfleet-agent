@@ -53,8 +53,18 @@ from opsfleet_agent.graph.budget import (
     TurnKind,
     run_with_recursion_guard,
 )
+from opsfleet_agent.graph.context import (
+    AssembledContext,
+    assemble_context,
+    ledger_entry_for_state,
+    previous_user_text,
+    scoped_figures,
+    snapshot_of,
+    tag_scope,
+)
 from opsfleet_agent.graph.grounding import check_grounding, extract_figures, merge_figures
 from opsfleet_agent.graph.llm import Limiters, LLMSuccess, LLMWrapper
+from opsfleet_agent.graph.memory import SessionMemory
 from opsfleet_agent.guards.input import check_input
 from opsfleet_agent.guards.output import REFUSAL_TEXT, ROLE_TOOLS, check_output
 from opsfleet_agent.guards.scope import ProductScope
@@ -107,6 +117,7 @@ AES_KEY_ENV: Final = "LANGGRAPH_AES_KEY"
 HISTORY_TURNS: Final = 12  # last 12 turns verbatim (HLD §4.1 step 1)
 MAX_HISTORY_MESSAGES: Final = 2 * HISTORY_TURNS
 MAX_HISTORY_CHARS: Final = 4000
+MAX_PRIOR_LEDGER: Final = 20  # prior-turn ledger entries kept in state (context.MAX_PRIOR_LEDGER)
 DEFAULT_WINDOW_START: Final = date(2019, 1, 1)
 ERROR_TEXT: Final = "Something went wrong while handling that. Please try again."
 UNAVAILABLE_TEXT: Final = (
@@ -189,8 +200,12 @@ def build_run_sql_tool(
 # --- state --------------------------------------------------------------------------------------
 
 
-def _append_history(old: list[dict[str, str]] | None, new: list[dict[str, str]] | None):
+def _append_history(old: list[dict[str, Any]] | None, new: list[dict[str, Any]] | None):
     return [*(old or []), *(new or [])][-MAX_HISTORY_MESSAGES:]
+
+
+def _append_ledger(old: list[dict[str, Any]] | None, new: list[dict[str, Any]] | None):
+    return [*(old or []), *(new or [])][-MAX_PRIOR_LEDGER:]
 
 
 class TurnState(TypedDict, total=False):
@@ -209,8 +224,13 @@ class TurnState(TypedDict, total=False):
     outcome: str
     error: bool
     grounding_blocked: bool  # the guard blocked the draft before grounding: finalize refuses
-    history: Annotated[list[dict[str, str]], _append_history]
+    context_message: str  # load_context's message to answer (a resolved clarification merged)
+    history: Annotated[list[dict[str, Any]], _append_history]  # {"role", "text", "scope"}
     figures: Annotated[list[dict[str, Any]], merge_figures]
+    # Iteration 15. Not in _TURN_RESET: they live for the session (one checkpoint thread).
+    memory: dict[str, Any]  # SessionMemory.to_state(): restatement, preferences, pending clarify
+    history_summary: dict[str, Any]  # {"text", "scope"}; seam until the summary call lands
+    prior_ledger: Annotated[list[dict[str, Any]], _append_ledger]  # ledger entries + "scope"
     # crash resume (HLD 4.0.6): written at turn start / after every node, read by resume
     scope_snapshot: dict[str, Any]  # the scope the turn started under (FR-76)
     owner: str  # the profile user_id the turn started under; resume refuses any other user
@@ -232,6 +252,7 @@ _TURN_RESET: Final[dict[str, Any]] = {
     "outcome": "",
     "error": False,
     "grounding_blocked": False,
+    "context_message": "",
 }
 
 
@@ -281,6 +302,7 @@ class TurnContext:
     guard_codes: set[str] = field(default_factory=set)
     notice: str | None = None
     prompt_cache: str | None = None
+    assembled: AssembledContext | None = None  # set by load_context (iteration 15)
 
     def __post_init__(self) -> None:
         self.sql_turn = RunSqlTurn(self.turn_id, sql_counter=self.budget)
@@ -464,22 +486,15 @@ def _snapshotting(ctx: TurnContext, fn: Callable[[TurnState], dict[str, Any]]):
 # --- nodes --------------------------------------------------------------------------------------
 
 
-def _history_messages(state: TurnState) -> list[dict[str, Any]]:
-    out = []
-    for m in state.get("history") or []:
-        if m.get("role") in ("user", "assistant") and isinstance(m.get("text"), str):
-            out.append({"role": m["role"], "content": m["text"][:MAX_HISTORY_CHARS]})
-    return out
-
-
-def _previous_user(state: TurnState) -> UserTurn | None:
-    for m in reversed(state.get("history") or []):
-        if m.get("role") == "user":
-            try:
-                return UserTurn.from_message("user", m["text"])
-            except ValueError:
-                return None
-    return None
+def _previous_user(state: TurnState, scope: ProductScope) -> UserTurn | None:
+    """The router's prior turn, only when the current scope covers it (FR-76, R2-M4)."""
+    text = previous_user_text(state.get("history"), scope)
+    if text is None:
+        return None
+    try:
+        return UserTurn.from_message("user", text)
+    except ValueError:
+        return None
 
 
 def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, Any]]]:
@@ -498,8 +513,9 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
             "pii_notice": decision.pii_notice or "",
         }
         model, fb = model_ids_from_settings(settings, "router")
+        prev = _previous_user(state, ctx.sql_session.scope)
         rd = route(
-            RouterInput(UserTurn.from_decision(decision), _previous_user(state)),
+            RouterInput(UserTurn.from_decision(decision), prev),
             llm=ctx.llm, model=model, invoke=sv.router_invoke, fallback_model=fb, tracer=ctx.tracer,
         )  # fmt: skip
         update.update(label=rd.label, route=rd.route, is_english=rd.is_english)
@@ -520,7 +536,42 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
 
     def load_context(state: TurnState) -> dict[str, Any]:
         _retrieve_golden(state)  # seam: Golden retrieval arrives with iteration 16
-        return {"scope_label": ctx.profile.scope_label}
+        a = _assemble(state, state["message"])
+        ctx.assembled = a
+        _record(ctx, "context", "load_context", **a.trace_fields(), **ctx.persona.trace_fields)
+        update: dict[str, Any] = {
+            "scope_label": ctx.profile.scope_label,
+            "memory": a.memory.to_state(),
+            "context_message": a.message,
+        }
+        if a.clarification is not None:  # AC-23.2: one question, no SQL
+            update.update(route="clarify", final_text=a.clarification.text, outcome="answered")
+        elif a.resolved_clarification and state.get("route") == "light":
+            # R2-M1: "1" after a clarification is routed light by the router, but it completes
+            # an analytic question. The original label is unknown: fail-open label (Deep).
+            update.update(route="full", label="complex")
+        return update
+
+    def _assemble(state: TurnState, message: str) -> AssembledContext:
+        return assemble_context(
+            message,
+            scope=ctx.sql_session.scope,
+            scope_label=ctx.profile.scope_label,
+            history=state.get("history") or [],
+            summary=state.get("history_summary") or None,
+            prior_ledger=state.get("prior_ledger") or [],
+            store_items=(),  # seams: report bodies (17/19), Golden trios (16)
+            memory=SessionMemory.from_state(state.get("memory")),
+            known_brands=(),  # seam: brand catalogue for the name check (TODO owner, OD-4)
+        )
+
+    def _assembled(state: TurnState) -> AssembledContext:
+        # A resumed turn (14b) restarts at quick/deep with a fresh TurnContext: rebuild the
+        # context from the checkpointed state. load_context already cleared any pending
+        # clarification and saved the merged message, so this neither asks nor merges again.
+        if ctx.assembled is None:
+            ctx.assembled = _assemble(state, state.get("context_message") or state["message"])
+        return ctx.assembled
 
     def quick(state: TurnState) -> dict[str, Any]:
         return _analyst(QUICK, state)
@@ -546,15 +597,17 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
 
     def _analyst(role: str, state: TurnState) -> dict[str, Any]:
         lo, hi = sv.window()
+        a = _assembled(state)  # iteration 15: scope-filtered, fenced context (FR-76)
         system = build_system_prompt(
             role, scope_label=ctx.profile.scope_label, persona=ctx.persona,
             window=(lo.isoformat(), hi.isoformat()),
             prior_queries=ctx.sql_turn.ledger if role == DEEP else (),
+            context_section=a.prompt_section(),
         )  # fmt: skip
         messages = [
             {"role": "system", "content": system},
-            *_history_messages(state),
-            {"role": "user", "content": state["message"]},
+            *a.history,
+            {"role": "user", "content": a.message},
         ]
         res = run_analyst(role, _deps(), messages)
         return {
@@ -571,7 +624,10 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
         return {"draft": text, "role": FORCE_ANSWER_ROLE, "status": "partial"}
 
     def grounding(state: TurnState) -> dict[str, Any]:
-        figures = merge_figures(state.get("figures"), ctx.new_figures)
+        scope = ctx.sql_session.scope
+        # R2-M4: figures from earlier turns count only while the current scope covers them;
+        # out-of-scope ones stay in state (reducer) but are never used for grounding.
+        figures = merge_figures(scoped_figures(state.get("figures"), scope), ctx.new_figures)
         # ground what the user will see: the guard strips tags and empty links (joining digits),
         # so its text is checked, and a draft it blocks is left for finalize to refuse
         verdict = _guard(ctx, state, state.get("draft", ""))
@@ -580,7 +636,7 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
             # even if a second guard pass allows it (a transient detector failure, say)
             ctx.guard_codes |= set(verdict.codes())
             _record(ctx, "guard", "grounding", grounding_flags=0, skipped="blocked")
-            return {"figures": ctx.new_figures, "grounding_blocked": True}
+            return {"figures": tag_scope(ctx.new_figures, scope), "grounding_blocked": True}
         result = check_grounding(
             verdict.text,
             figures,
@@ -588,7 +644,7 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
             deadline_hit=ctx.budget.deadline_hit,
         )
         _record(ctx, "guard", "grounding", grounding_flags=len(result.unmatched))
-        return {"draft": result.text, "figures": ctx.new_figures}
+        return {"draft": result.text, "figures": tag_scope(ctx.new_figures, scope)}
 
     def finalize(state: TurnState) -> dict[str, Any]:
         return _finalize(ctx, state)
@@ -690,9 +746,9 @@ def _guard(ctx: TurnContext, state: TurnState, draft: str):
 def _finalize(ctx: TurnContext, state: TurnState) -> dict[str, Any]:
     label = state.get("label", "")
     update: dict[str, Any] = {}
-    if state.get("route") in ("refuse", "light"):
+    if state.get("route") in ("refuse", "light", "clarify"):
         text = state.get("final_text", "")
-        if not text:  # e.g. a resumed state without the light/refusal text: fail closed
+        if not text:  # e.g. a resumed state without the light/refusal/clarify text: fail closed
             text, update["outcome"] = ERROR_TEXT, "error"
     elif state.get("error"):
         text, update["outcome"] = ERROR_TEXT, "error"
@@ -717,11 +773,20 @@ def _finalize(ctx: TurnContext, state: TurnState) -> dict[str, Any]:
         )  # fmt: skip
     update["final_text"] = text
     update["outcome"] = outcome
+    if state.get("route") != "clarify" and state.get("memory"):
+        # R2-M1(c): a pending clarification lives exactly one turn (load_context clears it
+        # too; this covers paths that skip load_context, e.g. errors before it).
+        mem = SessionMemory.from_state(state.get("memory"))
+        update["memory"] = mem.without_pending().to_state()
     if state.get("message") and state.get("route") != "refuse":
+        snap = snapshot_of(ctx.sql_session.scope)
         update["history"] = [
-            {"role": "user", "text": state["message"]},
-            {"role": "assistant", "text": text[:MAX_HISTORY_CHARS]},
+            {"role": "user", "text": state["message"], "scope": snap},
+            {"role": "assistant", "text": text[:MAX_HISTORY_CHARS], "scope": snap},
         ]
+        if ctx.sql_turn.ledger:  # prior-turn grounding set for follow-ups (AC-07.1/07.2)
+            scope = ctx.sql_session.scope
+            update["prior_ledger"] = [ledger_entry_for_state(e, scope) for e in ctx.sql_turn.ledger]
     return update
 
 
@@ -748,13 +813,22 @@ def _errored(state: TurnState) -> bool:
 def _after_guard(state: TurnState) -> str:
     if _errored(state):
         return "finalize"
-    return {"refuse": "finalize", "light": "light"}.get(state.get("route", ""), "load_context")
+    if state.get("route") == "refuse":
+        return "finalize"
+    if state.get("route") == "light":
+        # R2-M1(a): a reply to a pending clarification ("1") must reach load_context even when
+        # the router calls it light; load_context sends it back to light if it does not resolve.
+        pending = SessionMemory.from_state(state.get("memory")).pending_clarification
+        return "load_context" if pending is not None else "light"
+    return "load_context"
 
 
 def _after_context(state: TurnState) -> str:
     # TODO(14b/15/17): report -> writer/verifier/confirm_save, library -> library agent.
-    if _errored(state):
+    if _errored(state) or state.get("route") == "clarify":
         return "finalize"
+    if state.get("route") == "light":  # pending clarification not resolved (R2-M1)
+        return "light"
     return "quick" if state.get("label") == "simple" else "deep"
 
 
@@ -779,7 +853,7 @@ def _build(ctx: TurnContext, checkpointer: Any) -> Any:
         g.add_node(name, _snapshotting(ctx, _safe(name, fn)))
     g.add_edge(START, "input_guard")
     g.add_conditional_edges("input_guard", _after_guard, ["finalize", "light", "load_context"])
-    g.add_conditional_edges("load_context", _after_context, ["quick", "deep", "finalize"])
+    g.add_conditional_edges("load_context", _after_context, ["quick", "deep", "light", "finalize"])
     g.add_conditional_edges("quick", _after_quick, ["deep", "force_answer", "finalize"])
     g.add_conditional_edges("deep", _after_role, ["force_answer", "finalize"])
     g.add_edge("light", "finalize")
