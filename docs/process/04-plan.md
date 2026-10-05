@@ -790,8 +790,8 @@ The reply that follows is routed to the input guard as a new turn. This takes ov
 - `tests/unit/test_golden.py`
 - `pyproject.toml`, `uv.lock`, `requirements.txt`: only if the embedding client needs a new package. This is a serialized lock edit.
 **Done criteria**:
-- [ ] Named tests: `test_golden_seed_validation`, `test_golden_scope_filter`, `test_golden_embedding_cache_keyed_by_hash`, `test_golden_degrades_when_unavailable`, `test_golden_retrieval_topk`, `test_golden_trio_injection_scan`, `test_golden_trio_with_pii_or_injection_rejected`
-- [ ] [std]
+- [x] Named tests: `test_golden_seed_validation`, `test_golden_scope_filter`, `test_golden_embedding_cache_keyed_by_hash`, `test_golden_degrades_when_unavailable`, `test_golden_retrieval_topk`, `test_golden_trio_injection_scan`, `test_golden_trio_with_pii_or_injection_rejected`
+- [x] [std]
 **Effort**: M (1) · **Depends on**: 2 (embedding spike), 15 · **Risk**: medium
 
 ## Iteration 32: `/feedback`
