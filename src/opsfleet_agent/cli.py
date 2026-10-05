@@ -55,6 +55,8 @@ from opsfleet_agent.graph.resume import (
     resume_turn,
 )
 from opsfleet_agent.guards.pii import (
+    CATALOGUE_CATEGORIES,
+    CATALOGUE_DEPARTMENTS,
     PiiDetector,
     PiiDetectorError,
     build_allowlist,
@@ -150,14 +152,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _install_pii_detector(profiles: Iterable[Profile]) -> None:
-    """Refuse to start without the spaCy model (8b); allowlist the configured brands.
-
-    The full catalogue allowlist (brands, categories, departments from BigQuery) is an open
-    decision (docs/process/iter19-ods.md).
-    """
+    """Refuse to start without the spaCy model (8b); allowlist the configured brands and the
+    catalogue's categories and departments (D-167)."""
     ensure_model_available()
     brands = sorted({b for p in profiles for b in p.brands})
-    set_default_detector(PiiDetector(build_allowlist(brands=brands)))
+    set_default_detector(PiiDetector(
+            build_allowlist(
+                brands=brands, categories=CATALOGUE_CATEGORIES, departments=CATALOGUE_DEPARTMENTS
+            )
+        ))
 
 
 def register_runtime_secrets(settings: Settings) -> None:

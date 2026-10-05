@@ -127,11 +127,13 @@ _NL_RE: Final = re.compile(
     + _OBJECT_END
     + r"|(?:the\s+)?(?:this|current)\s+session(?:'s|s)?\s+(?:saved\s+)?reports?"
     + _OBJECT_END
-    + r"|(?:reports?\s+)?[0-9a-f]{32}\b"
+    + r"|(?:reports?\s+)?(?:R-)?[0-9a-f]{32}\b"
     r"))",
     re.I | re.A,
 )
-_ID_RE: Final = re.compile(r"\b[0-9a-f]{32}\b", re.I | re.A)  # stored lowercase (mn-3)
+# stored lowercase (mn-3); D-166: the displayed "R-" prefix (reports.library.display_id) is
+# accepted and dropped, so "delete R-<id>" selects the same report as "delete <id>"
+_ID_RE: Final = re.compile(r"\b(?:R-)?([0-9a-f]{32})\b", re.I | re.A)
 # mn-1: a negated or exclusive selector ("not from this session", "all except ...") is
 # never inverted or narrowed by guesswork: it is refused as too broad
 _NEGATION_RE: Final = re.compile(

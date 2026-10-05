@@ -160,6 +160,8 @@ MAX_DERIVED_DETECTORS = 32
 MAX_TERM_CHARS = 200
 
 __all__ = [
+    "CATALOGUE_CATEGORIES",
+    "CATALOGUE_DEPARTMENTS",
     "ADDRESS",
     "ENTITY_TYPES",
     "MIN_SCORE",
@@ -279,6 +281,18 @@ SCHEMA_TERMS: tuple[str, ...] = (
     "September", "October", "November", "December",
     "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
 )  # fmt: skip
+
+
+#: D-167: the product categories and departments of thelook_ecommerce (a fixed public
+#: catalogue). spaCy tags some of them as PERSON ("Swim"), so every CLI allowlist has them.
+CATALOGUE_CATEGORIES: tuple[str, ...] = (
+    "Accessories", "Active", "Blazers & Jackets", "Clothing Sets", "Dresses",
+    "Fashion Hoodies & Sweatshirts", "Intimates", "Jeans", "Jumpsuits & Rompers", "Leggings",
+    "Maternity", "Outerwear & Coats", "Pants", "Pants & Capris", "Plus", "Shorts", "Skirts",
+    "Sleep & Lounge", "Socks", "Socks & Hosiery", "Suits", "Suits & Sport Coats", "Sweaters",
+    "Swim", "Tops & Tees", "Underwear",
+)  # fmt: skip
+CATALOGUE_DEPARTMENTS: tuple[str, ...] = ("Men", "Women")
 
 
 def build_allowlist(
