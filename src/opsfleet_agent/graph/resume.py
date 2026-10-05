@@ -5,10 +5,13 @@
 1. the checkpoint store cannot be opened (missing or invalid ``LANGGRAPH_AES_KEY``) or read
    (a wrong key fails the AES MAC check): refuse with one actionable line. Nothing is decrypted
    into the turn and nothing is replayed;
-2. no checkpoint, or no pending node: nothing to resume (one line);
-3. the stored ``owner`` is not the current profile's ``user_id`` (or is missing), or the
-   stored ``scope_snapshot`` differs from the current profile's scope (or is missing):
-   no replay; the caller starts a new empty session (FR-76, fail closed);
+2. no checkpoint at all: nothing to resume (one line);
+3. the stored ``owner`` is not the current profile's ``user_id`` (or is missing): no replay,
+   a new empty session. Checked BEFORE "no pending node", so another user's finished and
+   unfinished sessions get the same reply (no state oracle, iteration 19 OD-1). Then no
+   pending node: nothing to resume (one line). Then the stored ``scope_snapshot`` differs
+   from the current profile's scope (or is missing): no replay, a new empty session
+   (FR-76, fail closed);
 4. the turn stopped before ``input_guard`` finished: the raw text is never stored, so the
    question cannot be replayed; the user asks again (no replay);
 5. otherwise ``invoke(None)`` finishes the interrupted turn with its TurnBudget counters and
@@ -21,6 +24,9 @@ Seams (later iterations): a pending delete expires and a pending draft is re-sho
 (iterations 22a and 17); they add their own branches on ``PendingTurn.next``.
 
 Never raises and never shows a traceback: every failure is a typed :class:`ResumeOutcome`.
+
+:func:`close_interrupted_turn` makes a Ctrl-C cancel durable: the cancelled turn is closed
+in the checkpoint, so a later ``--resume`` never replays it (iteration 19).
 """
 
 from __future__ import annotations
@@ -36,7 +42,7 @@ from opsfleet_agent.graph.graph import AES_KEY_ENV, AgentGraph, TurnResult, scop
 from opsfleet_agent.guards.scope import ProductScope
 from opsfleet_agent.session import Profile, Session
 
-__all__ = ["ResumeKind", "ResumeOutcome", "resume_turn"]
+__all__ = ["ResumeKind", "ResumeOutcome", "close_interrupted_turn", "resume_turn"]
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +69,7 @@ STORE_REFUSED_TEXT: Final = (
 )
 _MAC_FAILURE: Final = "MAC check failed"  # pycryptodome AES-EAX: a wrong LANGGRAPH_AES_KEY
 _INPUT_NODE: Final = "input_guard"
+_FINAL_NODE: Final = "finalize"
 
 
 class ResumeKind(StrEnum):
@@ -82,6 +89,7 @@ class ResumeOutcome:
     text: str
     result: TurnResult | None = None
     start_new_session: bool = False
+    turn_id: str | None = None  # the finished turn (RESUMED), for /feedback and /trace
 
 
 def resume_turn(
@@ -118,14 +126,47 @@ def resume_turn(
     except Exception as exc:
         logger.error("resume: checkpoint read failed: %s", type(exc).__name__)
         return ResumeOutcome(ResumeKind.NEW_SESSION, FAILED_TEXT, start_new_session=True)
-    if not pending.next:
+    if pending._built is None:  # no checkpoint at all for this id
         return ResumeOutcome(ResumeKind.NOTHING_PENDING, NOTHING_PENDING_TEXT)
     if pending.values.get("owner") != profile.user_id:  # missing owner: never resumed
         return ResumeOutcome(ResumeKind.NEW_SESSION, OWNER_TEXT, start_new_session=True)
+    if not pending.next:
+        return ResumeOutcome(ResumeKind.NOTHING_PENDING, NOTHING_PENDING_TEXT)
     if pending.values.get("scope_snapshot") != current:
         return ResumeOutcome(ResumeKind.NEW_SESSION, SCOPE_DRIFT_TEXT, start_new_session=True)
     if _INPUT_NODE in pending.next:
         return ResumeOutcome(ResumeKind.ASK_AGAIN, ASK_AGAIN_TEXT)
     # seam (22a/17): a pending delete expires and a draft is re-shown here, before finish()
+    turn_id = str(pending.values.get("turn_id") or "") or None
     result = pending.finish()
-    return ResumeOutcome(ResumeKind.RESUMED, result.text, result=result)
+    return ResumeOutcome(ResumeKind.RESUMED, result.text, result=result, turn_id=turn_id)
+
+
+def close_interrupted_turn(agent: object, session: Session, turn_id: str | None) -> bool:
+    """Close the pending turn of ``session`` in its checkpoint after a Ctrl-C cancel.
+
+    Only the session's own pending turn is closed: the stored ``owner`` must be the
+    session's user and, when ``turn_id`` is given, the stored ``turn_id`` must match it.
+    The close is a state write "as if ``finalize`` ran" (outcome ``cancelled``), so the
+    checkpoint has no pending node and :func:`resume_turn` returns NOTHING_PENDING instead
+    of replaying the cancelled turn. Local only (no LLM, no BigQuery). Never raises;
+    returns whether a turn was closed. Anything other than an :class:`AgentGraph` is a
+    no-op (test fakes).
+    """
+    if not isinstance(agent, AgentGraph):
+        return False
+    try:
+        pending = agent.open_resume(session)
+        if pending._built is None or not pending.next:
+            return False
+        if pending.values.get("owner") != session.profile.user_id:
+            return False
+        if turn_id is not None and pending.values.get("turn_id") != turn_id:
+            return False
+        compiled = pending._built[1]
+        config = agent._config(session.session_id)
+        compiled.update_state(config, {"outcome": "cancelled"}, as_node=_FINAL_NODE)
+        return True
+    except Exception as exc:  # best effort: the cancel itself already happened
+        logger.error("cancel close failed: %s", type(exc).__name__)
+        return False

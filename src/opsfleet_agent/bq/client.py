@@ -476,6 +476,12 @@ class BigQueryRunner:
     def _left(self, deadline: float) -> float:
         return max(0.0, deadline - self._clock())
 
+    def reset_cancel(self) -> None:
+        """Drop a pending cancel flag (the CLI calls this after a Ctrl-C cancel), so the
+        next ``execute`` of a new turn is not refused by a stale cancel."""
+        with self._lock:
+            self._cancelled = False
+
     def _take_cancelled(self) -> bool:
         with self._lock:
             was, self._cancelled = self._cancelled, False
