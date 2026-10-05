@@ -141,3 +141,47 @@ def test_tunables_optional(env, tmp_path):
     p.write_text(yaml.safe_dump(raw))
     s = load_settings(p, dotenv=False)
     assert (s.small_cell_k, s.bq_unavailable_retry_delay_s) == (5, 2.0)
+
+
+def test_quota_defaults_from_repo_config(env):
+    s = load_settings(dotenv=False)
+    assert (s.quota_llm_per_hour, s.quota_llm_per_day) == (300, 2000)
+    assert s.quota_bq_bytes_per_day == 100_000_000_000
+    raw = yaml.safe_load((ROOT / "config" / "models.yaml").read_text())
+    assert raw["quota"] == {
+        "llm_per_hour": 300,
+        "llm_per_day": 2000,
+        "bq_bytes_per_day": 100_000_000_000,
+    }
+
+
+def test_quota_optional_and_partial(env, tmp_path):
+    raw = yaml.safe_load((ROOT / "config" / "models.yaml").read_text())
+    del raw["quota"]
+    p = tmp_path / "models.yaml"
+    p.write_text(yaml.safe_dump(raw))
+    assert load_settings(p, dotenv=False).quota_llm_per_day == 2000
+    raw["quota"] = {"llm_per_hour": 7}
+    p.write_text(yaml.safe_dump(raw))
+    s = load_settings(p, dotenv=False)
+    assert (s.quota_llm_per_hour, s.quota_llm_per_day) == (7, 2000)
+
+
+@pytest.mark.parametrize("value", [0, -1, True, "5", 1.5, None])
+def test_quota_values_must_be_positive_ints(env, tmp_path, value):
+    raw = yaml.safe_load((ROOT / "config" / "models.yaml").read_text())
+    raw["quota"]["llm_per_day"] = value
+    p = tmp_path / "models.yaml"
+    p.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ConfigError, match="quota.llm_per_day"):
+        load_settings(p, dotenv=False)
+
+
+@pytest.mark.parametrize("section", [{"llm_per_hr": 5}, [1, 2], "x"])
+def test_quota_unknown_key_or_shape_rejected(env, tmp_path, section):
+    raw = yaml.safe_load((ROOT / "config" / "models.yaml").read_text())
+    raw["quota"] = section
+    p = tmp_path / "models.yaml"
+    p.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ConfigError, match="quota"):
+        load_settings(p, dotenv=False)

@@ -44,6 +44,7 @@ from opsfleet_agent.config import (
     safe_config_view,
     startup_check,
 )
+from opsfleet_agent.graph.degraded import DegradedGraph, LLMHealth
 from opsfleet_agent.graph.graph import AES_KEY_ENV, build_checkpointer, scope_snapshot
 from opsfleet_agent.graph.resume import (
     SCOPE_DRIFT_TEXT,
@@ -245,6 +246,7 @@ def build_runtime(
     from opsfleet_agent.store.db import open_store
     from opsfleet_agent.store.feedback import FeedbackStore
     from opsfleet_agent.store.fingerprints import FingerprintStore
+    from opsfleet_agent.store.quota import QuotaLimits, QuotaStore
     from opsfleet_agent.store.reports import ReportStore
     from opsfleet_agent.tools.run_sql import scoped_job_config_factory
 
@@ -256,6 +258,15 @@ def build_runtime(
     runner = BigQueryRunner(client, project, job_config_factory=scoped_job_config_factory())
     cache = TableMetadataCache(client)
     conn = open_store(data_dir / "app.db")
+    quota = QuotaStore(
+        conn,
+        QuotaLimits(
+            settings.quota_llm_per_hour,
+            settings.quota_llm_per_day,
+            settings.quota_bq_bytes_per_day,
+        ),
+    )
+    health = LLMHealth(quota, session.profile.user_id)
     audit_log = AuditLog(conn)
     trace_dir = data_dir / "traces"
     tracer = Tracer(trace_dir, session.session_id)
@@ -273,8 +284,8 @@ def build_runtime(
         settings=settings,
         persona=personas.refresh,
         detector=default_detector(),
-        router_invoke=_make_router_invoke(settings),
-        analyst_invoke=make_gemini_invoke(settings),
+        router_invoke=health.wrap(_make_router_invoke(settings)),
+        analyst_invoke=health.wrap(make_gemini_invoke(settings)),
         run_sql=tool,
         cache=cache,
         tracer=tracer,
@@ -284,7 +295,7 @@ def build_runtime(
         delete=wire_delete(conn, audit_log, reports),  # 22a: None keeps /delete unregistered
     )
     return Runtime(
-        graph=AgentGraph(services, checkpointer),
+        graph=DegradedGraph(AgentGraph(services, checkpointer), quota, health),
         cancel=runner.cancel_inflight,
         clear_cancel=runner.reset_cancel,
         tracer=tracer,

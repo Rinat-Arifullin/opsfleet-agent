@@ -64,6 +64,9 @@ class Settings:
     limiter_fraction: float
     small_cell_k: int = 5
     bq_unavailable_retry_delay_s: float = 2.0
+    quota_llm_per_hour: int = 300  # per user, iteration 24 (D-138)
+    quota_llm_per_day: int = 2000
+    quota_bq_bytes_per_day: int = 100_000_000_000
 
     def configured_model_ids(self) -> list[str]:
         ids: list[str] = []
@@ -171,6 +174,36 @@ def parse_tunables(path: Path) -> tuple[int, float]:
     return k, float(delay)
 
 
+QUOTA_KEYS = ("llm_per_hour", "llm_per_day", "bq_bytes_per_day")
+QUOTA_DEFAULTS = {"llm_per_hour": 300, "llm_per_day": 2000, "bq_bytes_per_day": 100_000_000_000}
+
+
+def parse_quota(path: Path) -> dict[str, int]:
+    """Optional `quota:` mapping (D-138): positive ints; an unknown key is an error."""
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        raise ConfigError(
+            f"{path.name} cannot be read or is not valid YAML. Fix it or restore it from git."
+        ) from None
+    section = (raw or {}).get("quota")
+    if section is None:
+        return dict(QUOTA_DEFAULTS)
+    if not isinstance(section, dict):
+        raise ConfigError(f"{path.name} is invalid: 'quota' must be a mapping.")
+    out = dict(QUOTA_DEFAULTS)
+    for key, value in section.items():
+        if key not in QUOTA_KEYS:
+            raise ConfigError(
+                f"{path.name} is invalid: unknown quota key '{key}' "
+                f"(allowed: {', '.join(QUOTA_KEYS)})."
+            )
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ConfigError(f"{path.name} is invalid: quota.{key} must be a positive integer.")
+        out[key] = value
+    return out
+
+
 def load_settings(models_path: Path | None = None, *, dotenv: bool = True) -> Settings:
     """Load settings. Raises ConfigError (one line, no secret values) on the first failure."""
     if dotenv:
@@ -184,6 +217,7 @@ def load_settings(models_path: Path | None = None, *, dotenv: bool = True) -> Se
     path = models_path or default_models_path()
     roles, emb_model, emb_dim, limits, fraction = parse_models_yaml(path)
     small_cell_k, retry_delay_s = parse_tunables(path)
+    quota = parse_quota(path)
     return Settings(
         google_cloud_project=project,
         gemini_api_key=key,
@@ -195,6 +229,9 @@ def load_settings(models_path: Path | None = None, *, dotenv: bool = True) -> Se
         limiter_fraction=fraction,
         small_cell_k=small_cell_k,
         bq_unavailable_retry_delay_s=retry_delay_s,
+        quota_llm_per_hour=quota["llm_per_hour"],
+        quota_llm_per_day=quota["llm_per_day"],
+        quota_bq_bytes_per_day=quota["bq_bytes_per_day"],
     )
 
 

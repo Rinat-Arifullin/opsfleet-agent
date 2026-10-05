@@ -115,3 +115,33 @@ def test_rejects_newer_schema(tmp_path):
     with pytest.raises(db.SchemaTooNewError):
         db.open_store(p)
     assert issubclass(db.SchemaTooNewError, db.StoreError)
+
+
+def test_quota_migration_is_4_and_applies_on_fresh_db(tmp_path):
+    from opsfleet_agent.store.quota_schema import QUOTA_MIGRATION
+
+    assert (4, QUOTA_MIGRATION) in db.MIGRATIONS
+    c = db.open_store(tmp_path / "fresh.db")
+    try:
+        assert db.current_version(c) >= 4
+        cols = [r[1] for r in c.execute("PRAGMA table_info(user_quota)")]
+        assert cols == ["user_id", "kind", "win", "used"]
+    finally:
+        c.close()
+
+
+def test_quota_migration_over_ensure_schema_table(tmp_path):
+    """A DB where QuotaStore.ensure_schema made the table first (migrated to 3 only)."""
+    from opsfleet_agent.store.quota import QuotaStore
+
+    c = db.connect(tmp_path / "old.db")
+    try:
+        db.migrate(c, db.MIGRATIONS[:3])
+        assert db.current_version(c) == 3
+        store = QuotaStore(c)  # the idempotent fallback creates the table
+        store.record_calls("u1", 2)
+        assert db.migrate(c) == max(v for v, _ in db.MIGRATIONS)  # migration 4: IF NOT EXISTS
+        assert store.usage("u1")["llm_hour"] == 2  # data untouched
+        store.ensure_schema()  # idempotent again
+    finally:
+        c.close()

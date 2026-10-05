@@ -39,6 +39,7 @@ from typing import Final
 
 from opsfleet_agent.config import ConfigError
 from opsfleet_agent.delete.flow import INTERRUPTED
+from opsfleet_agent.graph.degraded import DegradedGraph, unwrap
 from opsfleet_agent.graph.graph import (
     AES_KEY_ENV,
     DELETE_CONFIRM_NODE,
@@ -114,6 +115,10 @@ def resume_turn(
     except Exception as exc:  # an invalid profile never resumes (fail closed)
         logger.error("resume: profile scope invalid: %s", type(exc).__name__)
         return ResumeOutcome(ResumeKind.NEW_SESSION, FAILED_TEXT, start_new_session=True)
+    # quota wrapper (iteration 24): the inner graph opens the checkpoint; the wrapper finishes
+    # the turn so it is capped, gated and its bytes are recorded like any other turn
+    wrapper = agent if isinstance(agent, DegradedGraph) else None
+    agent = unwrap(agent)
     try:
         graph = agent if isinstance(agent, AgentGraph) else agent()
     except ConfigError as exc:  # fixed texts only: the exception text is never echoed
@@ -148,7 +153,8 @@ def resume_turn(
     # iteration 17 (AC-06.5): a pending "confirm_save" is re-shown by finish() without invoking
     # the graph; it never saves.
     turn_id = str(pending.values.get("turn_id") or "") or None
-    result = pending.finish()
+    session = Session(session_id, profile)
+    result = wrapper.finish(pending, session) if wrapper is not None else pending.finish()
     return ResumeOutcome(ResumeKind.RESUMED, result.text, result=result, turn_id=turn_id)
 
 
@@ -167,6 +173,7 @@ def close_interrupted_turn(agent: object, session: Session, turn_id: str | None)
     :meth:`PendingTurn.close_delete` (``delete.cancelled``, reason ``interrupted``, nothing
     deleted). The reply turn that resumed it matches too (it may not have reached state).
     """
+    agent = unwrap(agent)
     if not isinstance(agent, AgentGraph):
         return False
     try:

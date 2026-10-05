@@ -798,7 +798,26 @@ def test_injected_row_count_column_never_reaches_model_memo_key_or_trace(
     text = json.dumps(out)
     assert CELL_COUNT_COLUMN not in text and ROW_COUNT_COLUMN not in text
     raw = (tmp_path / "traces" / "session-1.jsonl").read_text()
-    assert "_cell_" not in raw and "300" not in raw
+    assert "_cell_" not in raw
+    # the injected total (120 + 80 = 200 here, cells 300) must not appear as a value; checked on
+    # parsed values, not as a substring (float timestamps can contain "300")
+    values: list[object] = []
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            for key, val in node.items():
+                values.append(key)
+                walk(val)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+        else:
+            values.append(node)
+
+    for line in raw.splitlines():
+        walk(json.loads(line))
+    assert not any(v == 300 and not isinstance(v, float) for v in values if v is not True)
+    assert not any(v in ("300", "_cell_customers", "_cell_rows") for v in values)
     assert guard.open_plan_count() == 0
 
 

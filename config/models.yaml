@@ -33,3 +33,10 @@ policy:
   small_cell_k: 5        # 2..1000
 bq:
   unavailable_retry_delay_s: 2.0   # 0..30, one bounded retry on a BigQuery 503
+
+# Per-user usage quotas (iteration 24, FR-63). Optional; these are the defaults. Positive ints;
+# an unknown key is a startup error. Windows are fixed UTC hour / UTC day.
+quota:
+  llm_per_hour: 300
+  llm_per_day: 2000
+  bq_bytes_per_day: 100000000000   # 100 GB scanned per user per UTC day
