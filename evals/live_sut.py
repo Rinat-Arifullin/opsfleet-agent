@@ -25,9 +25,10 @@ import logging
 import os
 import threading
 import uuid
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
@@ -38,6 +39,8 @@ from evals.run import Case, CaseError, Harness, RunContext, SutResult
 log = logging.getLogger(__name__)
 
 MAX_TURNS_PER_CASE: Final = 8
+MAX_FULL_SQL: Final = 50  # executed statements kept in memory per case
+MAX_FULL_SQL_CHARS: Final = 20_000
 DEFAULT_CASE_TIMEOUT_S: Final = 600.0  # a local model is slow; Gemini needs far less
 MAX_CASE_TIMEOUT_S: Final = 3600.0
 FLUSH_BOUND_S: Final = 5.0
@@ -179,7 +182,8 @@ class LiveSut:
             self._abandon(box.get("runtime"))
             raise CaseError(f"timed out after {self.timeout_s:.0f}s") from None
         self.last_trace_ids = [t for t in ids if t]
-        return to_sut_result(list(results), trace_path, self.last_trace_ids)
+        return to_sut_result(list(results), trace_path, self.last_trace_ids,
+                             full_sql=box.get("full_sql"))  # fmt: skip
 
     def _run_case(self, case: Case, ctx: RunContext, box: dict[str, Any]) -> tuple:
         from opsfleet_agent.session import Session
@@ -202,7 +206,9 @@ class LiveSut:
                 self._turn(runtime, session, text, seed.base_user_id)
             if tracer is not None:
                 tracer.session_id = session.session_id
-            pairs = [self._turn(runtime, session, t, seed.base_user_id) for t in case.turns]
+            with _full_sql_capture(tracer) as full_sql:
+                pairs = [self._turn(runtime, session, t, seed.base_user_id) for t in case.turns]
+        box["full_sql"] = full_sql
         results, ids = zip(*pairs, strict=True)
         return results, ids, (tracer.path if tracer is not None else None)
 
@@ -276,8 +282,48 @@ class LiveSut:
         _step(getattr(conn, "close", None), "checkpoint close")
 
 
-def to_sut_result(results: list[Any], trace_path: Path | None, trace_ids: list[str]) -> SutResult:
-    """Map the turn results plus the local JSONL trace to the scorers' SutResult."""
+@contextmanager
+def _full_sql_capture(tracer: Any) -> Iterator[list[str]]:
+    """Keep, in memory only, the literal-free text of each executed statement of the turns.
+
+    The tracer bounds every string (``MAX_STR``), so a long scoped statement reaches the trace
+    as ``...[truncated]`` and the ``scope:sql`` check cannot parse it. This wraps the tracer's
+    ``record`` for the case: it sees the same text the tracer sanitizes (``sanitize_sql``,
+    literals replaced with ``?``, secrets scrubbed), keeps it here and writes nothing new."""
+    from opsfleet_agent.obs.tracer import sanitize_sql, scrub_text
+
+    captured: list[str] = []
+    original = getattr(tracer, "record", None)
+    if original is None:
+        yield captured
+        return
+
+    def record(span_type: str, name: str | None = None, **fields: Any) -> Any:
+        text = fields.get("sql_text")
+        if span_type == "sql" and fields.get("status") == "ok" and isinstance(text, str):
+            if len(captured) < MAX_FULL_SQL:
+                clean = sanitize_sql(text)[0]
+                captured.append(scrub_text(clean, MAX_FULL_SQL_CHARS) if clean else "")
+        return original(span_type, name, **fields)
+
+    tracer.record = record
+    try:
+        yield captured
+    finally:
+        del tracer.record  # back to the class method
+
+
+def to_sut_result(
+    results: list[Any],
+    trace_path: Path | None,
+    trace_ids: list[str],
+    *,
+    full_sql: list[str] | None = None,
+) -> SutResult:
+    """Map the turn results plus the local JSONL trace to the scorers' SutResult.
+
+    ``full_sql`` (from :func:`_full_sql_capture`) replaces the traced statement texts when it
+    lines up with the trace's executed statements one for one."""
     last = results[-1]
     spans = list(read_spans(trace_path)) if trace_path is not None else []
     llm: dict[str, int] = {}
@@ -295,7 +341,7 @@ def to_sut_result(results: list[Any], trace_path: Path | None, trace_ids: list[s
         outcome=getattr(last, "outcome", None),
         text=str(getattr(last, "text", "") or ""),
         label=getattr(last, "label", None),
-        sql=[str(s.get("sql_text") or s.get("sql_hash") or "") for s in ran],
+        sql=_statements(ran, full_sql),
         tools=tools,
         llm_calls=llm,
         bq_queries=max(len(ran), sum(int(getattr(r, "sql_queries", 0) or 0) for r in results)),
@@ -353,3 +399,10 @@ def live_harness() -> Harness:
     sut = LiveSut()
     atexit.register(sut.close)
     return Harness(sut=sut)
+
+
+def _statements(ran: list[dict[str, Any]], full_sql: list[str] | None) -> list[str]:
+    traced = [str(s.get("sql_text") or s.get("sql_hash") or "") for s in ran]
+    if not full_sql or len(full_sql) != len(traced):
+        return traced
+    return [full or t for full, t in zip(full_sql, traced, strict=True)]

@@ -226,3 +226,45 @@ def test_case_timeout_env_is_clamped():
 def test_eval_data_dir_env(tmp_path):
     assert L.eval_data_dir({L.ENV_DATA_DIR: str(tmp_path)}) == tmp_path
     assert L.eval_data_dir({}).name == "eval-live"
+
+
+class RecordingTracer:
+    def __init__(self) -> None:
+        self.spans: list[tuple[str, dict[str, Any]]] = []
+
+    def record(self, span_type, name=None, **fields):
+        self.spans.append((span_type, fields))
+
+
+LONG_SQL = "SELECT brand, SUM(sale_price) AS revenue FROM t WHERE brand = 'Acme'" + (
+    " AND sale_price > 1" * 60
+)
+
+
+def test_full_sql_capture_keeps_untruncated_sanitized_text_and_restores_record():
+    tracer = RecordingTracer()
+    with L._full_sql_capture(tracer) as full:
+        tracer.record("sql", "run_sql", status="ok", sql_text=LONG_SQL)
+        tracer.record("sql", "run_sql", status="error", sql_text="SELECT 2")
+        tracer.record("llm", "chat", sql_text="SELECT 3")
+    assert len(full) == 1 and len(full[0]) > 500
+    assert "'Acme'" not in full[0] and "?" in full[0] and "[truncated]" not in full[0]
+    assert len(tracer.spans) == 3  # the tracer still records every span
+    assert "record" not in vars(tracer)
+
+
+def test_full_sql_capture_is_bounded_and_tolerates_no_tracer():
+    tracer = RecordingTracer()
+    with L._full_sql_capture(tracer) as full:
+        for _ in range(L.MAX_FULL_SQL + 5):
+            tracer.record("sql", "run_sql", status="ok", sql_text="SELECT 1")
+    assert len(full) == L.MAX_FULL_SQL
+    with L._full_sql_capture(None) as none:
+        assert none == []
+
+
+def test_statements_prefer_full_text_only_when_counts_line_up():
+    ran = [{"sql_text": "SELECT a ...[truncated]"}, {"sql_hash": "h2"}]
+    assert L._statements(ran, ["SELECT a FROM t", ""]) == ["SELECT a FROM t", "h2"]
+    assert L._statements(ran, ["SELECT a FROM t"]) == ["SELECT a ...[truncated]", "h2"]
+    assert L._statements(ran, None) == ["SELECT a ...[truncated]", "h2"]
