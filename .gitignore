@@ -26,3 +26,7 @@ build/
 infra/langfuse/data/
 .env.*
 !.env.example
+
+# generated judge calibration records (iteration 30)
+evals/calibration/status.json
+evals/calibration/last_run.json
