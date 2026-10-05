@@ -20,6 +20,11 @@ session:
     - Key metrics
     - Insights
     - Action items
+# The report is seeded live, but "open report <id>" is a slash-command library action the
+# graph does not route to, and live ids are store-assigned hex, not R-DEMO-0001
+# (docs/process/iter-live1-seed-ods.md OD-2, OD-5).
+live:
+  skip: opening a saved report by id is a slash command the live graph does not route to, and live report ids are store-assigned
 expect:
   outcome: answered
   must_contain:

@@ -84,8 +84,15 @@ OPSFLEET_LLM_PROVIDER=lmstudio uv run python evals/run.py \
 provider override it uses Gemini, which counts against your quota. Live eval state (sessions,
 saved reports, quota, JSONL traces) goes to `OPSFLEET_EVAL_DATA_DIR` (default
 `<OPSFLEET_DATA_DIR or data>/eval-live`), never to your own CLI store. Each case is capped at
-8 turns and at `OPSFLEET_EVAL_CASE_TIMEOUT_S` seconds (default 600). Cases that seed saved
-reports, a persona or preferences fail with a clear reason. See `docs/process/iter40b-ods.md`.
+8 turns and at `OPSFLEET_EVAL_CASE_TIMEOUT_S` seconds (default 600), setup turns included.
+Each case runs as its own namespaced user (`<profile>.ev<tag>`), so saved reports, pending
+drafts and quota never carry over between cases or runs; Langfuse still shows the base profile.
+A case's `session:` seeds are applied through the real APIs: `saved_reports` through the report
+store (owned by the case profile, or by `owner`), `persona: formal|casual` through the persona
+apply path (audited, restored after the case), and `setup_turns` played as real turns that are
+not scored. `preferences` and unknown seeds fail with a clear reason. A case marked
+`live: {skip: <reason>}` reports n/a on a live run and still runs offline. See
+`docs/process/iter40b-ods.md` and `docs/process/iter-live1-seed-ods.md`.
 
 **Stale items.** A full `upload` lists the dataset items that no current (case, profile) run
 produces, for example items from before the profile matrix whose id has no `@<profile>`,

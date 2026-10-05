@@ -12,7 +12,9 @@ cancels its BigQuery job and its runtime is never reused.
 
 State lives in a dedicated data dir (``OPSFLEET_EVAL_DATA_DIR``, default
 ``<OPSFLEET_DATA_DIR or data>/eval-live``), so eval sessions, reports and quota never mix
-with the user's own store (OD-1 in docs/process/iter40b-ods.md).
+with the user's own store (OD-1 in docs/process/iter40b-ods.md). Inside it each case runs
+as a namespaced user (``<id>.ev<tag>``) with its ``session:`` seeds (saved reports, persona,
+setup turns) applied through the real APIs: see :mod:`evals.live_seed`.
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
+from evals import live_seed
 from evals.run import Case, CaseError, Harness, RunContext, SutResult
 
 log = logging.getLogger(__name__)
@@ -41,8 +44,8 @@ FLUSH_BOUND_S: Final = 5.0
 ENV_DATA_DIR: Final = "OPSFLEET_EVAL_DATA_DIR"
 ENV_CASE_TIMEOUT: Final = "OPSFLEET_EVAL_CASE_TIMEOUT_S"
 UNATTRIBUTED: Final = "unattributed"  # LLM calls the trace does not name a model for
-# Only `profile` is applied; other seeds (saved reports, persona, preferences) are not (OD-4).
-SUPPORTED_SESSION_KEYS: Final = frozenset({"profile"})
+# Seeds applied live (evals/live_seed.py); `preferences` is not (iteration 39 has no store).
+SUPPORTED_SESSION_KEYS: Final = live_seed.SUPPORTED_SESSION_KEYS
 
 
 def eval_data_dir(env: Mapping[str, str] | None = None) -> Path:
@@ -147,9 +150,7 @@ class LiveSut:
         from opsfleet_agent.config import ConfigError
         from opsfleet_agent.session import select_profile
 
-        extra = sorted(set(case.session) - SUPPORTED_SESSION_KEYS)
-        if extra:
-            raise CaseError(f"session seeds not supported by the live SUT: {extra}")
+        live_seed.check_session(case)
         try:
             return select_profile(self._bootstrapped().profiles, case.session.get("profile"))
         except ConfigError as exc:
@@ -166,8 +167,9 @@ class LiveSut:
         return self._executor
 
     def __call__(self, case: Case, ctx: RunContext) -> SutResult:
-        if len(case.turns) > MAX_TURNS_PER_CASE:
-            raise CaseError(f"{len(case.turns)} turns > cap {MAX_TURNS_PER_CASE}")
+        n_turns = len(case.turns) + len(live_seed.setup_turns(case))
+        if n_turns > MAX_TURNS_PER_CASE:
+            raise CaseError(f"{n_turns} turns > cap {MAX_TURNS_PER_CASE}")
         self.last_trace_ids = []
         box: dict[str, Any] = {}
         future = self._owner().submit(self._run_case, case, ctx, box)
@@ -183,15 +185,24 @@ class LiveSut:
         from opsfleet_agent.session import Session
 
         profile = self._profile(case)
-        runtime = self._entry(profile).runtime
+        setup = live_seed.setup_turns(case)
+        runtime = self._entry(profile).runtime  # one runtime per base profile
         box["runtime"] = runtime
         # A fresh id per run: the checkpointer never resumes an earlier run of this case.
-        session = Session(f"{ctx.session_id}-{uuid.uuid4().hex[:6]}", profile)
+        sid = f"{ctx.session_id}-{uuid.uuid4().hex[:6]}"
         tracer = getattr(runtime, "tracer", None)
-        if tracer is not None:
-            tracer.trace_dir = Path(ctx.trace_dir)
-            tracer.session_id = session.session_id
-        pairs = [self._turn(runtime, session, text) for text in case.turns]
+        with live_seed.seeded(runtime, case, profile, session_id=sid,
+                              data_dir=self.data_dir) as seed:  # fmt: skip
+            session = Session(sid, seed.profile)  # namespaced user: isolated rows and quota
+            if tracer is not None:
+                tracer.trace_dir = Path(ctx.trace_dir)
+                # setup turns trace to their own file, so their spans are not scored
+                tracer.session_id = f"setup-{uuid.uuid4().hex[:12]}"
+            for text in setup:
+                self._turn(runtime, session, text, seed.base_user_id)
+            if tracer is not None:
+                tracer.session_id = session.session_id
+            pairs = [self._turn(runtime, session, t, seed.base_user_id) for t in case.turns]
         results, ids = zip(*pairs, strict=True)
         return results, ids, (tracer.path if tracer is not None else None)
 
@@ -207,7 +218,8 @@ class LiveSut:
                 self._executor.shutdown(wait=False, cancel_futures=True)
             self._executor = None
 
-    def _turn(self, runtime: Any, session: Any, text: str) -> tuple[Any, str | None]:
+    def _turn(self, runtime: Any, session: Any, text: str,
+              user_id: str | None = None) -> tuple[Any, str | None]:  # fmt: skip
         turn_id = uuid.uuid4().hex[:12]
 
         def run() -> Any:
@@ -219,7 +231,7 @@ class LiveSut:
         traced = sink.traced(
             run,
             session_id=session.session_id,
-            user_id=session.profile.user_id,
+            user_id=user_id or session.profile.user_id,  # Langfuse: the base profile id
             turn_id=turn_id,
             question=text,
         )

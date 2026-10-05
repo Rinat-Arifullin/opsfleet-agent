@@ -54,6 +54,7 @@ CASE_KEYS = {
     "expect",
     "estimate",
     "skip",
+    "live",  # {skip: reason}: n/a against a live SUT only (the offline fake still runs)
     "fake",
     *matrix_mod.MATRIX_KEYS,  # D-160 profile matrix: profiles, profiles_reason, per_profile, ...
 }
@@ -81,6 +82,7 @@ class Case:
     estimate: dict[str, Any] | None = None
     skip: str | None = None
     fake: dict[str, Any] | None = None
+    live_skip: str | None = None  # `live: {skip: reason}`: n/a when run live, not offline
     # D-160 profile matrix (evals/profile_matrix.py); `profile` and `base_id` are set on the
     # expanded (case, profile) runs, the rest come from the YAML.
     profiles: list[str] | str | None = None
@@ -177,6 +179,14 @@ def _build_case(raw: dict[str, Any], case_id: str, suite: str, base_tags: list[s
     except matrix_mod.MatrixError as exc:
         raise CaseError(str(exc)) from None
     session = raw.get("session") or {}
+    live = raw.get("live")
+    if live is not None and (
+        not isinstance(live, dict)
+        or set(live) != {"skip"}
+        or not isinstance(live["skip"], str)
+        or not live["skip"].strip()
+    ):
+        raise CaseError(f"{case_id}: live must be {{skip: <reason>}}")
     return Case(
         id=case_id,
         suite=suite,
@@ -187,6 +197,7 @@ def _build_case(raw: dict[str, Any], case_id: str, suite: str, base_tags: list[s
         estimate=raw.get("estimate"),
         skip=raw.get("skip"),
         fake=raw.get("fake"),
+        live_skip=live["skip"].strip() if live else None,
         profiles=raw.get("profiles"),
         profiles_reason=raw.get("profiles_reason"),
         per_profile=raw.get("per_profile"),
@@ -295,7 +306,7 @@ def case_estimate(case: Case, roles: dict[str, str]) -> tuple[dict[str, int], in
 def estimate_requests(cases: list[Case], roles: dict[str, str]) -> Estimate:
     est = Estimate()
     for c in cases:
-        if c.skip:
+        if c.skip or c.live_skip:  # only called for live runs
             continue
         per_model, bq = case_estimate(c, roles)
         for m, n in per_model.items():
@@ -469,6 +480,10 @@ def run_case(
     )
     if case.skip:
         cr.status, cr.reasons = "na", [f"not applicable: {case.skip}"]
+        record.update(status="na", reasons=cr.reasons)
+        return cr, record, None
+    if case.live_skip and not offline:
+        cr.status, cr.reasons = "na", [f"not applicable live: {case.live_skip}"]
         record.update(status="na", reasons=cr.reasons)
         return cr, record, None
     checks: list[tuple[str, bool, str]] = []

@@ -139,6 +139,8 @@ def item_payload(case: Case, cases_dir: Path, dataset: str = DEFAULT_DATASET) ->
     }
     if case.skip:
         metadata["skip"] = case.skip
+    if case.live_skip:
+        metadata["live_skip"] = case.live_skip
     if case.known_brands:
         metadata["known_brands"] = list(case.known_brands)
     return {
@@ -172,6 +174,7 @@ def case_from_item(item: Any) -> Case:
         session=session,
         expect=dict(getattr(item, "expected_output", None) or {}),
         skip=meta.get("skip"),
+        live_skip=meta.get("live_skip"),
         known_brands=list(meta.get("known_brands") or []) or None,
         profile=meta.get("profile") or session.get("profile"),
         base_id=str(meta.get("base_case_id") or case_id),

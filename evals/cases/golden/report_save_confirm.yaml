@@ -10,6 +10,10 @@ tags:
 - multi_turn
 session:
   profile: analyst_a
+# Live report ids are uuid hex, so the `R-` check can only pass on the recorded fake
+# (docs/process/iter-live1-seed-ods.md OD-9).
+live:
+  skip: the R- id check matches the recorded fake only; live report ids are store-assigned uuid hex
 expect:
   outcome: answered
   must_contain:
