@@ -85,11 +85,10 @@ from opsfleet_agent.graph.fixed_replies import (
 )
 from opsfleet_agent.graph.grounding import check_grounding, extract_figures, merge_figures
 from opsfleet_agent.graph.intents import (
+    COMMENT_FALLBACK_TEXT,
     CUSTOMER_ID_NOTICE,
     asks_for_customer_pii,
-    is_comment_followup,
     is_customer_ranking_request,
-    is_memory_question,
     is_sql_request,
 )
 from opsfleet_agent.graph.llm import Limiters, LLMSuccess, LLMWrapper
@@ -177,10 +176,6 @@ PARTIAL_WITH_CONTEXT_TEXT: Final = (
     "I ran out of time for this question before I could check it against the data, so I "
     "have nothing new to add yet. My previous answer above still stands. You can ask a "
     "narrower follow-up, for example about one product or one period."
-)
-COMMENT_FALLBACK_TEXT: Final = (
-    "Noted. I can check that against the data if you like, for example the sales trend "
-    "over recent months or the return rate."
 )
 # D-157: router labels a customer-ranking request may get by mistake (the PII wording in the
 # router prompt); such a request is relabelled in code.
@@ -711,11 +706,6 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
         refusal: str | None = None
         if ctx.forced_label and rd.route != "refuse":  # iteration 17: "revise" stays a report
             update.update(label=ctx.forced_label, route="full")
-        elif rd.route != "refuse" and is_memory_question(decision.scrubbed):
-            # D-152: "do you see our previous messages?" gets the code-owned memory answer on
-            # the light path whatever the router said (no SQL, no analyst budget).
-            update.update(label="meta", route="light")
-            _record(ctx, "router", "intent", label="meta", route="light")
         elif rd.route != "refuse" and is_sql_request(decision.scrubbed):
             # D-151a: "show me the SQL" never shows SQL; the light path gives the code-owned
             # reply that describes the data used in business words (no analyst, no query).
@@ -794,9 +784,10 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
             # an analytic question. The original label is unknown: fail-open label (Deep).
             update.update(route="full", label="complex")
         elif _is_comment(state, a):
-            # D-152: a statement about the previous answer ("so it is worth promoting") gets one
-            # brief reply from that answer, not an analyst loop that spends the turn budget.
-            update["status"] = "comment"
+            # D-152/D-155: a statement about the previous answer ("so it is worth promoting",
+            # router label `comment`) gets one brief reply from that answer, not an analyst
+            # loop. With no previous answer the route stays light (static fallback text).
+            update.update(status="comment", route="full")
             _record(ctx, "router", "intent", label=state.get("label"), route="comment")
         return update
 
@@ -1211,14 +1202,23 @@ def _collect_figures(ctx: TurnContext, name: str, env: dict[str, Any]) -> None:
 
 
 def _is_comment(state: TurnState, a: AssembledContext) -> bool:
-    """D-152: an analytic-routed statement or opinion that follows an earlier answer in the
-    (scope-covered) history. A first message never qualifies: there is nothing to comment on."""
+    """D-152/D-155: a turn the router labelled ``comment`` that follows an earlier answer in
+    the (scope-covered) history. A first message never qualifies: there is nothing to comment
+    on, so the light path gives the static :data:`COMMENT_FALLBACK_TEXT`."""
     return (
-        state.get("route") == "full"
-        and state.get("label") in ("simple", "complex")
+        state.get("label") == "comment"
+        and state.get("route") == "light"
         and not a.resolved_clarification
         and _previous_answer(a) != ""
-        and is_comment_followup(a.message)
+    )
+
+
+def _has_answer_history(state: TurnState) -> bool:
+    """True when the session history holds an assistant message (cheap pre-check; the
+    scope filter and the D-156 marker check run in load_context)."""
+    return any(
+        isinstance(m, Mapping) and m.get("role") == "assistant"
+        for m in state.get("history") or []
     )
 
 
@@ -1432,7 +1432,12 @@ def _after_guard(state: TurnState) -> str:
         # R2-M1(a): a reply to a pending clarification ("1") must reach load_context even when
         # the router calls it light; load_context sends it back to light if it does not resolve.
         pending = SessionMemory.from_state(state.get("memory")).pending_clarification
-        return "load_context" if pending is not None else "light"
+        if pending is not None:
+            return "load_context"
+        # D-155: a `comment` after an answer needs the history for its brief reply (D-152).
+        if state.get("label") == "comment" and _has_answer_history(state):
+            return "load_context"
+        return "light"
     return "load_context"
 
 
@@ -1440,8 +1445,8 @@ def _after_context(state: TurnState) -> str:
     # TODO(14b/15/17): report -> writer/verifier/confirm_save, library -> library agent.
     if _errored(state) or state.get("route") == "clarify":
         return "finalize"
-    if state.get("route") == "light":  # pending clarification not resolved (R2-M1)
-        return "light"
+    if state.get("route") == "light":  # pending clarification not resolved (R2-M1), or a
+        return "light"  # `comment` with no previous answer in the scope-covered history
     if state.get("status") == "comment":  # D-152: one brief reply, no analyst loop
         return "force_answer"
     return "quick" if state.get("label") == "simple" else "deep"

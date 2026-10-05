@@ -98,7 +98,7 @@ def test_golden_brands_only_from_profiles(cases):
 
 def test_router_set(cases):
     router = _router(cases)
-    assert 45 <= len(router) <= 60
+    assert 45 <= len(router) <= 70
     labels = Counter(c.expect["label"] for c in router.values())
     assert set(labels) == set(LABELS)
     for cid, c in router.items():
@@ -108,6 +108,15 @@ def test_router_set(cases):
     tags = Counter(t for c in router.values() for t in c.tags)
     assert tags["borderline"] >= 3
     assert tags["keyword_trap"] >= 2
+    # D-155: memory and comment have English and at least two non-English cases each
+    for label in ("memory", "comment"):
+        of_label = [c for c in router.values() if c.expect["label"] == label]
+        assert sum("non_english" in c.tags for c in of_label) >= 2, label
+        assert any("non_english" not in c.tags for c in of_label), label
+    # negatives: a comment with a question, and "remember" about data, are data questions
+    for tag in ("comment_question", "memory_trap"):
+        negatives = [c for c in router.values() if tag in c.tags]
+        assert negatives and all(c.expect["label"] in {"simple", "complex"} for c in negatives)
     # keyword traps are normal data questions, never injection
     for c in router.values():
         if "keyword_trap" in c.tags:

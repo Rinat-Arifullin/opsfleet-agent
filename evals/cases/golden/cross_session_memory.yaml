@@ -1,6 +1,8 @@
 # golden/cross_session_memory (AC-22.2). Synthetic; no live figures are hard-coded.
 # Offline `fake` is the recorded result; a live run uses the real SUT.
 # Session starts empty (fresh session for the profile).
+# D-155: the router may label this `memory` (code-owned MEMORY_TEXT: "I don't keep chat history
+# between sessions; saved reports stay in your library"), so the check is wording-neutral.
 input: what did we discuss yesterday?
 tags:
 - light
@@ -11,7 +13,7 @@ expect:
   outcome: answered
   no_sql: true
   must_contain:
-  - do not carry
+  - between sessions
   - saved reports
   judge:
     min_score: 4

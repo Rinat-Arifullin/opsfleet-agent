@@ -1,64 +1,77 @@
-"""D-152: memory-question and comment-follow-up intents (offline, fake LLMs, synthetic text)."""
+"""D-152/D-155: the `memory` and `comment` router labels (offline, fake LLMs, synthetic text).
+
+D-155 removed the English-only regex detectors: the router labels these turns in any
+language, and the graph answers them with the code-owned texts."""
 
 from __future__ import annotations
 
 import dataclasses
+import json
 from typing import Any
 
 import pytest
 
 from opsfleet_agent.graph import graph as gr
+from opsfleet_agent.graph import intents
 from opsfleet_agent.graph.context import HISTORY_TURNS
-from opsfleet_agent.graph.intents import (
-    MAX_INTENT_CHARS,
-    MEMORY_TEXT,
-    is_comment_followup,
-    is_memory_question,
-)
+from opsfleet_agent.graph.fixed_replies import FIXED_KEY
+from opsfleet_agent.graph.intents import COMMENT_FALLBACK_TEXT, MEMORY_TEXT
 from opsfleet_agent.graph.llm import LLMResponse
+from opsfleet_agent.guards.input import NON_ENGLISH, refusal_for
 from opsfleet_agent.roles.analyst import ModelTurn
 from opsfleet_agent.roles.light_path import CAPABILITIES_TEXT
-from tests.unit.test_graph import SIMPLE, Router, Scripted, sql_call
+from opsfleet_agent.roles.router import LABELS, LIGHT_LABELS
+from tests.unit.test_graph import SIMPLE, Router, Scripted, SeqRouter, _state, sql_call
 from tests.unit.test_graph import detector as detector  # noqa: F401  (fixture)
 from tests.unit.test_graph import make_env as make_env  # noqa: F401  (fixture)
 from tests.unit.test_graph import settings as settings  # noqa: F401  (fixture)
 from tests.unit.test_reports import TurnRouter
 
 ANSWER = "There were 3 complete orders."  # synthetic previous answer (grounded by SIMPLE)
-COMMENT_ROUTE = ("router", "intent", {"label": "simple", "route": "comment"})
-
-# --- pure intent checks ---
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "Do you see previous messages in our session?",
-        "can you remember our earlier conversation",
-        "Do you have memory?",
-        "do you remember what I asked",
-        "Is our chat saved?",
-        "How many messages do you remember?",
-        "DO YOU SEE THE PREVIOUS MESSAGES?",
-    ],
-)
-def test_memory_question_detected(text: str) -> None:
-    assert is_memory_question(text)
+COMMENT_ROUTE = ("router", "intent", {"label": "comment", "route": "comment"})
+MEMORY_QUESTIONS = [
+    "Do you see previous messages in our session?",
+    "Is our chat saved?",
+]
+COMMENTS = ["So it is worth promoting this category", "I think that brand deserves more stock"]
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        "Do you remember the revenue for 2023?",
-        "can you see previous orders for Acme",
-        "show me the top products",
-        "hello",
-        "",
-        "do you see previous messages " * 20,  # over MAX_INTENT_CHARS
-    ],
-)
-def test_memory_question_not_detected(text: str) -> None:
-    assert not is_memory_question(text)
+class LangRouter:
+    """Labels every turn with ``label`` and the given ``is_english`` flag."""
+
+    def __init__(self, label: str, *, is_english: bool = True) -> None:
+        self.label, self.is_english = label, is_english
+        self.calls: list[Any] = []
+
+    def __call__(self, model, messages, timeout):
+        self.calls.append((model, list(messages)))
+        body = {"label": self.label, "is_english": self.is_english, "refusal_text": None}
+        return LLMResponse(json.dumps(body), 5, 5)
+
+
+class BrokenRouter:
+    """Router outage: every call returns text that is not the JSON contract."""
+
+    def __init__(self) -> None:
+        self.calls: list[Any] = []
+
+    def __call__(self, model, messages, timeout):
+        self.calls.append((model, list(messages)))
+        return LLMResponse("I think this is a memory question.", 5, 5)
+
+
+# --- labels and texts ---
+
+
+def test_memory_and_comment_are_light_labels() -> None:
+    assert {"memory", "comment"} <= set(LABELS)
+    assert {"memory", "comment"} <= LIGHT_LABELS
+
+
+def test_regex_detectors_are_gone() -> None:
+    assert not hasattr(intents, "is_memory_question")
+    assert not hasattr(intents, "is_comment_followup")
+    assert gr.COMMENT_FALLBACK_TEXT is COMMENT_FALLBACK_TEXT  # one definition, two names
 
 
 def test_memory_text_derives_turn_count() -> None:
@@ -66,57 +79,60 @@ def test_memory_text_derives_turn_count() -> None:
     assert not any(ch.isdigit() for ch in MEMORY_TEXT.replace(str(HISTORY_TURNS), ""))
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        "So it is worth promoting this category",
-        "I think that brand deserves more stock",
-        "Looks like a good candidate for a discount.",
-        "interesting, definitely worth a campaign",
-    ],
-)
-def test_comment_detected(text: str) -> None:
-    assert is_comment_followup(text)
+# --- `memory`: the code-owned answer on the light path ---
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        "Is it worth promoting?",
-        "show me the sales for last year",
-        "and for 2023",
-        "compare it with the previous year, I think it is worth it",
-        "what about returns",
-        "count orders",
-        "",
-        "worth " * (MAX_INTENT_CHARS // 5 + 1),
-    ],
-)
-def test_comment_not_detected(text: str) -> None:
-    assert not is_comment_followup(text)
-
-
-# --- Issue A: the memory question gets the code-owned answer on the light path ---
-
-
-@pytest.mark.parametrize("label", ["meta", "smalltalk", "simple", "complex"])
-def test_memory_question_answers_static_text(make_env, label: str) -> None:  # noqa: F811
-    env = make_env(Router(label), Scripted(ModelTurn("unused")))
-    out = env.ask("Do you see previous messages in our session?")
-    assert out.route == "light" and out.text == MEMORY_TEXT
-    assert str(HISTORY_TURNS) in out.text and CAPABILITIES_TEXT not in out.text
+@pytest.mark.parametrize("text", MEMORY_QUESTIONS)
+def test_memory_label_answers_static_text(make_env, text: str) -> None:  # noqa: F811
+    env = make_env(Router("memory"), Scripted(ModelTurn("unused")))
+    out = env.ask(text)
+    assert out.route == "light" and out.label == "memory" and out.text == MEMORY_TEXT
+    assert CAPABILITIES_TEXT not in out.text
     assert env.analyst.calls == [] and len(env.router.calls) == 1  # router only, no light call
-    if label not in ("meta", "smalltalk"):
-        assert ("router", "intent", {"label": "meta", "route": "light"}) in env.spans
+    reply = _state(env)["history"][-1]
+    assert reply["role"] == "assistant" and reply[FIXED_KEY] == "memory"
+
+
+def test_memory_label_after_an_answer_still_static(make_env) -> None:  # noqa: F811
+    env = make_env(SeqRouter("simple", "memory"), Scripted(sql_call(SIMPLE), ModelTurn(ANSWER)))
+    env.ask("How many complete orders are there?")
+    calls_before = len(env.analyst.calls)
+    out = env.ask("Do you remember what I asked?")
+    assert out.text == MEMORY_TEXT and len(env.analyst.calls) == calls_before
+
+
+def test_data_question_about_remembering_is_not_memory(make_env) -> None:  # noqa: F811
+    # "Do you remember the revenue for 2023?" is labelled simple by the router: analyst loop.
+    env = make_env(Router("simple"), Scripted(sql_call(SIMPLE), ModelTurn(ANSWER)))
+    out = env.ask("Do you remember the revenue for 2023?")
+    assert out.text != MEMORY_TEXT and ANSWER in out.text
+    assert [c for c in env.analyst.calls if c[2] > 0]
+
+
+def test_non_english_memory_question_is_refused(make_env) -> None:  # noqa: F811
+    # FR-17 runs before the label: a non-English memory question gets the language refusal.
+    env = make_env(LangRouter("memory", is_english=False), Scripted(ModelTurn("unused")))
+    out = env.ask("Ты помнишь наш разговор?")
+    assert out.outcome == "refused" and out.text == refusal_for(NON_ENGLISH)
+    assert MEMORY_TEXT not in out.text and env.analyst.calls == []
+
+
+def test_router_outage_fails_open_not_memory(make_env) -> None:  # noqa: F811
+    env = make_env(BrokenRouter(), Scripted(ModelTurn(ANSWER)))
+    out = env.ask("Do you see previous messages in our session?")
+    assert out.label == "complex" and out.route == "full"
+    assert out.text != MEMORY_TEXT and COMMENT_FALLBACK_TEXT not in out.text
+    assert 1 <= len(env.router.calls) <= 3  # bounded
 
 
 def test_capabilities_question_unchanged(make_env) -> None:  # noqa: F811
     env = make_env(Router("meta"))
     out = env.ask("What can you do?")
     assert out.route == "light" and out.text.startswith(CAPABILITIES_TEXT)
+    assert MEMORY_TEXT not in out.text
 
 
-# --- Issue B: a comment after an answer gets one brief reply from that answer ---
+# --- `comment`: one brief reply from the previous answer ---
 
 
 class CommentModel(Scripted):
@@ -137,14 +153,17 @@ def _force_calls(env) -> list[Any]:
     return [c for c in env.analyst.calls if c[2] == 0]
 
 
-def test_comment_gets_one_reply_from_previous_answer(make_env) -> None:  # noqa: F811
-    env = make_env(TurnRouter("simple"), CommentModel())
+@pytest.mark.parametrize("text", COMMENTS)
+def test_comment_gets_one_reply_from_previous_answer(make_env, text: str) -> None:  # noqa: F811
+    router = TurnRouter("simple")
+    env = make_env(router, CommentModel())
     first = env.ask("How many complete orders are there?")
     assert first.outcome == "answered" and ANSWER in first.text
     calls_before = len(env.analyst.calls)
 
-    out = env.ask("So it is worth promoting this category")
-    assert out.outcome == "answered" and "return rate" in out.text
+    router.label = "comment"
+    out = env.ask(text)
+    assert out.outcome == "answered" and "return rate" in out.text and out.label == "comment"
     assert len(env.analyst.calls) - calls_before == 1 and len(_force_calls(env)) == 1
     assert out.sql_queries == 0  # no SQL for a comment
     msgs = _force_calls(env)[0][1]
@@ -154,27 +173,41 @@ def test_comment_gets_one_reply_from_previous_answer(make_env) -> None:  # noqa:
 
 
 def test_comment_fallback_when_reply_fails(make_env) -> None:  # noqa: F811
-    env = make_env(TurnRouter("simple"), CommentModel(reply=""))
+    router = TurnRouter("simple")
+    env = make_env(router, CommentModel(reply=""))
     env.ask("How many complete orders are there?")
+    router.label = "comment"
     out = env.ask("I think that deserves a campaign")
-    assert out.text == gr.COMMENT_FALLBACK_TEXT and gr.UNAVAILABLE_TEXT not in out.text
+    assert out.text == COMMENT_FALLBACK_TEXT and gr.UNAVAILABLE_TEXT not in out.text
 
 
-def test_statement_without_previous_answer_takes_normal_path(make_env) -> None:  # noqa: F811
-    env = make_env(TurnRouter("simple"), CommentModel())
-    env.ask("So it is worth promoting this category")
-    assert COMMENT_ROUTE not in env.spans
-    assert [c for c in env.analyst.calls if c[2] > 0]  # the analyst loop ran
+def test_comment_without_previous_answer_gets_static_text(make_env) -> None:  # noqa: F811
+    env = make_env(TurnRouter("comment"), CommentModel())
+    out = env.ask("So it is worth promoting this category")
+    assert out.route == "light" and out.text == COMMENT_FALLBACK_TEXT
+    assert env.analyst.calls == [] and COMMENT_ROUTE not in env.spans
+    reply = _state(env)["history"][-1]
+    assert reply[FIXED_KEY] == "comment_fallback"
+
+
+def test_non_english_comment_is_refused(make_env) -> None:  # noqa: F811
+    env = make_env(LangRouter("comment", is_english=False), CommentModel())
+    out = env.ask("Похоже, эту категорию стоит продвигать")
+    assert out.outcome == "refused" and out.text == refusal_for(NON_ENGLISH)
+    assert env.analyst.calls == []
 
 
 def test_question_after_answer_is_not_a_comment(make_env) -> None:  # noqa: F811
+    # A comment that holds a question is labelled simple/complex by the router: analyst loop.
     env = make_env(TurnRouter("simple"), CommentModel())
     env.ask("How many complete orders are there?")
-    env.ask("Is it worth promoting?")
-    assert not [s for s in env.spans if s[:2] == ("router", "intent")]
+    calls_before = len(env.analyst.calls)
+    env.ask("Interesting, and what about 2023?")
+    assert COMMENT_ROUTE not in env.spans
+    assert [c for c in env.analyst.calls[calls_before:] if c[2] > 0]
 
 
-# --- Issue B: a budget-hit follow-up prefers the partial text with context ---
+# --- a budget-hit follow-up prefers the partial text with context ---
 
 
 class SlowModel(CommentModel):

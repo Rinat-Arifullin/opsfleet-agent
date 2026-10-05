@@ -52,7 +52,7 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 ROUTER_ROLE: Final = "router"
-ROUTER_PROMPT_VERSION: Final = "router-v1"
+ROUTER_PROMPT_VERSION: Final = "router-v2"
 ROUTER_PROMPT_PATH: Final = Path(__file__).resolve().parents[3] / "prompts" / "router.md"
 
 LABELS: Final = (
@@ -62,10 +62,14 @@ LABELS: Final = (
     "library",
     "meta",
     "smalltalk",
+    "memory",
+    "comment",
     "off_topic",
     "injection",
 )
-LIGHT_LABELS: Final = frozenset({"meta", "smalltalk"})
+# D-155: `memory` (does the agent remember the conversation?) and `comment` (an opinion about
+# the previous answer) are router labels, not English-only regex checks.
+LIGHT_LABELS: Final = frozenset({"meta", "smalltalk", "memory", "comment"})
 FULL_LABELS: Final = frozenset({"simple", "complex", "report", "library"})
 FAIL_OPEN_LABEL: Final = "complex"
 

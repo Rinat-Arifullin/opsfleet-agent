@@ -1,10 +1,13 @@
-"""Light path for ``smalltalk`` and ``meta`` turns (FR-71, ADR-010, HLD §4.1, §4.5).
+"""Light path for ``smalltalk``, ``meta``, ``memory`` and ``comment`` turns (FR-71, ADR-010).
 
 * No SQL, no embedding, no Golden retrieval, no history: this module takes no BigQuery,
   embedding or store dependency, and the reply prompt holds the current message only.
 * ``meta`` (help, capabilities) is answered from static text plus the user's scope with no
-  model call (AC-11.6). A question about the agent's conversation memory (either light label)
-  gets the static :data:`MEMORY_TEXT` instead, also with no model call (D-152).
+  model call (AC-11.6). The router labels (D-155) a question about the agent's conversation
+  memory ``memory`` and an opinion about an answer ``comment``: they get the static
+  :data:`MEMORY_TEXT` and :data:`COMMENT_FALLBACK_TEXT`, also with no model call. The graph
+  sends a ``comment`` that follows an answer to its brief contextual reply instead (D-152), so
+  this module answers a ``comment`` only when there is no previous answer.
   ``smalltalk`` makes at most one ``light_reply`` call on the cheap model with prompt layers
   1 (safety core), 3 (scope) and 4 (persona) only.
 * The output guard runs on every reply (the input guard ran before the router).
@@ -22,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any, Final, Literal
 
 from opsfleet_agent.graph.budget import TURN_CAPS, TurnKind
-from opsfleet_agent.graph.intents import MEMORY_TEXT, is_memory_question
+from opsfleet_agent.graph.intents import COMMENT_FALLBACK_TEXT, MEMORY_TEXT
 from opsfleet_agent.graph.llm import LLMSuccess, LLMWrapper
 from opsfleet_agent.guards.output import (
     MIN_PROTECTED_SNIPPET_CHARS,
@@ -45,6 +48,7 @@ from opsfleet_agent.session import Profile
 
 __all__ = [
     "CAPABILITIES_TEXT",
+    "COMMENT_FALLBACK_TEXT",
     "GREETING_TEMPLATE",
     "LIGHT_ROLE",
     "MEMORY_TEXT",
@@ -74,6 +78,9 @@ GREETING_TEMPLATE: Final = (
     "Hello! I can help you analyse the store's e-commerce data, for example revenue, "
     "top products or customer trends. What would you like to look at?"
 )
+
+# D-155: code-owned replies for the router labels that need no model call.
+LABEL_TEXTS: Final = {"memory": MEMORY_TEXT, "comment": COMMENT_FALLBACK_TEXT}
 
 _LIGHT_RULES: Final = (
     "You are replying to a greeting, thanks or other small talk. Reply in one to three "
@@ -129,23 +136,24 @@ def run_light_path(
     tracer: Any = None,
     static_reply: str | None = None,
 ) -> LightResult:
-    """Answer a ``smalltalk`` or ``meta`` turn. ``tool_calls`` are the tool names recorded in
-    this turn so far (expected empty); the output guard blocks the answer if any is present.
+    """Answer a light-label turn (``smalltalk``, ``meta``, ``memory``, ``comment``).
+
+    ``tool_calls`` are the tool names recorded in this turn so far (expected empty); the
+    output guard blocks the answer if any is present.
 
     ``static_reply`` (D-151a) is a code-owned answer built by the caller, e.g. the reply to
     "show me the SQL": it is used instead of the model and of the capabilities text."""
     if label not in LIGHT_LABELS:
-        raise ValueError("run_light_path only handles smalltalk and meta")
+        raise ValueError("run_light_path only handles the light labels")
     calls_before = llm.budget.calls
     # The scope line is appended after the guard: it is code-built from the trusted profile,
     # and the NER would mask brand names that look like people without the catalogue allowlist.
-    memory = is_memory_question(message.text)  # D-152: code-owned answer, either light label
     static = static_reply if isinstance(static_reply, str) and static_reply.strip() else None
-    suffix = f"\n\n{_scope_text(profile)}" if label == "meta" and not (memory or static) else ""
+    suffix = f"\n\n{_scope_text(profile)}" if label == "meta" and static is None else ""
     if static is not None:
         draft, source = static, "static"
-    elif memory:
-        draft, source = MEMORY_TEXT, "static"
+    elif label in LABEL_TEXTS:  # D-155: router label, code-owned answer
+        draft, source = LABEL_TEXTS[label], "static"
     elif label == "meta":
         draft, source = CAPABILITIES_TEXT, "static"
     else:
@@ -161,7 +169,7 @@ def run_light_path(
     )
     codes = frozenset(verdict.codes())
     if verdict.allowed and not verdict.text.strip():  # e.g. "<b></b>": nothing left to show
-        text, source = _template(label, profile, memory, static), "template"
+        text, source = _template(label, profile, static), "template"
     elif verdict.allowed:
         body = verdict.text
         if source == "model":  # D-151: model-written text only, after the guard allowed it
@@ -175,7 +183,7 @@ def run_light_path(
     elif UNEXPECTED_ACTION in codes:  # the turn did something it must not: fail closed
         text, source = verdict.text, "blocked"
     else:  # e.g. the model echoed instructions: a code-written reply is always safe
-        text, source = _template(label, profile, memory, static), "template"
+        text, source = _template(label, profile, static), "template"
 
     result = LightResult(text, label, source, llm.budget.calls - calls_before, codes)
     if tracer is not None:
@@ -197,11 +205,11 @@ def run_light_path(
     return result
 
 
-def _template(label: str, profile: Profile, memory: bool = False, static: str | None = None) -> str:
+def _template(label: str, profile: Profile, static: str | None = None) -> str:
     if static is not None:  # D-151a: the guard did not pass the reply: the fixed short text
         return SQL_NOT_SHOWN_TEXT
-    if memory:
-        return MEMORY_TEXT
+    if label in LABEL_TEXTS:
+        return LABEL_TEXTS[label]
     if label == "meta":
         return f"{CAPABILITIES_TEXT}\n\n{_scope_text(profile)}"
     return GREETING_TEMPLATE
