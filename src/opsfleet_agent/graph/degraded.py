@@ -38,9 +38,11 @@ from opsfleet_agent.graph.budget import PartialAnswer
 from opsfleet_agent.graph.graph import _DELETE_RE as _GRAPH_DELETE_RE
 from opsfleet_agent.graph.graph import _REVISE_RE as _GRAPH_REVISE_RE
 from opsfleet_agent.graph.graph import (
+    COMMENT_FALLBACK_TEXT,
     CONFIRM_NODE,
     ERROR_TEXT,
     NOT_SAVED_TEXT,
+    PARTIAL_WITH_CONTEXT_TEXT,
     REVISING_TEXT,
     UNAVAILABLE_TEXT,
     AgentGraph,
@@ -81,7 +83,13 @@ QUOTA_DRAFT_KEPT_NOTICE: Final = "Your report draft is still pending: reply save
 _STATUS_PREFIXES: Final = (NOT_SAVED_TEXT, REVISING_TEXT)
 _CUT_SHORT: Final = frozenset({"answered", "error"})
 # the graph's own failure texts: nothing of value is lost when the quota text replaces them
-_GENERIC_TEXTS: Final = (ERROR_TEXT, UNAVAILABLE_TEXT, PartialAnswer(reason="").message)
+_GENERIC_TEXTS: Final = (
+    ERROR_TEXT,
+    UNAVAILABLE_TEXT,
+    PARTIAL_WITH_CONTEXT_TEXT,  # D-152 budget-hit template
+    COMMENT_FALLBACK_TEXT,  # D-152 comment reply template
+    PartialAnswer(reason="").message,
+)
 
 
 class QuotaExceeded(NonRetryableLLMError):

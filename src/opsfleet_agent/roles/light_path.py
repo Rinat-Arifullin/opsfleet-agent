@@ -3,8 +3,10 @@
 * No SQL, no embedding, no Golden retrieval, no history: this module takes no BigQuery,
   embedding or store dependency, and the reply prompt holds the current message only.
 * ``meta`` (help, capabilities) is answered from static text plus the user's scope with no
-  model call (AC-11.6). ``smalltalk`` makes at most one ``light_reply`` call on the cheap model
-  with prompt layers 1 (safety core), 3 (scope) and 4 (persona) only.
+  model call (AC-11.6). A question about the agent's conversation memory (either light label)
+  gets the static :data:`MEMORY_TEXT` instead, also with no model call (D-152).
+  ``smalltalk`` makes at most one ``light_reply`` call on the cheap model with prompt layers
+  1 (safety core), 3 (scope) and 4 (persona) only.
 * The output guard runs on every reply (the input guard ran before the router).
 * Any failure gives a templated reply; nothing here raises for provider errors.
 
@@ -20,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Final, Literal
 
 from opsfleet_agent.graph.budget import TURN_CAPS, TurnKind
+from opsfleet_agent.graph.intents import MEMORY_TEXT, is_memory_question
 from opsfleet_agent.graph.llm import LLMSuccess, LLMWrapper
 from opsfleet_agent.guards.output import (
     MIN_PROTECTED_SNIPPET_CHARS,
@@ -41,6 +44,7 @@ __all__ = [
     "CAPABILITIES_TEXT",
     "GREETING_TEMPLATE",
     "LIGHT_ROLE",
+    "MEMORY_TEXT",
     "LightResult",
     "build_light_messages",
     "run_light_path",
@@ -128,8 +132,11 @@ def run_light_path(
     calls_before = llm.budget.calls
     # The scope line is appended after the guard: it is code-built from the trusted profile,
     # and the NER would mask brand names that look like people without the catalogue allowlist.
-    suffix = f"\n\n{_scope_text(profile)}" if label == "meta" else ""
-    if label == "meta":
+    memory = is_memory_question(message.text)  # D-152: code-owned answer, either light label
+    suffix = f"\n\n{_scope_text(profile)}" if label == "meta" and not memory else ""
+    if memory:
+        draft, source = MEMORY_TEXT, "static"
+    elif label == "meta":
         draft, source = CAPABILITIES_TEXT, "static"
     else:
         draft, source = _light_reply(message, profile, persona, llm, model, invoke, fallback_model)
@@ -144,7 +151,7 @@ def run_light_path(
     )
     codes = frozenset(verdict.codes())
     if verdict.allowed and not verdict.text.strip():  # e.g. "<b></b>": nothing left to show
-        text, source = _template(label, profile), "template"
+        text, source = _template(label, profile, memory), "template"
     elif verdict.allowed:
         body = verdict.text
         if source == "model":  # D-151: model-written text only, after the guard allowed it
@@ -155,7 +162,7 @@ def run_light_path(
     elif UNEXPECTED_ACTION in codes:  # the turn did something it must not: fail closed
         text, source = verdict.text, "blocked"
     else:  # e.g. the model echoed instructions: a code-written reply is always safe
-        text, source = _template(label, profile), "template"
+        text, source = _template(label, profile, memory), "template"
 
     result = LightResult(text, label, source, llm.budget.calls - calls_before, codes)
     if tracer is not None:
@@ -177,7 +184,9 @@ def run_light_path(
     return result
 
 
-def _template(label: str, profile: Profile) -> str:
+def _template(label: str, profile: Profile, memory: bool = False) -> str:
+    if memory:
+        return MEMORY_TEXT
     if label == "meta":
         return f"{CAPABILITIES_TEXT}\n\n{_scope_text(profile)}"
     return GREETING_TEMPLATE

@@ -77,6 +77,7 @@ from opsfleet_agent.graph.context import (
     tag_scope,
 )
 from opsfleet_agent.graph.grounding import check_grounding, extract_figures, merge_figures
+from opsfleet_agent.graph.intents import is_comment_followup, is_memory_question
 from opsfleet_agent.graph.llm import Limiters, LLMSuccess, LLMWrapper
 from opsfleet_agent.graph.memory import SessionMemory
 from opsfleet_agent.guards.input import check_input
@@ -149,10 +150,30 @@ UNAVAILABLE_TEXT: Final = (
     "I could not complete the analysis within the limits for one question. "
     "Please try a narrower question."
 )
+# D-152: the budget-hit template when the force answer could not run but an earlier answer in
+# this session is in context: point back to it instead of a bare "could not complete".
+PARTIAL_WITH_CONTEXT_TEXT: Final = (
+    "I ran out of time for this question before I could check it against the data, so I "
+    "have nothing new to add yet. My previous answer above still stands. You can ask a "
+    "narrower follow-up, for example about one product or one period."
+)
+COMMENT_FALLBACK_TEXT: Final = (
+    "Noted. I can check that against the data if you like, for example the sales trend "
+    "over recent months or the return rate."
+)
+MAX_PREVIOUS_ANSWER_CHARS: Final = 1500  # the force answer sees one earlier answer, trimmed
 _FORCE_RULES: Final = (
     "The analysis was cut short. Write a brief answer for the user that says what was "
-    "found, if anything, and what is missing. Use only the queries listed below. "
+    "found, if anything, and what is missing. Use only the queries listed below and the "
+    "previous answer, if one is given. "
     "Do not state any number you were not given. Do not call tools."
+)
+_COMMENT_RULES: Final = (
+    "The user made a comment or stated an opinion about your previous answer; it is not a "
+    "new data request. Reply in two to four short sentences: agree, or add a caveat, using "
+    "only the previous answer and the user's message, then suggest one concrete check you "
+    "could run on the data. Do not state any number that is not in the previous answer or "
+    "the user's message. Do not call tools."
 )
 _QA_ROLE_SUBCAPS: Final = {**LIGHT_ROLE_SUBCAPS, QUICK: 6, DEEP: 6, FORCE_ANSWER_ROLE: 1}
 # iteration 17: a report turn runs under the REPORT caps (14 calls, 180 s) + writer/verifier subcaps
@@ -643,6 +664,11 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
         update.update(label=rd.label, route=rd.route, is_english=rd.is_english)
         if ctx.forced_label and rd.route != "refuse":  # iteration 17: "revise" stays a report
             update.update(label=ctx.forced_label, route="full")
+        elif rd.route != "refuse" and is_memory_question(decision.scrubbed):
+            # D-152: "do you see our previous messages?" gets the code-owned memory answer on
+            # the light path whatever the router said (no SQL, no analyst budget).
+            update.update(label="meta", route="light")
+            _record(ctx, "router", "intent", label="meta", route="light")
         if rd.route == "refuse":
             update.update(final_text=rd.refusal_text or REFUSAL_TEXT, outcome="refused")
         return update
@@ -688,6 +714,11 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
             # R2-M1: "1" after a clarification is routed light by the router, but it completes
             # an analytic question. The original label is unknown: fail-open label (Deep).
             update.update(route="full", label="complex")
+        elif _is_comment(state, a):
+            # D-152: a statement about the previous answer ("so it is worth promoting") gets one
+            # brief reply from that answer, not an analyst loop that spends the turn budget.
+            update["status"] = "comment"
+            _record(ctx, "router", "intent", label=state.get("label"), route="comment")
         return update
 
     def _assemble(
@@ -762,8 +793,10 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
     def force_answer(state: TurnState) -> dict[str, Any]:
         if state.get("status") == "ok":
             return {}
-        text = _force_text(ctx, state)
-        return {"draft": text, "role": FORCE_ANSWER_ROLE, "status": "partial"}
+        comment = state.get("status") == "comment"
+        text = _force_text(ctx, state, _previous_answer(_assembled(state)), comment=comment)
+        status = "comment" if comment else "partial"
+        return {"draft": text, "role": FORCE_ANSWER_ROLE, "status": status}
 
     def grounding(state: TurnState) -> dict[str, Any]:
         scope = ctx.sql_session.scope
@@ -1082,27 +1115,58 @@ def _collect_figures(ctx: TurnContext, name: str, env: dict[str, Any]) -> None:
     ctx.new_figures.append(extract_figures(str(data.get("query_id", "")), names, matrix))
 
 
-def _force_text(ctx: TurnContext, state: TurnState) -> str:
-    """One bounded force_answer LLM call; the deterministic template when it is not possible."""
+def _is_comment(state: TurnState, a: AssembledContext) -> bool:
+    """D-152: an analytic-routed statement or opinion that follows an earlier answer in the
+    (scope-covered) history. A first message never qualifies: there is nothing to comment on."""
+    return (
+        state.get("route") == "full"
+        and state.get("label") in ("simple", "complex")
+        and not a.resolved_clarification
+        and _previous_answer(a) != ""
+        and is_comment_followup(a.message)
+    )
+
+
+def _previous_answer(a: AssembledContext) -> str:
+    """The latest assistant answer in the assembled (scope-filtered) history, trimmed."""
+    for m in reversed(a.history):
+        if m.get("role") == "assistant" and str(m.get("content") or "").strip():
+            return str(m["content"]).strip()[:MAX_PREVIOUS_ANSWER_CHARS]
+    return ""
+
+
+def _force_text(
+    ctx: TurnContext, state: TurnState, previous: str = "", *, comment: bool = False
+) -> str:
+    """One bounded force_answer LLM call; the deterministic template when it is not possible.
+
+    ``previous`` is the latest earlier answer (D-152): the force answer and the comment reply
+    see it, so a follow-up cut short can still build on what was already said."""
     ledger = ctx.sql_turn.ledger
     summary = "\n".join(f"- {q.get('purpose', '')} ({q.get('rows', 0)} rows)" for q in ledger)
-    template = UNAVAILABLE_TEXT + (f"\n\nQueries run:\n{summary}" if summary else "")
-    fa = ctx.budget.force_answer(None, state.get("error_class") or "role_failed")
+    if comment:
+        template = COMMENT_FALLBACK_TEXT
+    elif summary:
+        template = f"{UNAVAILABLE_TEXT}\n\nQueries run:\n{summary}"
+    else:
+        template = PARTIAL_WITH_CONTEXT_TEXT if previous else UNAVAILABLE_TEXT
+    reason = "comment" if comment else state.get("error_class") or "role_failed"
+    fa = ctx.budget.force_answer(None, reason)
     if fa.template_only:
         return template
     sv = ctx.services
     model, fb = model_ids_from_settings(sv.settings, "fallback")
-    system = assemble_prompt(
-        [
-            ("Force answer", _FORCE_RULES),
-            (PLAIN_LANGUAGE_SECTION, PLAIN_LANGUAGE_RULE),  # D-151
-            ("Queries", summary or "(none)"),
-        ],
-        ctx.persona,
-    )
+    sections = [("Comment reply", _COMMENT_RULES)] if comment else [("Force answer", _FORCE_RULES)]
+    sections.append((PLAIN_LANGUAGE_SECTION, PLAIN_LANGUAGE_RULE))  # D-151
+    if not comment:
+        sections.append(("Queries", summary or "(none)"))
+    system = assemble_prompt(sections, ctx.persona)
+    # The previous answer is the agent's own earlier (guarded) output; it goes as an assistant
+    # message, like history, so the user's text stays the last, untrusted message.
     messages = [
         {"role": "system", "content": system},
-        {"role": "user", "content": state["message"]},
+        *([{"role": "assistant", "content": previous}] if previous else []),
+        {"role": "user", "content": state.get("context_message") or state["message"]},
     ]
     res = ctx.llm.call(
         FORCE_ANSWER_ROLE, model, lambda t: sv.analyst_invoke(model, messages, [], t),
@@ -1240,6 +1304,8 @@ def _after_context(state: TurnState) -> str:
         return "finalize"
     if state.get("route") == "light":  # pending clarification not resolved (R2-M1)
         return "light"
+    if state.get("status") == "comment":  # D-152: one brief reply, no analyst loop
+        return "force_answer"
     return "quick" if state.get("label") == "simple" else "deep"
 
 
@@ -1299,7 +1365,9 @@ def _build(ctx: TurnContext, checkpointer: Any) -> Any:
     )
     g.add_edge("execute_delete", "finalize")
     g.add_conditional_edges("input_guard", _after_guard, ["finalize", "light", "load_context"])
-    g.add_conditional_edges("load_context", _after_context, ["quick", "deep", "light", "finalize"])
+    g.add_conditional_edges(
+        "load_context", _after_context, ["quick", "deep", "light", "force_answer", "finalize"]
+    )
     g.add_conditional_edges("quick", _after_quick, ["deep", "force_answer", "finalize"])
     g.add_conditional_edges("deep", _after_role, ["force_answer", "finalize"])
     g.add_edge("light", "finalize")
