@@ -27,6 +27,7 @@ committed; an embedding failure is logged and counted, never fails the save (D-2
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -45,6 +46,11 @@ __all__ = ["MAX_BODY_CHARS", "ReportError", "ReportStore", "SavedReport", "ensur
 
 MAX_BODY_CHARS: Final = 60_000
 MAX_LIST: Final = 200
+#: D-227: a report id never carries a run of 13+ decimal digits, so the PII guard (which
+#: does not exempt an id whose payload looks like a card or long number) never masks a real
+#: id; a typed id with such a run is masked like any other text.
+_DIGIT_RUN: Final = re.compile(r"\d{13,}")
+MAX_ID_TRIES: Final = 64
 # guard(body) -> (allowed, text_to_store); the graph passes a closure over check_output
 BodyGuard = Callable[[str], tuple[bool, str]]
 
@@ -127,6 +133,15 @@ def _as_text(value: Any) -> str:
     return json.dumps(value, sort_keys=True, default=str)
 
 
+def new_report_id() -> str:
+    """A random uuid4 hex id with no 13+ digit run (about 1 in 45 draws is redrawn)."""
+    for _ in range(MAX_ID_TRIES):
+        rid = uuid.uuid4().hex
+        if _DIGIT_RUN.search(rid) is None:
+            return rid
+    raise ReportError("could not draw a report id")
+
+
 class ReportStore:
     def __init__(self, conn: sqlite3.Connection, semantic: Any = None) -> None:
         self.conn = conn
@@ -206,7 +221,7 @@ class ReportStore:
         }
         clean_sql = [_guarded(guard, str(s), "SQL", MAX_BODY_CHARS) for s in sql_used]
         values = (
-            uuid.uuid4().hex, owner, sid, tid, title, body,
+            new_report_id(), owner, sid, tid, title, body,
             json.dumps(clean_sections, sort_keys=True),
             json.dumps(clean_sql),
             json.dumps(dict(scope_snapshot), sort_keys=True),

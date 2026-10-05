@@ -436,3 +436,12 @@ def test_name_next_to_a_report_id_is_still_masked(detector: PiiDetector) -> None
         for text in (f"Name: Marlowe Finch, report R-{h}", f"Dear Marlowe Finch, see R-{h}."):
             out = detector.mask(text).text
             assert "Marlowe" not in out and "Finch" not in out and f"R-{h}" in out
+
+
+def test_report_id_between_name_parts_does_not_hide_the_name(detector: PiiDetector) -> None:
+    # D-227: the id is cut out and the name is judged whole.
+    for h in _KNOWN_BAD_IDS:
+        out = detector.mask(f"The buyer was Zorbina R-{h} Quandleworth").text
+        assert "Zorbina" not in out and "Quandleworth" not in out
+        email = detector.mask(f"write to zorbina+R-{h}@example.com").text
+        assert "zorbina" not in email and "<EMAIL>" in email

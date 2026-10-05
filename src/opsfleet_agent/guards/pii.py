@@ -948,6 +948,36 @@ class PiiDetector:
                 spans.append((PERSON, *self._widen(text, a, b)))
         return _merge(_outside_placeholders(spans, text))
 
+    def _bridged_by_id(self, text: str) -> tuple[str, list[tuple[str, int, int]]] | None:
+        """D-227: NER rescan with every report id taken out ("Zorbina R-<id> Quandleworth"
+        becomes "Zorbina Quandleworth"). If a name found there spans a place where an id
+        was, the id exemption is withdrawn for this text: the text without ids and its
+        spans are returned (fail closed). ``None`` when the ids hide nothing."""
+        if _REPORT_ID.search(text) is None:
+            return None
+        parts: list[str] = []
+        joins: list[int] = []
+        cur = 0
+        length = 0
+        for m in _REPORT_ID.finditer(text):
+            lo, hi = m.start(), m.end()
+            while lo > cur and text[lo - 1] in " \t":
+                lo -= 1
+            while hi < len(text) and text[hi] in " \t":
+                hi += 1
+            parts.append(text[cur:lo])
+            length += lo - cur
+            joins.append(length)
+            parts.append(" ")
+            length += 1
+            cur = hi
+        parts.append(text[cur:])
+        without = "".join(parts)
+        spans = self._ner_spans(without)
+        if any(a < j and b > j + 1 for _, a, b in spans for j in joins):
+            return without, spans
+        return None
+
     def mask(self, text: str) -> MaskResult:
         """Mask PII in ``text``. Raises ``PiiDetectorError`` on any failure, including
         input that is not ``str`` (fail closed: the caller never gets text back)."""
@@ -962,7 +992,11 @@ class PiiDetector:
                 body = out[: len(out) - len(pii_regex.TRUNCATION_MARKER)]
                 cut = body.rfind("\n")
                 out = (body[:cut] if cut > 0 else body) + pii_regex.TRUNCATION_MARKER
-            for t, a, b in sorted(self._ner_spans(out), key=lambda s: -s[1]):
+            spans = self._ner_spans(out)
+            joined = self._bridged_by_id(out)
+            if joined is not None:
+                out, spans = joined
+            for t, a, b in sorted(spans, key=lambda s: -s[1]):
                 out = out[:a] + TOKENS[t] + out[b:]
             findings = tuple(
                 Finding(m.group(0)[1:-1], m.start(), m.end()) for m in _PLACEHOLDER.finditer(out)

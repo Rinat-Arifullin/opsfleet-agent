@@ -505,3 +505,73 @@ def test_report_id_exemption_is_exact() -> None:
 
 def test_report_id_sentinel_cannot_be_forged() -> None:
     assert scrub("x\x00a\x00 4242424242424242").text == "xa <CARD>"
+
+
+# --- D-227: an id cannot hide PII ----------------------------------------------------------------
+
+_HEX = "0123456789abcdef0123456789abcdef"
+_TEST_CARD = "4" + "1" * 15  # the published test card number
+
+
+def test_report_id_wrapping_test_card_digits_is_masked() -> None:
+    out = scrub(f"card {_TEST_CARD} and R-{_TEST_CARD}abcdefabcdefabcd").text
+    assert _TEST_CARD not in out and out.count("<CARD>") == 2
+
+
+def test_report_id_inside_an_email_is_not_exempt() -> None:
+    for text in (f"name+R-{_HEX}@example.com", f"name@example.R-{_HEX}.com"):
+        assert scrub(text).text == "<EMAIL>"
+
+
+def test_report_id_splitting_a_card_or_phone_is_masked() -> None:
+    card = scrub(f"card 4111 1111 1111 R-{_HEX} 1111").text
+    assert "4111" not in card and "<CARD>" in card
+    phone = scrub(f"phone 555 R-{_HEX} 123 4567").text
+    assert "555" not in phone and "4567" not in phone and "<PHONE>" in phone
+
+
+def test_standalone_report_id_still_survives() -> None:
+    for text in (
+        f"Report R-{_HEX}, created 2026-01-02.",
+        f"(id R-{_HEX})",
+        f"| R-{_HEX} | Quarterly Widgets |",
+        f"Saved to exports/x/R-{_HEX}.md now",
+        f"Card 4242 4242 4242 4242 and R-{_HEX}.",
+    ):
+        out = scrub(text).text
+        assert f"R-{_HEX}" in out, text
+
+
+def test_report_id_rescan_is_idempotent() -> None:
+    text = f"card 4111 1111 1111 R-{_HEX} 1111, report R-{_HEX}"
+    once = scrub(text).text
+    assert scrub(once).text == once
+
+
+def test_store_issued_report_ids_are_never_masked(monkeypatch):
+    # D-227: an id payload with a card-like digit run is not exempt, so the store never issues
+    # one. The first draw below has a Luhn-valid 16-digit run and must be redrawn.
+    import uuid as _uuid
+
+    from opsfleet_agent.store import reports as rs
+
+    crafted = "4" + "1" * 15 + "a" * 16
+    clean = "0123456789ab" * 2 + "cdefcdef"
+    draws = iter([_uuid.UUID(hex=crafted), _uuid.UUID(hex=clean)])
+    monkeypatch.setattr(rs.uuid, "uuid4", lambda: next(draws))
+    assert rs.new_report_id() == clean
+    assert "R-" + crafted not in pii_regex.scrub(f"Your report R-{crafted} is ready.").text
+    monkeypatch.undo()
+    for _ in range(3000):
+        rid = rs.new_report_id()
+        assert f"R-{rid}" in pii_regex.scrub(f"Your report R-{rid} is Quarterly Widgets.").text
+
+
+def test_report_id_draws_are_bounded(monkeypatch):
+    import uuid as _uuid
+
+    from opsfleet_agent.store import reports as rs
+
+    monkeypatch.setattr(rs.uuid, "uuid4", lambda: _uuid.UUID(hex="1" * 32))
+    with pytest.raises(rs.ReportError):
+        rs.new_report_id()
