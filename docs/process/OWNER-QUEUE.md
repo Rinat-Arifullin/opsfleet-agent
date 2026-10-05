@@ -216,8 +216,8 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | D-157 | ✅ Owner 2026-10-05: yes. Done in 03a83c2: a plain customer-ranking question labelled injection/off_topic is relabelled `simple` (no injection hint words); answered by customer ID with CUSTOMER_ID_NOTICE; name/email/address variants get the PII refusal | CUSTOMER_ID_NOTICE ✅ accepted 2026-10-05. OD-14 ✅ 2026-10-05: spend bands and customer counts only, no individual customers or IDs (D-159, in progress) | nothing |
 | D-158 | ✅ Owner 2026-10-05. Done in 05c34b1: `evals/langfuse_dataset.py upload|run`, live SUT `evals/live_sut.py` (own data dir `data/eval-live`). ODs in `iter40b-ods.md`; OD-4: 4 golden cases need seeds the live harness doesn't apply yet | Accept ODs | nothing |
 | D-161 | ✅ Owner 2026-10-05: D-159 OD-2, the CUSTOMER_BANDS_NOTICE text is accepted as is. | — | nothing |
-| D-162 | ✅ Owner 2026-10-05: D-159 OD-5, `aggregate_only` stays on for follow-ups after a bands answer ("show their IDs" is refused in code too). In progress | — | nothing |
-| D-163 | ✅ Owner 2026-10-05: D-159 OD-3, the minimum of 5 customers per spend band is enforced in code, not only in the prompt. In progress | — | nothing |
+| D-162 | ✅ Owner 2026-10-05: D-159 OD-5, `aggregate_only` stays on for follow-ups after a bands answer ("show their IDs" is refused in code too). Done (07ba671) | — | nothing |
+| D-163 | ✅ Owner 2026-10-05: D-159 OD-3, the minimum of 5 customers per spend band is enforced in code, not only in the prompt. Done (07ba671) | — | nothing |
 | D-164 | ✅ Owner 2026-10-05: D-155 OD-1/OD-2, no fallback on a router outage and no FR-17 carve-out for non-English memory/comment turns; current behaviour stays. D-160: old pre-matrix Langfuse dataset items are not archived. | — | nothing |
 | D-165 | ✅ Owner 2026-10-05: Live-1 router OD-1, go router-only. The English regex override for unavailable data (inventory, warehouse, ad spend, web visits) is removed; router-v3 labels these `simple` and the analyst says the data is not available and offers proxies. | — | nothing |
 
@@ -279,3 +279,5 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 
 | D-160 | done | ee91727. Golden cases expand to `<case>@<profile>` across analyst_a/analyst_b/ceo_demo with per-profile overrides and scope invariants checked in code; Langfuse items keyed per profile. 3677 tests plain/strict/seed; evals PASS |
 | D-165 | done | ed486d1. Regex unavailable-data override removed; the router decides and the analyst prompt (analyst-v2) says what is missing and offers proxies. |
+| D-162 | done | 07ba671. Sticky aggregate-only flag on the run_sql session and in checkpointed graph state; set by any customer-ranking turn, never cleared within a session. ODs in iter-d162-d163-bands.md. |
+| D-163 | done | 07ba671. Banded queries must return a provable distinct-customer count column (band_count_required); rows with fewer than 5 customers are dropped in run_sql. |
