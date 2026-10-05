@@ -370,7 +370,7 @@ Full rows are in `docs/process/OWNER-QUEUE.md` and the ADRs are in `docs/decisio
 | D-169 | The live SUT uses the same session-id shape as the CLI | Otherwise live paths skipped the audit |
 
 ### ADR drift (to fix in `docs/decisions.md`)
-- **ADR-003** describes "one retry → fallback". The owner chose 2 retries with 1 s / 2 s backoff (D-6), and the code does not match that yet (§11).
+- **ADR-003**: primary → 2 retries (1 s, 2 s plus jitter; D-6) → fallback once, at most 6 retries per turn (`BACKOFFS_S` in `graph/llm.py`, `MAX_TURN_RETRIES` in `graph/budget.py`).
 - **ADR-009** lists five roles. The Library agent was not built.
 - **ADR-010** now has 10 labels; the text was updated for D-155.
 
@@ -402,12 +402,10 @@ Full rows are in `docs/process/OWNER-QUEUE.md` and the ADRs are in `docs/decisio
    - `saved_report` has no embedding column.
    - `user_quota` and `aggregate_fingerprint` have different columns from the HLD.
 7. **Table-not-found error code** stays `BQ_RUNTIME` (`bq/errors.py`), although the owner chose `UNKNOWN_COLUMN` (D-22).
-8. **Retry ladder** is `BACKOFFS_S=(1.0, 2.0, 4.0)` (`graph/llm.py:28`) and `MAX_TURN_RETRIES=6` (`graph/budget.py:24`), against the owner's 2 retries at 1 s / 2 s (D-6).
 
 ## 11. Open items
 
 - **Decided but not applied in code:**
-  - D-6, the retry ladder.
   - D-22, the table-not-found error code.
   - Both are small code changes plus ADR-003 text.
 - **OD-3 (bands): hide or merge small spend bands.** This is an owner decision.

@@ -94,7 +94,7 @@ The ADRs below were written by the architect from the approved digest (`docs/pro
     - SDK retries are disabled: `max_retries=1` means a single attempt (0 would mean the Google default of 5 retries).
     - `bind_tools` is applied to the primary and the fallback model before wrapping, so the fallback sees the same tools.
     - Each attempt's timeout is min(60 s, remaining turn time). Every attempt is counted against the turn's LLM-call budget.
-    - Primary: up to 3 retries per call and 6 per turn, backoff 1 s, 2 s and 4 s plus jitter, on 429, 5xx and timeouts only. A retry starts only if the backoff plus a 10 s minimum attempt fits in the remaining time.
+    - Primary: up to 2 retries per call and 6 per turn, backoff 1 s and 2 s plus jitter (D-6, owner 2026-10-05), on 429, 5xx and timeouts only. A retry starts only if the backoff plus a 10 s minimum attempt fits in the remaining time.
     - Fallback: flash-lite, a single attempt, under the same rule.
     - Then `force_answer` if a call and time remain, otherwise a templated message.
     - Tests: `test_retry_wrapper_bounded` (asserts attempt count and wall time under a fake clock with always-failing models) and `test_sdk_single_attempt`.
@@ -305,7 +305,7 @@ The ADRs below were written by the architect from the approved digest (`docs/pro
 - **Note (rev. 4.3, R3-L31, R3-L32):** SDK and model facts the call wrapper assumes.
   - `thinking_level` and `thinking_budget` are mutually exclusive in a request; `config/models.yaml` sets exactly one of them per model.
   - Function (tool) responses are matched to their calls by `call_id`.
-  - In `langchain-google-genai`, `max_retries=1` means one attempt. The retry ladder lives in our wrapper, not in the client: primary → one retry on 429, 5xx or timeout → fallback model once → fail. The fallback call counts against the role's sub-cap (R3-M6).
+  - In `langchain-google-genai`, `max_retries=1` means one attempt. The retry ladder lives in our wrapper, not in the client: primary → up to 2 retries on 429, 5xx or timeout (1 s, 2 s; D-6) → fallback model once → fail. The fallback call counts against the role's sub-cap (R3-M6).
   - Model ids were checked against the provider's model list on 2026-10-04: `gemini-3.8-flash` and `gemini-3.1-flash-lite` are both listed; the flash-lite line has a published shutdown date in 2027 and a named successor, both to be recorded in `config/models.yaml` comments. The pro-class model is available as a preview id only and stays behind the eval gate. The "ID to verify" markers are resolved.
 
 - **2026-10-04 owner decision:** adopt the supervisor + 5 roles topology, with explicit failure behaviour, bounded retries and per-role quality control (ADR-009). HLD revision 3 and requirements budgets (10 Q&A / 14 report) updated; re-review requested before G2.

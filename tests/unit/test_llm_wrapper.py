@@ -75,10 +75,10 @@ def test_retry_wrapper_bounded():
     primary, fb = Model(ft, always=True), Model(ft, always=True)
     out = w.call("quick_analyst", "m1", primary, "m2", fb)
     assert isinstance(out, ForceAnswer)
-    assert primary.calls == 4  # 1 + 3 retries
+    assert primary.calls == 3  # 1 + 2 retries (D-6)
     assert fb.calls == 1  # fallback exactly once
-    assert ft.sleeps == [1.0, 2.0, 4.0]  # backoff schedule
-    assert budget.calls == 5 and budget.retries == 3
+    assert ft.sleeps == [1.0, 2.0]  # backoff schedule (D-6)
+    assert budget.calls == 4 and budget.retries == 2
     assert budget.elapsed() < budget.caps.deadline_s
     assert w.call("quick_analyst", "m1", primary, "m2", fb) is not None  # still typed, no loop
 
@@ -88,8 +88,8 @@ def test_retry_then_fallback():
     primary, fb = Model(ft, always=True), Model(ft)
     out = w.call("quick_analyst", "m1", primary, "m2", fb)
     assert isinstance(out, LLMSuccess)
-    assert out.used_fallback and out.model == "m2" and out.attempts == 5
-    assert primary.calls == 4 and fb.calls == 1
+    assert out.used_fallback and out.model == "m2" and out.attempts == 4
+    assert primary.calls == 3 and fb.calls == 1
 
 
 def test_retry_succeeds_without_fallback():
@@ -139,8 +139,8 @@ def test_role_subcap_counts_retries_and_fallback():
 
 def test_turn_retry_budget_of_six_goes_straight_to_fallback():
     ft, budget, w = make(TurnKind.REPORT, role_subcap=99)
-    for _ in range(2):  # 3 retries each -> 6 used
-        w.call("a", "m1", Model(ft, always=True), "m2", Model(ft))
+    for _ in range(3):  # 2 retries each (D-6) -> 6 used, 9 calls
+        w.call("a", "m1", Model(ft, fail_times=2), "m2", Model(ft))
     assert budget.retries == 6
     p, fb = Model(ft, always=True), Model(ft)
     out = w.call("b", "m1", p, "m2", fb)

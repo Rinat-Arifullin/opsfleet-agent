@@ -2,7 +2,7 @@
 
 Provider-agnostic: callers pass one callable per model (primary, fallback). Each callable makes
 exactly one provider request and receives the attempt timeout in seconds. The ladder is
-primary -> up to 3 retries (backoff 1 s, 2 s, 4 s plus jitter) -> fallback once -> ForceAnswer.
+primary -> up to 2 retries (backoff 1 s, 2 s plus jitter; D-6) -> fallback once -> ForceAnswer.
 Every attempt draws from the TurnBudget (turn cap, role sub-cap, 6 retries per turn, deadline).
 Clock, sleep and jitter are injectable so tests never sleep.
 """
@@ -25,7 +25,7 @@ from opsfleet_agent.graph.budget import (
     TurnBudget,
 )
 
-BACKOFFS_S: tuple[float, ...] = (1.0, 2.0, 4.0)  # at most 3 retries per call
+BACKOFFS_S: tuple[float, ...] = (1.0, 2.0)  # at most 2 retries per call (D-6)
 MAX_CALL_RETRIES = len(BACKOFFS_S)
 MAX_ATTEMPT_TIMEOUT_S = 60.0
 MIN_USEFUL_TIMEOUT_S = 10.0
