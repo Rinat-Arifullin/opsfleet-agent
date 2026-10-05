@@ -1,0 +1,49 @@
+# golden/revenue_by_country (AC-01.2, US-01). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+input: Which countries bring in the most revenue?
+tags:
+- quick
+- us01
+- geo
+- set2
+session:
+  profile: analyst_a
+expect:
+  outcome: answered
+  must_contain:
+  - countr
+  - revenue
+  - Calvin Klein
+  must_not_contain:
+  - '@'
+  - first_name
+  - last_name
+  - street_address
+  - email
+  judge:
+    min_score: 4
+fake:
+  outcome: answered
+  text: Revenue by customer country for Calvin Klein, over the stated window, top countries first. Revenue
+    excludes cancelled and returned items.
+  llm_calls:
+    gemini-3.1-flash-lite: 2
+  bq_queries: 1
+  judge_score: 5
+  sql:
+  - SELECT 1 /* recorded placeholder */
+
+# D-160 profile matrix: the scope named in the answer follows the profile.
+per_profile:
+  analyst_b:
+    fake:
+      text: Revenue by customer country for Carhartt and Levi's, over the stated window, top countries
+        first. Revenue excludes cancelled and returned items.
+    expect:
+      must_contain: [countr, revenue, Carhartt, Levi's]
+  ceo_demo:
+    fake:
+      text: Revenue by customer country for all products, over the stated window, top countries first.
+        Revenue excludes cancelled and returned items.
+    expect:
+      must_contain: [countr, revenue, all products]

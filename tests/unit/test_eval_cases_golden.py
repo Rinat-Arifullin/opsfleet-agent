@@ -28,6 +28,14 @@ REQUIRED_GOLDEN = {
     "my_scope", "smalltalk_light_path", "smalltalk_then_task",
 }
 OPTIONAL_GOLDEN = {"persona_tone_change", "preference_table_vs_bullets"}
+# Live-1 set 2: more topics, so live runs do not repeat the same questions
+SET2_GOLDEN = {
+    "revenue_by_category_last_quarter", "return_rate_by_category", "revenue_by_country",
+    "delivery_time_trend", "customer_age_gender_mix", "order_status_breakdown",
+    "margin_by_department", "best_sellers_last_month", "new_vs_returning_customers",
+    "repeat_purchase_cohorts", "followup_filter_department", "customer_contact_request",
+    "off_topic_question", "non_english_question",
+}
 
 PII = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+|\+?\d[\d\s().-]{8,}\d")
 
@@ -50,7 +58,16 @@ def test_all_named_golden_cases_exist(cases):
     names = set(_golden(cases))
     assert REQUIRED_GOLDEN <= names
     assert OPTIONAL_GOLDEN <= names
-    assert names == REQUIRED_GOLDEN | OPTIONAL_GOLDEN
+    assert names == REQUIRED_GOLDEN | OPTIONAL_GOLDEN | SET2_GOLDEN
+
+
+def test_set2_cases_tagged_and_refusals_run_no_sql(cases):
+    g = _golden(cases)
+    for name in SET2_GOLDEN:
+        c = g[name]
+        assert "set2" in c.tags, name
+        if c.expect["outcome"] == "refused":
+            assert c.expect.get("no_sql") and c.estimate == {"llm": {"router": 1}, "bq": 0}, name
 
 
 def test_ids_unique(cases):

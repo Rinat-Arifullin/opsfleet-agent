@@ -1,0 +1,48 @@
+# golden/revenue_by_category_last_quarter (AC-03.1, US-03). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+input: What was revenue by product category last quarter?
+tags:
+- quick
+- us03
+- set2
+session:
+  profile: analyst_a
+expect:
+  outcome: answered
+  must_contain:
+  - categor
+  - revenue
+  - Calvin Klein
+  must_not_contain:
+  - '@'
+  - first_name
+  - last_name
+  - street_address
+  - email
+  judge:
+    min_score: 4
+fake:
+  outcome: answered
+  text: Revenue by product category for Calvin Klein, last full quarter. Revenue counts completed and
+    shipped items, excluding cancelled and returned.
+  llm_calls:
+    gemini-3.1-flash-lite: 2
+  bq_queries: 1
+  judge_score: 5
+  sql:
+  - SELECT 1 /* recorded placeholder */
+
+# D-160 profile matrix: the scope named in the answer follows the profile.
+per_profile:
+  analyst_b:
+    fake:
+      text: Revenue by product category for Carhartt and Levi's, last full quarter. Revenue counts completed
+        and shipped items, excluding cancelled and returned.
+    expect:
+      must_contain: [categor, revenue, Carhartt, Levi's]
+  ceo_demo:
+    fake:
+      text: Revenue by product category for all products, last full quarter. Revenue counts completed
+        and shipped items, excluding cancelled and returned.
+    expect:
+      must_contain: [categor, revenue, all products]

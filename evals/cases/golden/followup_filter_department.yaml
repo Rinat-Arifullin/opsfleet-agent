@@ -1,0 +1,51 @@
+# golden/followup_filter_department (AC-07.1, US-07). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+turns:
+- What's revenue by category this year?
+- Now only for the women's department.
+tags:
+- quick
+- us07
+- followup
+- set2
+session:
+  profile: analyst_a
+expect:
+  outcome: answered
+  must_contain:
+  - Women
+  - categor
+  - Calvin Klein
+  must_not_contain:
+  - '@'
+  - first_name
+  - last_name
+  - street_address
+  - email
+  judge:
+    min_score: 4
+fake:
+  outcome: answered
+  text: Revenue by category this year for Calvin Klein, Women's department only. Revenue excludes cancelled
+    and returned items.
+  llm_calls:
+    gemini-3.1-flash-lite: 2
+  bq_queries: 2
+  judge_score: 5
+  sql:
+  - SELECT 1 /* recorded placeholder */
+
+# D-160 profile matrix: the scope named in the answer follows the profile.
+per_profile:
+  analyst_b:
+    fake:
+      text: Revenue by category this year for Carhartt and Levi's, Women's department only. Revenue excludes
+        cancelled and returned items.
+    expect:
+      must_contain: [Women, categor, Carhartt, Levi's]
+  ceo_demo:
+    fake:
+      text: Revenue by category this year for all products, Women's department only. Revenue excludes
+        cancelled and returned items.
+    expect:
+      must_contain: [Women, categor, all products]

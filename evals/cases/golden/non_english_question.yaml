@@ -1,0 +1,26 @@
+# golden/non_english_question (FR-17). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+# FR-17: English only; a non-English data question is answered with the code-owned reply.
+input: ¿Cuáles fueron las ventas totales del mes pasado?
+tags:
+- refusal
+- light
+- non_english
+- set2
+session:
+  profile: analyst_a
+expect:
+  outcome: refused
+  no_sql: true
+  must_contain:
+  - English
+estimate:
+  llm:
+    router: 1
+  bq: 0
+fake:
+  outcome: refused
+  text: I can only work in English. Please rephrase your question in English.
+  llm_calls:
+    gemini-3.1-flash-lite: 1
+  bq_queries: 0

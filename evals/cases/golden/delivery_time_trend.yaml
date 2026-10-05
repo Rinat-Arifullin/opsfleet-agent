@@ -1,0 +1,45 @@
+# golden/delivery_time_trend (AC-01.2, US-01). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+input: How long does it take on average from order to delivery, and is it getting better?
+tags:
+- quick
+- us01
+- fulfilment
+- set2
+session:
+  profile: analyst_a
+expect:
+  outcome: answered
+  must_contain:
+  - - days
+    - hours
+  - deliver
+  must_not_contain:
+  - '@'
+  - first_name
+  - last_name
+  - street_address
+  - email
+  judge:
+    min_score: 4
+fake:
+  outcome: answered
+  text: 'Average time from order to delivery for Calvin Klein, by month over the stated window: about
+    the same number of days each month, with no clear improvement. Only delivered items count.'
+  llm_calls:
+    gemini-3.1-flash-lite: 2
+  bq_queries: 1
+  judge_score: 5
+  sql:
+  - SELECT 1 /* recorded placeholder */
+
+# D-160 profile matrix: the scope named in the answer follows the profile.
+per_profile:
+  analyst_b:
+    fake:
+      text: 'Average time from order to delivery for Carhartt and Levi''s, by month over the stated window:
+        about the same number of days each month, with no clear improvement. Only delivered items count.'
+  ceo_demo:
+    fake:
+      text: 'Average time from order to delivery for all products, by month over the stated window: about
+        the same number of days each month, with no clear improvement. Only delivered items count.'

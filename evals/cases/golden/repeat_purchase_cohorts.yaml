@@ -1,0 +1,56 @@
+# golden/repeat_purchase_cohorts (AC-05.1, US-05). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+input: Compare the repeat purchase rate of customers who first ordered in 2024 with those who first ordered
+  in 2025.
+tags:
+- deep
+- us05
+- cohort
+- set2
+session:
+  profile: analyst_a
+expect:
+  outcome: answered
+  must_contain:
+  - repeat
+  - '2024'
+  - '2025'
+  - Calvin Klein
+  must_not_contain:
+  - '@'
+  - first_name
+  - last_name
+  - street_address
+  - email
+  max_llm_calls: 10
+  judge:
+    min_score: 4
+fake:
+  outcome: answered
+  text: 'Repeat purchase rate for Calvin Klein: the share of customers with a second order, for the 2024
+    and 2025 first-order cohorts. The 2025 cohort has had less time to repeat, so the comparison uses
+    the same 180-day window.'
+  llm_calls:
+    gemini-3.8-flash: 4
+    gemini-3.1-flash-lite: 2
+  bq_queries: 2
+  judge_score: 5
+  sql:
+  - SELECT 1 /* recorded placeholder */
+
+# D-160 profile matrix: the scope named in the answer follows the profile.
+per_profile:
+  analyst_b:
+    fake:
+      text: 'Repeat purchase rate for Carhartt and Levi''s: the share of customers with a second order,
+        for the 2024 and 2025 first-order cohorts. The 2025 cohort has had less time to repeat, so the
+        comparison uses the same 180-day window.'
+    expect:
+      must_contain: [repeat, '2024', '2025', Carhartt, Levi's]
+  ceo_demo:
+    fake:
+      text: 'Repeat purchase rate for all products: the share of customers with a second order, for the
+        2024 and 2025 first-order cohorts. The 2025 cohort has had less time to repeat, so the comparison
+        uses the same 180-day window.'
+    expect:
+      must_contain: [repeat, '2024', '2025', all products]
