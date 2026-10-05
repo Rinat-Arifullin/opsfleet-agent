@@ -27,5 +27,5 @@ jobs:
         run: uv run python evals/run.py --offline --yes --cases-dir evals/cases/_fixtures
       - name: requirements.txt is in sync with uv.lock
         run: |
-          uv export --no-hashes --no-emit-project --format requirements-txt > requirements.txt
+          uv export --no-hashes --format requirements-txt > requirements.txt
           git diff --exit-code requirements.txt
