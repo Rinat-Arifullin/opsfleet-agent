@@ -32,7 +32,7 @@ Contents:
 | `config.py` | Settings from env, `.env` and `config/models.yaml`; provider selection (Gemini or LM Studio); startup check | `Settings` :66, `load_settings` :278, `startup_check` :374, `QUOTA_DEFAULTS` :190, `PROVIDERS` :40 | `test_config*.py` |
 | `session.py` | Demo profiles (brand scope or the explicit `all` flag), session object, local-mode startup check | `Profile` :29, `Session` :43, `load_profiles` :109, `local_startup_check` :194 | `test_session*.py` |
 | `persona.py` | Persona file parsing and prompt assembly; a fixed safety preamble always comes first | `parse_persona` :132, `PersonaStore` :183, `assemble_prompt` :238, `SAFETY_PREAMBLE` :45 | `test_persona*.py` |
-| `commands/` | Slash commands. The REPL exposes `/help`, `/exit`, `/feedback`, `/trace`, `/audit`, `/persona` (read-only), `/reports`, `/open` and `/search`. `wire_delete` registers `/delete` at runtime. `/export` is a stub. `commands/triage.py` is a separate maintainer CLI (`python -m opsfleet_agent.commands.triage`, iteration 36) for feedback triage; `commands/erase.py` (iteration 35) is the maintainer erasure CLI, `/erase` in the REPL only explains it | `COMMANDS` `commands/__init__.py:266`, `dispatch` :284; `root_cause`, `Triage`, `main` in `commands/triage.py`; `access_set` `commands/access.py:197` and `apply_persona` / `rollback_persona` `commands/persona.py:247/:325` are admin APIs, audit-first, **not wired to the REPL** | `test_commands*.py` |
+| `commands/` | Slash commands. The REPL exposes `/help`, `/exit`, `/feedback`, `/trace`, `/audit`, `/persona` (read-only), `/prefs`, `/reports`, `/open`, `/search`, `/rename`, `/export`, `/retry` and `/erase` (info only). `wire_delete` registers `/delete` at runtime. `/export` writes to a per-user hashed folder under `<data dir>/exports/` with `O_EXCL \| O_NOFOLLOW` (D-228). `commands/triage.py` is a separate maintainer CLI (`python -m opsfleet_agent.commands.triage`, iteration 36) for feedback triage; `commands/erase.py` (iteration 35) is the maintainer erasure CLI, `/erase` in the REPL only explains it | `COMMANDS` `commands/__init__.py:371`, `dispatch` :389; `handle_prefs` `commands/preferences.py:91`; `do_rename` `commands/report_actions.py:274`, `do_export` :374; `root_cause`, `Triage`, `main` in `commands/triage.py`; `access_set` `commands/access.py:197` and `apply_persona` / `rollback_persona` `commands/persona.py:247/:325` are admin APIs, audit-first, **not wired to the REPL** | `test_commands*.py` |
 
 ### 1.2 Graph (code supervisor)
 
@@ -43,7 +43,7 @@ Contents:
 | `graph/llm.py` | The single call wrapper (retry with backoff, error classification, token bucket) | `LLMWrapper` :162, `TokenBucket` :102, `classify_error` :57, `BACKOFFS_S` :28 |
 | `graph/providers.py` | Chat model per provider; local provider (LM Studio) with no deadline (D-149); strips reasoning blocks | `chat_model_for` :241, `LocalChatModel` :157, `is_local` :58, `strip_reasoning` :67 |
 | `graph/context.py` | Context assembly: history window, store items and the prior-query ledger. Everything rendered is scrubbed and fenced as untrusted. Budget is 64k chars | `assemble_context` :701, `fence_untrusted` :300, `needs_clarification` :583 |
-| `graph/memory.py` | Session memory in checkpoint state (churn definition, preference notes, one pending clarification), re-validated on load | `SessionMemory` :262 |
+| `graph/memory.py` | Session memory in checkpoint state (churn definition, preference notes, one pending clarification), re-validated on load; `set_preference` validation used by `/prefs` and the Library agent; `PreferenceStore` protocol (implemented by `store/preferences.py`) | `PreferenceStore` :257, `SessionMemory` :264, `set_preference` :468 |
 | `graph/grounding.py` | Every figure in the answer must come from a tool result (relative tolerance 0.5%) | `check_grounding` :551 |
 | `graph/intents.py` | Code-level intent checks that override or back up the router | `is_sql_request` :98, `is_customer_ranking_request` :167, `asks_for_customer_pii` :176, `CUSTOMER_BANDS_NOTICE` :110 |
 | `graph/fixed_replies.py` | Markers that replace code-owned replies in LLM history (D-156) | marker :99 |
@@ -87,9 +87,9 @@ There are 5 LLM roles plus the light path, as in ADR-009.
 | `tools/schema_tool.py`, `tools/registry.py` | Schema description with PII columns hidden; tool registry | — |
 | `bq/client.py` | `WarehouseClient` protocol and `BigQueryRunner`: mandatory dry run, `maximum_bytes_billed`, 1 GB per query, 10 GB per session, 60 s, 200 rows | `BigQueryRunner` :267 (`prepare` :304, `execute` :335) |
 | `bq/errors.py`, `bq/memo.py`, `bq/schema.py` | Error classification (raw error text is inspected, never kept), memo keyed after the scope rewrite, table metadata cache | `ErrorCode` :31, `run_memoised` :131, `TableMetadataCache` |
-| `reports/` | Report schema and required sections, matcher for `/open`, `/search` and delete selectors, library listing with `R-` display ids | `ReportDraft` `schema.py:104`, `REQUIRED_SECTIONS` :55, `draft_hash` :383, `match_reports` `matcher.py:106`, `delete_candidates` :120, `DISPLAY_PREFIX` `library.py:74`, `open_report` :291 |
-| `delete/` | Two-phase delete (§5) | `DeleteKey` `token.py:56`, `derive_token` :100, `verify_proof` :128; `DeleteService` `flow.py:273`, `parse_delete_request` :188, `setup_delete` :699 |
-| `store/` | SQLite stores (§6) | `connect` `db.py:48`, `MIGRATIONS` :22, `AuditLog` `audit.py:550`, `audited_delete` :971, `ReportStore` `reports.py:112`, `QuotaStore` `quota.py:43` |
+| `reports/` | Report schema and required sections, matcher for `/open`, `/search` and delete selectors, library listing with `R-` display ids, ranked FTS5 index (`fts.py`) and the embedding index fused by RRF (`semantic.py`; hybrid results carry a `words` / `similar` / `words+similar` match label, D-232) | `ReportDraft` `schema.py:104`, `REQUIRED_SECTIONS` :55, `draft_hash` :383, `match_reports` `matcher.py:106`, `delete_candidates` :120, `DISPLAY_PREFIX` `library.py:81`, `search_reports` :204, `open_report` :390, `build_match` `fts.py:134`, `rrf_fuse` `semantic.py:110`, `SemanticIndex` :123, `build_semantic_index` :273 |
+| `delete/` | Two-phase delete (§5) | `DeleteKey` `token.py:56`, `derive_token` :100, `verify_proof` :128; `DeleteService` `flow.py:275`, `parse_delete_request` :190, `setup_delete` :708 |
+| `store/` | SQLite stores (§6) | `connect` `db.py:54`, `MIGRATIONS` :24, `AuditLog` `audit.py:582`, `audited_delete` :1059, `erase_plan` :1425, `audited_erase` :1477 (writes `erase.attempted` first; a failed delete rolls back, is audited as `erase.failed` and raises `EraseRolledBackError`, D-230), `ReportStore` `reports.py:145`, `QuotaStore` `quota.py:43`, `SQLitePreferenceStore` `preferences.py:63` |
 | `golden/` | Golden Bucket seed index: top-k = 3, min score 0.6, lexical fallback 0.2; strict mode via `OPSFLEET_GOLDEN_STRICT` | `GoldenIndex` `seed.py:485`, `build_golden_index` `runtime.py:47` |
 | `obs/` | JSONL tracer with masking and secret registration; optional Langfuse sink (fail-open); metrics; progress hook | `Tracer` `tracer.py:271`, `scrub_text` :143, `register_secret` :127, `LangfuseSink` `langfuse_sink.py:230`, `build_sink` :525 |
 
@@ -261,7 +261,7 @@ The delete tool is **not exposed to the model**. Only the user's own text or `/d
 
 ## 6. Stores
 
-The prototype uses SQLite. `store/db.py:48` opens it in WAL mode with `secure_delete` and file mode 0600.
+The prototype uses SQLite. `store/db.py:54` opens it in WAL mode with `secure_delete` and file mode 0600.
 
 | File | Table | Written by | Notes |
 |---|---|---|---|
@@ -273,7 +273,9 @@ The prototype uses SQLite. `store/db.py:48` opens it in WAL mode with `secure_de
 | | `report_vector` | `ReportStore.save`/`rename` after the commit, lazy backfill on search, `audited_delete` (v6) | hybrid `/search` (iteration 38): one float32 embedding per report with model, dims and content hash; owner column; a plain counted delete dependent (D-209..D-214) |
 | | `feedback` | `store/feedback.py` | `/feedback`; table created by `ensure_schema`, outside `MIGRATIONS` |
 | | `aggregate_fingerprint` | `store/fingerprints.py` | HMAC digests, `RETENTION_DAYS=30`, per user; created by `ensure_schema` |
+| | `user_preferences` | `store/preferences.py` (`/prefs`, the Library agent's `set_preference`) | per user; created by `ensure_schema`, outside `MIGRATIONS`; removed by erase |
 | `checkpoints.db` | LangGraph checkpoints | `build_checkpointer` | AES-encrypted serde; thread id = session id |
+| `exports/<hashed user id>/*.md` | (files) | `/export`, the Library agent's `export_report` | per-owner folder (0700, no symlinks), never overwrites (D-228); removed by erase |
 
 ## 7. Evals and CI
 
@@ -385,11 +387,11 @@ Full rows are in `docs/process/OWNER-QUEUE.md` and the ADRs are in `docs/decisio
 | Area | Built | Designed, not built |
 |---|---|---|
 | Roles | Router, Quick/Deep analyst, writer, verifier (inside `_build_report`), light path, Library agent (iteration 46) | `summary` role in `models.yaml` unused; the Library agent's `save_report` tool (D-198) |
-| Commands | `/help`, `/exit`, `/feedback`, `/trace`, `/audit`, `/persona` (read-only), `/reports`, `/open`, `/search`, `/delete`, `/erase` (info only); erasure as a maintainer CLI (`commands/erase.py`, iteration 35, D-222..D-226) | `/export` (stub), rename, `retry report` (the `RETRY_REPORT` cap exists but is unused); remote (Langfuse) and backup erasure |
+| Commands | `/help`, `/exit`, `/feedback`, `/trace`, `/audit`, `/persona` (read-only), `/prefs`, `/reports`, `/open`, `/search`, `/rename`, `/export`, `/retry`, `/delete`, `/erase` (info only); erasure as a maintainer CLI (`commands/erase.py`, iteration 35, D-222..D-226, D-230) | Remote (Langfuse) and backup erasure; self-service erase |
 | Admin | `access_set`, `apply_persona`, `rollback_persona` as audit-first APIs | REPL wiring for them |
 | Feedback triage | Maintainer CLI (iteration 36): `list`, `show`, `classify` (ordered root-cause rules over the turn's spans), `dismiss`, `add-eval` (scrubbed draft case), `promote` (seed validator, PII detector, BigQuery dry run, offline eval, then a Golden candidate file); audit first, compare-and-set state | Auto-flagged failed turns, clustering, automatic merge into `config/golden_seed.yaml` |
 | Search | Hybrid `/search` and library-tool default (iteration 38): FTS5 bm25 (iteration 37) fused with embedding cosine by RRF k=60; degrades to bm25, then to the word match; `tag:`, `from:`, `to:` | A vector index or ANN service: the cosine scan is brute force over at most 200 of the owner's reports |
-| Stores | Migrations v1–v4, feedback, fingerprints | Sessions and preferences stores (memory lives in checkpoint state); `checkpoint_truncate` has no caller |
+| Stores | Migrations v1–v6 (meta, audit, reports, quota, `report_fts`, `report_vector`); feedback, fingerprints and `user_preferences` via `ensure_schema` | Sessions store (session memory lives in checkpoint state); `checkpoint_truncate` has no caller |
 | Evals | Golden, router, adversarial injection and `pii_typed`, profile matrix, judge with calibration, Langfuse dataset | Many HLD adversarial and resilience categories have no case files; no golden case uses `numbers` or `reference_sql`; no `run_experiment`; judge is Gemini only |
 | CI | ruff, pytest (strict golden), offline eval, requirements sync | gitleaks, live eval job, `workflow_dispatch` |
 
@@ -405,19 +407,19 @@ Full rows are in `docs/process/OWNER-QUEUE.md` and the ADRs are in `docs/decisio
 4. **Delete selectors and wording.** The grammar is stricter than the HLD (D-145, D-146) and the confirm wording differs.
 5. **Router context.** The router sees only the previous user message (D-56), not the last two turns.
 6. **Data model §7.1.**
-   - Some entities listed there are not tables (sessions, preferences).
-   - `saved_report` has no embedding column.
+   - Some entities listed there are not tables (sessions).
+   - `saved_report` has no embedding column; embeddings live in `report_vector`.
    - `user_quota` and `aggregate_fingerprint` have different columns from the HLD.
 7. **FTS index sync (§6.3.2).** The HLD says the FTS table is "maintained by triggers". The code writes it in the same transaction from `ReportStore.save`/`rename` and from `audited_delete` (`fts_dependents`), because `audited_delete` refuses any DELETE trigger on a table it touches (D-199).
 
 ## 11. Open items
 
 - **Product names that begin with a name-like word** are masked by NER (D-171 note). This is a 🔴 PII question for the owner.
-- **🔴 iterations awaiting owner review** (committed with `[owner review pending]`): 5–15, 17, 19, 21, 22a, 24, plus the CLI wiring. Nothing merges into `main` without the owner.
+- **🔴 iterations awaiting owner review** (committed with `[owner review pending]`): 5–15, 17, 19, 21, 22a, 24, 33, 35 (🔴 erasure, second T1 review pending), 36, 37, 38, 39, 46 (delete path), the display-id fix 5b1518f and the review fixes after 35–46 (bfd4219, 713a4ae; `docs/process/iter-review-fixes-ods.md`, D-227..D-234), plus the CLI wiring. Nothing merges into `main` without the owner.
 - **Remaining plan:**
   - 22b: CLI delete polish.
-  - 23: library.
+  - 23: hard delete with no residue.
   - 28a/b.
-  - 33–39: the "if time" items.
+  - 34: `/history` browse (the only "if time" item left).
   - 43: ADRs and docs.
   - 44 and 45: the final packaging.

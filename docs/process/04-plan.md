@@ -95,6 +95,7 @@ The calibration gate (30) reaches the critical path only through the owner's lab
 | 37 | Ranked full-text report search (drop 3) | T2 | | M (1) | Wed (if time) |
 | 38 | Semantic search with RRF (drop 2) | T2 | | M (1) | Wed (if time) |
 | 39 | Preferences, P (drop 1) | T2 | | M (1) | Wed (if time) |
+| 46 | Library agent role and node (ADR-009) | T2 | 🔴 area (delete path) | M (1) | Wed |
 | 40 | Langfuse (drop 10) | T2 | | M (1) | Wed (if time) |
 | 41 | Persona smoke check and rollback (drop 9) | T2 | | S (0.5) | Wed (if time) |
 | 42 | `access set` (drop 8) | T2 | | S (0.5) | Wed (if time) |
@@ -119,7 +120,7 @@ The calibration gate (30) reaches the critical path only through the owner's lab
 - `src/opsfleet_agent/config.py`
 - `tests/unit/conftest.py`
 
-`cli.py` is edited once, in 19, which builds a **command table**. Every later command is a new entry in `src/opsfleet_agent/commands/` that registers itself in that table, so 22a, 24, 25, 32-36, 39 and 42 do not edit `cli.py`.
+`cli.py` is edited once, in 19, which builds a **command table**. Every later command is a new entry in `src/opsfleet_agent/commands/` that registers itself in that table, so 22a, 24, 25, 32-36, 39 and 42 do not edit `cli.py`. As built, 33, 38, 39 and 46 did make small `cli.py` edits (wiring of the new stores, the semantic index and the Library agent), each serially.
 
 **Streams:**
 - 3 `[PARALLEL OK with 4]`. 5 starts only after 3, because it needs the budget types.
@@ -857,7 +858,7 @@ These iterations run in the reverse of the drop order: the most protected item (
 - `tests/unit/test_erase.py`
 **Done criteria**:
 - [x] Named tests: `test_erase_audit_first_aborts_on_audit_failure`, `test_erase_removes_all_user_rows`
-- [x] The residue test of 23 is re-run for the erased user (`tests/unit/test_residue.py`: every table in `sqlite_master` mapped or allowlisted, a byte scan of `data/`, user B intact)
+- [x] A residue test runs for the erased user. 23's own residue test is not built yet, so 35 creates `tests/unit/test_residue.py` (every table in `sqlite_master` mapped or allowlisted, a byte scan of `data/`, user B intact)
 - [x] [std] (a maintainer CLI with a typed, expiring confirmation; `/erase` in the REPL is info only; see iter35-ods.md D-222..D-226). 🔴 owner approval pending
 **Effort**: M (1) · **Depends on**: 21, 23 (and 32, 34, 39 when they exist) · **Risk**: high. **Rollback:** the command stays unregistered, and the owner is told. If 35 is dropped, the README documents the retention gap (SEC-18).
 
@@ -950,6 +951,13 @@ These iterations run in the reverse of the drop order: the most protected item (
 - [x] Named tests: `test_run_sql_is_not_bindable_by_library_agent`, `test_delete_tool_only_previews_and_user_confirms`, `test_set_preference_uses_the_prefs_store_and_validation`, `test_llm_failure_gives_template_never_analyst`, `test_report_routes_to_deep_and_library_to_library_agent`
 - [x] [std]
 **Effort**: M (1) · **Depends on**: 22a, 33, 39 · **Risk**: medium (delete path, 🔴 area: owner review pending)
+
+## Review fixes after 35–46 (not a numbered iteration)
+**Goal**: close the findings of the review of iterations 33–46. Commits bfd4219, 0e9591d, 713a4ae; details and decisions D-227..D-234 in `docs/process/iter-review-fixes-ods.md`.
+- [x] Report-id PII exemption only for a standalone store-issued id (D-227)
+- [x] `/export` to a per-owner hashed folder, never over a file (D-228); rename and export need the user's own intent in the Library agent (D-229)
+- [x] Erase writes `erase.attempted` first and audits a rollback as `erase.failed` (D-230); bounded `--sql-file` read (D-231); hybrid search match labels (D-232); AWS key ids scrubbed (D-233); maintainer identity note (D-234)
+- [x] [std]. 🔴 areas (PII, deletion/erasure, audit): owner approval pending
 
 ### Thu 2026-10-08: final run, README, clean machine; Step 6 from 12:00
 
