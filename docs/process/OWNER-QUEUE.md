@@ -222,6 +222,9 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | D-165 | ✅ Owner 2026-10-05: Live-1 router OD-1, go router-only. The English regex override for unavailable data (inventory, warehouse, ad spend, web visits) is removed; router-v3 labels these `simple` and the analyst says the data is not available and offers proxies. | — | nothing |
 | D-166 | ✅ Owner 2026-10-05: Live-1 reports OD-6, delete accepts the displayed `R-<id>` as well as the bare id. Done (78493b7) | — | nothing |
 | D-167 | ✅ Owner 2026-10-05: Live-1 reports OD-8, the catalogue's categories and departments join the brands in the PII allowlist, so NER no longer masks e.g. "Swim". Done (78493b7) | — | nothing |
+| D-168 | ✅ Owner 2026-10-05: fix the golden report cases, not the graph: `q1_report` expects `report_pending`, `report_save_confirm` and `save_this` expect `report_saved`; `report_save_confirm` runs live (Live-1 OD-9). Done (3a52947) | — | nothing |
+| D-169 | ✅ Owner 2026-10-05: one session-id shape. The live eval SUT uses `uuid4().hex` like the CLI, so live graph paths audit (Live-1 OD-12). Done (3a52947) | — | nothing |
+| D-170 | ✅ Owner 2026-10-05: D-162 aggregate-only stickiness lasts the whole session (bands OD-1/OD-2 confirmed, no code change). OD-3 (hide vs merge small bands) still open. Done (3a52947) | — | nothing |
 
 ## Scope questions (🟡: add now / defer to README "future work" / skip)
 
@@ -285,3 +288,6 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | D-163 | done | 07ba671. Banded queries must return a provable distinct-customer count column (band_count_required); rows with fewer than 5 customers are dropped in run_sql. |
 | D-166 | done | 78493b7. parse_delete_request strips an optional `R-` prefix (command and natural-language forms); negation handling unchanged. |
 | D-167 | done | 78493b7. CATALOGUE_CATEGORIES/CATALOGUE_DEPARTMENTS in guards/pii.py; the CLI and the live eval SUT allowlist them. Cue-based hits ("Name:") are still masked. |
+| D-168 | done | 3a52947. GOLDEN_OUTCOMES in the golden shape test admits report_pending/report_saved; report_save_confirm live skip dropped. |
+| D-169 | done | 3a52947. live_sut sid = uuid4().hex; tests assert SESSION_ID_RE. Offline ids keep the ev- form (no audit writes offline). |
+| D-170 | done | 3a52947. Docs only (iter-d162-d163-bands.md OD-2). |
