@@ -160,6 +160,14 @@ def _install_pii_detector(profiles: Iterable[Profile]) -> None:
     set_default_detector(PiiDetector(build_allowlist(brands=brands)))
 
 
+def register_runtime_secrets(settings: Settings) -> None:
+    """Register every secret the runtime may see, so logs and traces scrub it (also used by
+    the live eval harness, evals/live_sut.py)."""
+    register_secret(settings.gemini_api_key)
+    register_secret(os.environ.get(AES_KEY_ENV))
+    register_secret(os.environ.get("LANGFUSE_SECRET_KEY"))  # iteration 40 (optional)
+
+
 @dataclass
 class Runtime:
     """What the REPL drives. Built by :func:`build_runtime` (or a test fake)."""
@@ -584,9 +592,7 @@ def _main(
             profiles = load_profiles_with_overrides(None, data_dir)
             profile = select_profile(profiles, args.user)
             settings = load_settings()  # loads .env, so the AES key may come from there
-            register_secret(settings.gemini_api_key)
-            register_secret(os.environ.get(AES_KEY_ENV))
-            register_secret(os.environ.get("LANGFUSE_SECRET_KEY"))  # iteration 40 (optional)
+            register_runtime_secrets(settings)
             local_startup_check(data_dir=data_dir)
             checkpointer = build_checkpointer(data_dir)  # no valid AES key: refuse (D-78)
         except ConfigError as e:

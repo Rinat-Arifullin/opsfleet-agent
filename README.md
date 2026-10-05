@@ -76,4 +76,5 @@ leaves the process; result rows, tool results, pending actions and delete proofs
 It works the same with `OPSFLEET_LLM_PROVIDER=lmstudio`.
 
 To run Langfuse locally with Docker, see [infra/langfuse/README.md](infra/langfuse/README.md).
+That README also shows how to upload the golden eval cases as a Langfuse dataset and run them live (`evals/langfuse_dataset.py upload` / `run`).
 Design and the exact list of fields sent: [docs/process/iter40-ods.md](docs/process/iter40-ods.md).

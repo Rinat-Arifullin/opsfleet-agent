@@ -45,6 +45,36 @@ It needs Docker with Compose v2 and about 4 GB of free RAM.
    Each user turn appears under **Tracing** as one trace named `turn`, grouped by CLI session
    under **Sessions**. `/trace` in the CLI prints the Langfuse trace id of the last turn.
 
+## Golden evals as a Langfuse dataset
+
+With the server running and `LANGFUSE_*` set (step 4), you can upload the golden cases as a
+dataset and run them live against the real agent. Each run appears under **Datasets ->
+opsfleet-golden -> Runs**. Every item is linked to its turn trace and gets a `pass` score plus
+one `check:<name>` score per eval check.
+
+```bash
+# upsert evals/cases/golden as dataset "opsfleet-golden" (item id = case id; safe to repeat)
+uv run python evals/langfuse_dataset.py upload
+
+# run the live agent on every item; the run name defaults to <short commit>-<UTC timestamp>
+OPSFLEET_LLM_PROVIDER=lmstudio uv run python evals/langfuse_dataset.py run
+# a quick check: one item, or chosen cases (--case is repeatable)
+OPSFLEET_LLM_PROVIDER=lmstudio uv run python evals/langfuse_dataset.py run --limit 1
+OPSFLEET_LLM_PROVIDER=lmstudio uv run python evals/langfuse_dataset.py run --case churn_last_month
+
+# the same live agent through the plain eval runner (results under evals/results/)
+OPSFLEET_LLM_PROVIDER=lmstudio uv run python evals/run.py \
+  --sut evals.live_sut:live_harness --cases-dir evals/cases/golden
+```
+
+`run` prints a summary table and the dataset run URL. It exits with 0 when every case passed,
+1 when any case failed, and 2 when Langfuse is not configured or unreachable. Without the
+provider override it uses Gemini, which counts against your quota. Live eval state (sessions,
+saved reports, quota, JSONL traces) goes to `OPSFLEET_EVAL_DATA_DIR` (default
+`<OPSFLEET_DATA_DIR or data>/eval-live`), never to your own CLI store. Each case is capped at
+8 turns and at `OPSFLEET_EVAL_CASE_TIMEOUT_S` seconds (default 600). Cases that seed saved
+reports, a persona or preferences fail with a clear reason. See `docs/process/iter40b-ods.md`.
+
 ## Stop or reset
 
 ```bash
