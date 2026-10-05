@@ -401,13 +401,9 @@ Full rows are in `docs/process/OWNER-QUEUE.md` and the ADRs are in `docs/decisio
    - Some entities listed there are not tables (sessions, preferences).
    - `saved_report` has no embedding column.
    - `user_quota` and `aggregate_fingerprint` have different columns from the HLD.
-7. **Table-not-found error code** stays `BQ_RUNTIME` (`bq/errors.py`), although the owner chose `UNKNOWN_COLUMN` (D-22).
 
 ## 11. Open items
 
-- **Decided but not applied in code:**
-  - D-22, the table-not-found error code.
-  - Both are small code changes plus ADR-003 text.
 - **OD-3 (bands): hide or merge small spend bands.** This is an owner decision.
 - **Product names that begin with a name-like word** are masked by NER (D-171 note). This is a 🔴 PII question for the owner.
 - **🔴 iterations awaiting owner review** (committed with `[owner review pending]`): 5–15, 17, 19, 21, 22a, 24, plus the CLI wiring. Nothing merges into `main` without the owner.

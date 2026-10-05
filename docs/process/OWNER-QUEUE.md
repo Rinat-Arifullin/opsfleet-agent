@@ -44,7 +44,7 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | D-133 | Accepted (newest 200 reports) | — |
 | D-6 | **2 retries, 1 s / 2 s backoff** (neither the plan nor ADR-003) | ✅ done 2026-10-05: `BACKOFFS_S=(1.0, 2.0)` in `graph/llm.py`; the turn-wide cap of 6 retries is unchanged; ADR-003 and HLD §4.0.4, §4.4, §8 updated |
 | D-9, D-13, D-48 | Typed tokens (`<EMAIL>`, `<PHONE>`...) everywhere | align ACs and any remaining `[REDACTED]` text |
-| D-22 | Take the HLD: table-not-found maps to `UNKNOWN_COLUMN` | code change (iteration 13 error mapping) |
+| D-22 | Take the HLD: table-not-found maps to `UNKNOWN_COLUMN` | ✅ done 2026-10-05: `bq/errors.py` matches "Not found: Table …" (dataset or project not-found stays `BQ_RUNTIME`); the table name is returned only if it is bare in the SQL |
 | D-45 | Keep the code (QI expressions inside counting aggregates refused) | fix HLD §5.2 |
 | D-28 | Keep the UNNEST rejection | fix HLD §5.3 |
 | D-46, D-47 | Keep: links become `<URL>`; an injection hit blocks the whole answer | fix the HLD failure-table row |
