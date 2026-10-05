@@ -495,10 +495,10 @@ The checkpointer exists **before** 17 (M-3). Role subgraphs are compiled with `c
 - `src/opsfleet_agent/graph/resume.py`
 - `tests/unit/test_resume.py`
 **Done criteria**:
-- [ ] Named tests: `test_resume_budget_persisted`, `test_resume_after_crash_each_node`
-- [ ] A missing or wrong `LANGGRAPH_AES_KEY` refuses the resume with one actionable line. Nothing is decrypted or replayed.
-- [ ] A scope snapshot that differs from the current profile starts a new session (the full test is in 19)
-- [ ] [std]
+- [x] Named tests: `test_resume_budget_persisted`, `test_resume_after_crash_each_node`
+- [x] A missing or wrong `LANGGRAPH_AES_KEY` refuses the resume with one actionable line. Nothing is decrypted or replayed.
+- [x] A scope snapshot that differs from the current profile starts a new session (the full test is in 19)
+- [x] [std]
 **Effort**: M (1) · **Depends on**: 14a · **Risk**: high. **Rollback:** if a case is red, `--resume` is disabled (a new session always starts), and the owner is told.
 
 ## Iteration 15: Context assembly, scope filter, memory, clarification 🔴
