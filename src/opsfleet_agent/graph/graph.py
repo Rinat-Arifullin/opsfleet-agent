@@ -82,6 +82,7 @@ from opsfleet_agent.graph.memory import SessionMemory
 from opsfleet_agent.guards.input import check_input
 from opsfleet_agent.guards.output import REFUSAL_TEXT, ROLE_TOOLS, check_output
 from opsfleet_agent.guards.scope import ProductScope
+from opsfleet_agent.obs import progress
 from opsfleet_agent.persona import Persona, assemble_prompt
 from opsfleet_agent.reports.schema import missing_sections
 from opsfleet_agent.roles.analyst import (
@@ -726,7 +727,7 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
             },
             models=models,
             tracer=ctx.tracer,
-            on_tool_name=ctx.tool_names.append,
+            on_tool_name=lambda name: _tool_requested(ctx, name),
             on_envelope=lambda name, env: _collect_figures(ctx, name, env),
         )
 
@@ -1177,8 +1178,14 @@ def _finalize(ctx: TurnContext, state: TurnState) -> dict[str, Any]:
 # --- supervisor ---------------------------------------------------------------------------------
 
 
+def _tool_requested(ctx: TurnContext, name: str) -> None:
+    ctx.tool_names.append(name)
+    progress.report(progress.TOOL_PREFIX + name)  # D-147: display only; never raises
+
+
 def _safe(name: str, fn: Callable[[TurnState], dict[str, Any]]):
     def run(state: TurnState) -> dict[str, Any]:
+        progress.report(name)  # D-147: the CLI spinner's stage; a no-op without a hook
         try:
             return fn(state)
         except GraphBubbleUp:  # iteration 17: interrupt() must reach LangGraph, never swallowed

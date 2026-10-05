@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from opsfleet_agent import commands
+from opsfleet_agent.cli_progress import Spinner
 from opsfleet_agent.commands.access import load_profiles_with_overrides
 from opsfleet_agent.config import (
     ConfigError,
@@ -379,17 +380,25 @@ class _Repl:
         work runs, so a Ctrl-C at any point lands in exactly one place. The BigQuery cancel,
         the flag reset and the checkpoint close all run in normal flow (:meth:`_cancelled`).
         Used for a normal turn and for the ``--resume`` turn alike.
+
+        D-147: on a TTY a one-line stage spinner runs meanwhile; it is stopped and its line
+        erased before anything else is printed (the answer, or the Ctrl-C cleanup).
         """
         in_main = threading.current_thread() is threading.main_thread()
         previous = signal.getsignal(signal.SIGINT) if in_main else None
+        spinner = Spinner(sys.stdout)  # off a TTY: writes nothing
         try:
             try:
                 if in_main:
                     signal.signal(signal.SIGINT, _raise_interrupt)
+                spinner.start()
                 return run()
             finally:
-                if in_main and previous is not None:
-                    signal.signal(signal.SIGINT, previous)
+                try:
+                    spinner.stop()
+                finally:
+                    if in_main and previous is not None:
+                        signal.signal(signal.SIGINT, previous)
         except KeyboardInterrupt:
             self._cancelled(turn_id)
             return None
