@@ -38,7 +38,15 @@ from enum import StrEnum
 from typing import Final
 
 from opsfleet_agent.config import ConfigError
-from opsfleet_agent.graph.graph import AES_KEY_ENV, AgentGraph, TurnResult, scope_snapshot
+from opsfleet_agent.delete.flow import INTERRUPTED
+from opsfleet_agent.graph.graph import (
+    AES_KEY_ENV,
+    DELETE_CONFIRM_NODE,
+    DELETE_EXECUTE_NODE,
+    AgentGraph,
+    TurnResult,
+    scope_snapshot,
+)
 from opsfleet_agent.guards.scope import ProductScope
 from opsfleet_agent.session import Profile, Session
 
@@ -154,6 +162,10 @@ def close_interrupted_turn(agent: object, session: Session, turn_id: str | None)
     of replaying the cancelled turn. Local only (no LLM, no BigQuery). Never raises;
     returns whether a turn was closed. Anything other than an :class:`AgentGraph` is a
     no-op (test fakes).
+
+    MJ-1: a pending delete (confirm or execute stage) is a cancel: it is closed through
+    :meth:`PendingTurn.close_delete` (``delete.cancelled``, reason ``interrupted``, nothing
+    deleted). The reply turn that resumed it matches too (it may not have reached state).
     """
     if not isinstance(agent, AgentGraph):
         return False
@@ -163,8 +175,14 @@ def close_interrupted_turn(agent: object, session: Session, turn_id: str | None)
             return False
         if pending.values.get("owner") != session.profile.user_id:
             return False
-        if turn_id is not None and pending.values.get("turn_id") != turn_id:
-            return False
+        is_delete = bool({DELETE_CONFIRM_NODE, DELETE_EXECUTE_NODE} & set(pending.next))
+        stored = pending.values.get("turn_id")
+        if turn_id is not None and stored != turn_id:
+            if not is_delete or agent.delete_reply_turn(session.session_id) != turn_id:
+                return False
+        if is_delete:
+            closed = pending.close_delete(INTERRUPTED, turn_id or str(stored or ""))
+            return closed.outcome != "error" and not agent.open_resume(session).next
         compiled = pending._built[1]
         config = agent._config(session.session_id)
         compiled.update_state(config, {"outcome": "cancelled"}, as_node=_FINAL_NODE)

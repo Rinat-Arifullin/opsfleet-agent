@@ -300,3 +300,14 @@ def test_record_failure_does_not_mask_original_exception(tmp_path, monkeypatch):
             raise KeyError("orig")
     with t.span("tool", tool="x"):  # also does not raise on the ok path
         pass
+
+
+def test_forget_secret_stops_scrubbing_only_that_value() -> None:
+    """mn-6: the public unregister used by the delete flow; unknown values are ignored."""
+    keep, drop = "SENTINEL-keep-secret-1", "SENTINEL-drop-secret-2"
+    tr.register_secret(keep)
+    tr.register_secret(drop)
+    tr.forget_secret(drop)
+    tr.forget_secret("SENTINEL-never-registered")
+    out = tr.scrub_text(f"{keep} {drop}")
+    assert keep not in out and drop in out

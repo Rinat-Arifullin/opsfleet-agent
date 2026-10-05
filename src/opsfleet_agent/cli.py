@@ -198,6 +198,23 @@ def _make_router_invoke(settings: Settings) -> Any:  # pragma: no cover - needs 
     return invoke
 
 
+def wire_delete(conn: Any, audit_log: Any, reports: Any) -> Any:
+    """Start the delete service (iteration 22a) and register ``/delete`` only if it started.
+
+    Any failure leaves the feature off: the service is None and ``/delete`` stays
+    unregistered (the feature-off rollback path). Never raises.
+    """
+    from opsfleet_agent.commands.delete import DELETE_COMMAND
+    from opsfleet_agent.delete.flow import setup_delete
+
+    svc = setup_delete(conn, audit_log, reports)
+    if svc is None:
+        commands.unregister_command(DELETE_COMMAND.name)
+    else:
+        commands.register_command(DELETE_COMMAND)
+    return svc
+
+
 def build_runtime(
     settings: Settings, checkpointer: Any, session: Session, data_dir: Path
 ) -> Runtime:  # pragma: no cover - production wiring: BigQuery and Gemini clients
@@ -251,6 +268,7 @@ def build_runtime(
         reports=reports,
         known_brands=known_brands,
         golden_index=golden,
+        delete=wire_delete(conn, audit_log, reports),  # 22a: None keeps /delete unregistered
     )
     return Runtime(
         graph=AgentGraph(services, checkpointer),
@@ -313,7 +331,12 @@ class _Repl:
             report_store=rt.report_store,
             scope=self._scope(),
             listing=self.listing,
+            delete_start=self._delete_start,
         )
+
+    def _delete_start(self, args: str) -> str:
+        """``/delete``: the graph shows the preview; the next user turn confirms or cancels."""
+        return self.runtime.graph.start_delete(args, session=self.session).text
 
     def _scope(self) -> ProductScope | None:
         """The current scope for report commands; an invalid profile fails closed (None)."""

@@ -9,6 +9,8 @@ lists the user's own saved reports (titles only; the optional words use the dele
 ``/open <id | row n | title words>`` shows one, ``/search <words> [tag:x] [from:D] [to:D]``
 substring-searches them
 (iteration 18). ``/export`` belongs to 22a and stays a stub (OD-5 in iter19-ods.md).
+``/delete`` (iteration 22a, ``commands.delete``) is registered at startup only when the delete
+service is ready; otherwise it stays unregistered (feature-off rollback path).
 """
 
 from __future__ import annotations
@@ -50,6 +52,9 @@ class CommandContext:
     # Ids of the last /reports, /search or ambiguous /open listing, for "/open <n>". The CLI
     # passes the SAME list object every turn. Only /open reads it; no delete path takes it.
     listing: list[str] = field(default_factory=list)
+    # Iteration 22a: starts a two-phase delete on the graph and returns the reply text (the
+    # preview, never a deletion). None while the delete feature is off (fail closed).
+    delete_start: Callable[[str], str] | None = None
 
 
 REPORTS_LIST_LIMIT: Final = 20
@@ -240,6 +245,16 @@ def _table() -> dict[str, Command]:
 
 
 COMMANDS: Final[dict[str, Command]] = _table()
+
+
+def register_command(cmd: Command) -> None:
+    """Add an optional command at startup (``/delete`` when the delete feature is on)."""
+    COMMANDS[cmd.name] = cmd
+
+
+def unregister_command(name: str) -> None:
+    """Remove an optional command (feature off or failed closed). Missing names are fine."""
+    COMMANDS.pop(name, None)
 
 
 def is_command(line: str) -> bool:

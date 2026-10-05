@@ -130,6 +130,12 @@ def register_secret(value: str | None) -> None:
         _secrets.add(value)
 
 
+def forget_secret(value: str) -> None:
+    """Stop scrubbing one registered value (it no longer exists, e.g. a closed delete's
+    proof), so the scrubber set stays bounded. Unknown values are ignored."""
+    _secrets.discard(value)
+
+
 def clear_secrets() -> None:
     _secrets.clear()
 

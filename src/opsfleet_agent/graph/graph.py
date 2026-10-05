@@ -55,6 +55,7 @@ from langgraph.types import Command, interrupt
 from opsfleet_agent.bq.client import BigQueryRunner
 from opsfleet_agent.bq.schema import TableMetadataCache
 from opsfleet_agent.config import ConfigError, Settings
+from opsfleet_agent.delete import flow as delete_flow
 from opsfleet_agent.golden.seed import Hit, to_store_items
 from opsfleet_agent.graph.budget import (
     FORCE_ANSWER_ROLE,
@@ -150,6 +151,8 @@ _QA_ROLE_SUBCAPS: Final = {**LIGHT_ROLE_SUBCAPS, QUICK: 6, DEEP: 6, FORCE_ANSWER
 # iteration 17: a report turn runs under the REPORT caps (14 calls, 180 s) + writer/verifier subcaps
 _REPORT_ROLE_SUBCAPS: Final = {**_QA_ROLE_SUBCAPS, **REPORT_ROLE_SUBCAPS}
 CONFIRM_NODE: Final = "confirm_save"
+DELETE_CONFIRM_NODE: Final = "confirm_delete"  # iteration 22a
+DELETE_EXECUTE_NODE: Final = "execute_delete"  # iteration 22a
 REPORT_PROMPT: Final = "Reply save to store this report, revise <what to change>, or cancel."
 SAVE_DISABLED_TEXT: Final = "Saving reports is turned off right now, so this report was not saved."
 SAVE_FAILED_TEXT: Final = "The report could not be saved; nothing was stored. Please ask again."
@@ -298,6 +301,9 @@ class TurnState(TypedDict, total=False):
     # D-117: refs (trio_id@version) of the Golden examples load_context put in the prompt, so a
     # resumed turn rebuilds the same examples without another embedding call
     golden_refs: list[str]
+    # iteration 22a: the pending delete (ids, sha256(token), binding fields, step). Not in
+    # _TURN_RESET: it lives from the preview turn to the confirmation turn. Never the token.
+    pending_action: dict[str, Any]
 
 
 _TURN_RESET: Final[dict[str, Any]] = {
@@ -343,6 +349,8 @@ class GraphServices:
     known_brands: Collection[str] = ()
     # D-117: golden.GoldenIndex; None = Golden examples disabled
     golden_index: Any = None
+    # iteration 22a: delete.flow.DeleteService; None = delete disabled (fail closed)
+    delete: Any = None
 
     def window(self) -> tuple[date, date]:
         if self.data_window is not None:
@@ -376,6 +384,8 @@ class TurnContext:
     assembled: AssembledContext | None = None  # set by load_context (iteration 15)
     can_confirm: bool = False  # iteration 17: a checkpointer exists, so interrupt() can pause
     forced_label: str | None = None  # iteration 17: "revise" re-runs the turn as a report
+    delete_request: Any = None  # iteration 22a: a parsed delete selector routes START -> preview
+    delete_turn: int = 0  # iteration 22a: the session's user-turn number (confirm = preview + 1)
 
     def __post_init__(self) -> None:
         self.sql_turn = RunSqlTurn(self.turn_id, sql_counter=self.budget)
@@ -588,6 +598,20 @@ def _previous_user(state: TurnState, scope: ProductScope) -> UserTurn | None:
         return None
 
 
+_DELETE_ROUTE: Final[dict[str, str]] = {"route": "delete", "label": "delete"}
+
+
+def _delete_spans(ctx: TurnContext, st: Any, pid: object) -> None:
+    """The delete span for an audited step; an error span (code only) for an unsafe one."""
+    if st.event:
+        _record(ctx, "delete", st.event, event=st.event, count=st.count,
+                pending_action_id=pid if isinstance(pid, str) else None,
+                audit_event_id=st.audit_event_id)  # fmt: skip
+    if st.step == "unsafe":
+        _record(ctx, "error", "delete", code=st.error or "delete_unsafe",
+                message=delete_flow.UNSAFE_TEXT)  # fmt: skip
+
+
 def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, Any]]]:
     sv = ctx.services
     settings = sv.settings
@@ -795,6 +819,54 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
             return {"final_text": REVISING_TEXT, "outcome": "report_cancelled"}
         return {"final_text": CANCELLED_TEXT, "outcome": "report_cancelled"}
 
+    # --- iteration 22a: two-phase delete (preview -> interrupt -> confirm -> execute) -------
+
+    def delete_preview(state: TurnState) -> dict[str, Any]:
+        svc, req = sv.delete, ctx.delete_request
+        if svc is None or req is None or not ctx.can_confirm:
+            text = delete_flow.UNAVAILABLE_TEXT
+            return {**_DELETE_ROUTE, "final_text": text, "outcome": "refused", "pending_action": {}}
+        st = svc.preview(
+            req, owner=ctx.profile.user_id, scope=ctx.sql_session.scope,
+            session_id=ctx.session_id, turn_id=ctx.turn_id, preview_turn=ctx.delete_turn,
+        )  # fmt: skip
+        _delete_spans(ctx, st, (st.pending or {}).get("pending_action_id"))
+        return {**_DELETE_ROUTE, "final_text": st.text, "outcome": st.outcome,
+                "pending_action": st.pending or {}}  # fmt: skip
+
+    def confirm_delete(state: TurnState) -> dict[str, Any]:
+        # Re-runs from the top on resume (LangGraph): everything before interrupt() is
+        # read-only. Confirm never deletes; execute_delete is a separate node (HLD 6.3.3).
+        pa = state.get("pending_action") or {}
+        if pa.get("step") != "preview":
+            return {}
+        reply = interrupt({"kind": DELETE_CONFIRM_NODE, "count": pa.get("count", 0),
+                           "pending_action_id": pa.get("pending_action_id", "")})  # fmt: skip
+        svc = sv.delete
+        if svc is None:  # the feature went off while pending: nothing is deleted
+            return {**_DELETE_ROUTE, "pending_action": {}, "outcome": "delete_expired",
+                    "final_text": delete_flow.EXPIRED_TEXT}  # fmt: skip
+        st = svc.confirm(pa, reply, turn=ctx.delete_turn, owner=ctx.profile.user_id,
+                         session_id=ctx.session_id, turn_id=ctx.turn_id)  # fmt: skip
+        _delete_spans(ctx, st, pa.get("pending_action_id"))
+        if st.step == "confirmed":  # MJ-1: the confirmation turn owns the pending execute
+            return {**_DELETE_ROUTE, "pending_action": {**pa, "step": "confirmed"},
+                    "turn_id": ctx.turn_id}  # fmt: skip
+        return {**_DELETE_ROUTE, "pending_action": {}, "final_text": st.text,
+                "outcome": st.outcome}  # fmt: skip
+
+    def execute_delete(state: TurnState) -> dict[str, Any]:
+        pa = state.get("pending_action") or {}
+        svc = sv.delete
+        if svc is None or pa.get("step") != "confirmed":
+            st = delete_flow.Step("unsafe", delete_flow.UNSAFE_TEXT, error="not_confirmed")
+        else:
+            st = svc.execute(pa, owner=ctx.profile.user_id, session_id=ctx.session_id,
+                             turn_id=ctx.turn_id)  # fmt: skip
+        _delete_spans(ctx, st, pa.get("pending_action_id"))
+        return {**_DELETE_ROUTE, "pending_action": {}, "final_text": st.text,
+                "outcome": st.outcome}  # fmt: skip
+
     def finalize(state: TurnState) -> dict[str, Any]:
         return _finalize(ctx, state)
 
@@ -808,6 +880,9 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
         "grounding": grounding,
         "report_writer": report_writer,  # iteration 17
         CONFIRM_NODE: confirm_save,  # iteration 17
+        "delete_preview": delete_preview,  # iteration 22a
+        DELETE_CONFIRM_NODE: confirm_delete,
+        DELETE_EXECUTE_NODE: execute_delete,
         "finalize": finalize,
     }
 
@@ -1053,7 +1128,7 @@ def _guard(ctx: TurnContext, state: TurnState, draft: str):
 def _finalize(ctx: TurnContext, state: TurnState) -> dict[str, Any]:
     label = state.get("label", "")
     update: dict[str, Any] = {}
-    if state.get("route") in ("refuse", "light", "clarify", "report"):  # report: iteration 17
+    if state.get("route") in ("refuse", "light", "clarify", "report", "delete"):
         text = state.get("final_text", "")
         if not text:  # e.g. a resumed state without the light/refusal/clarify text: fail closed
             text, update["outcome"] = ERROR_TEXT, "error"
@@ -1168,12 +1243,36 @@ def _after_writer(state: TurnState) -> str:
     return CONFIRM_NODE if not _errored(state) and state.get("route") == "report" else "finalize"
 
 
+def _pending_step(state: TurnState) -> str:
+    return str((state.get("pending_action") or {}).get("step") or "")
+
+
 def _build(ctx: TurnContext, checkpointer: Any) -> Any:
     nodes = _make_nodes(ctx)
     g = StateGraph(TurnState)
     for name, fn in nodes.items():
         g.add_node(name, _snapshotting(ctx, _safe(name, fn)))
-    g.add_edge(START, "input_guard")
+    # iteration 22a: only code (a parsed user request) routes a turn into the delete flow
+    g.add_conditional_edges(
+        START,
+        lambda _s: "delete_preview" if ctx.delete_request is not None else "input_guard",
+        ["delete_preview", "input_guard"],
+    )
+    g.add_conditional_edges(
+        "delete_preview",
+        lambda s: DELETE_CONFIRM_NODE
+        if not _errored(s) and ctx.can_confirm and _pending_step(s) == "preview"
+        else "finalize",
+        [DELETE_CONFIRM_NODE, "finalize"],
+    )
+    g.add_conditional_edges(
+        DELETE_CONFIRM_NODE,
+        lambda s: "execute_delete"
+        if not _errored(s) and _pending_step(s) == "confirmed"
+        else "finalize",
+        ["execute_delete", "finalize"],
+    )
+    g.add_edge("execute_delete", "finalize")
     g.add_conditional_edges("input_guard", _after_guard, ["finalize", "light", "load_context"])
     g.add_conditional_edges("load_context", _after_context, ["quick", "deep", "light", "finalize"])
     g.add_conditional_edges("quick", _after_quick, ["deep", "force_answer", "finalize"])
@@ -1194,6 +1293,16 @@ class AgentGraph:
         self.services = services
         self.checkpointer = checkpointer
         self._sql_sessions: dict[str, RunSqlSession] = {}
+        # iteration 22a: user turns per session (in memory; a delete confirms only at
+        # preview_turn + 1, and a restart expires any pending delete with the key)
+        self._turn_seq: dict[str, int] = {}
+        # MJ-1: the turn id of the reply that resumed a pending delete, per session (in
+        # memory), so a Ctrl-C in that reply turn closes the delete it paused
+        self._delete_reply_turn: dict[str, str] = {}
+
+    def _next_turn(self, session: Session) -> None:
+        sid = session.session_id
+        self._turn_seq[sid] = self._turn_seq.get(sid, 0) + 1
 
     def _sql_session(self, session: Session) -> RunSqlSession:
         got = self._sql_sessions.get(session.session_id)
@@ -1213,7 +1322,19 @@ class AgentGraph:
         self, raw_text: str, *, session: Session, turn_id: str | None = None
     ) -> TurnResult:
         """Run one turn. Never raises: any failure becomes a templated message."""
+        self._next_turn(session)
         return self._run(raw_text, session, turn_id or uuid.uuid4().hex[:12])
+
+    def start_delete(
+        self, args: str, *, session: Session, turn_id: str | None = None
+    ) -> TurnResult:
+        """``/delete <selector>`` (iteration 22a): the same preview as a natural-language
+        request, without the intent words. Never raises."""
+        self._next_turn(session)
+        req = delete_flow.parse_delete_request(args, command=True)
+        if req is None:
+            req = delete_flow.DeleteRequest("phrase", error=delete_flow.SELECTOR_EMPTY)
+        return self._run(args, session, turn_id or uuid.uuid4().hex[:12], delete_req=req)
 
     def _run(
         self,
@@ -1222,6 +1343,7 @@ class AgentGraph:
         tid: str,
         forced_label: str | None = None,
         check_pending: bool = True,
+        delete_req: delete_flow.DeleteRequest | None = None,
     ) -> TurnResult:
         try:
             sql_session = self._sql_session(session)
@@ -1236,17 +1358,34 @@ class AgentGraph:
                     # M1: another user's session is refused before any graph write, so its
                     # history, ledger and pending draft stay exactly as they were
                     return TurnResult(OTHER_OWNER_TEXT, outcome="refused")
+                # iteration 22a: a confirmed delete stranded before execute_delete (a crash
+                # or Ctrl-C) is closed first, re-verified, never silently dropped (OD-10)
+                if check_pending and DELETE_EXECUTE_NODE in tuple(st.next):
+                    return self._close_stranded(raw_text, session, tid, forced_label,
+                                                delete_req)  # fmt: skip
+                # iteration 22a: the reply to a pending delete (only a user turn reaches here)
+                if check_pending and DELETE_CONFIRM_NODE in tuple(st.next):
+                    return self._answer_delete(ctx, graph, values, raw_text, session, tid,
+                                               delete_req)  # fmt: skip
                 # iteration 17: a reply to a pending report draft, or "save this as a report"
                 if check_pending and CONFIRM_NODE in tuple(st.next):
+                    if delete_req is not None:  # TR-14: no delete while a draft waits
+                        return TurnResult(DELETE_WHILE_PENDING_TEXT, label="report",
+                                          route="report", outcome="refused")  # fmt: skip
                     return self._answer_draft(ctx, graph, values, raw_text, session, tid)
                 if check_pending and _SAVE_LAST_RE.match(_reply_forms(raw_text)[0]):
                     return self._save_last(ctx, values, session, tid)
+            if delete_req is None and check_pending:  # deterministic: never the model
+                delete_req = delete_flow.parse_delete_request(raw_text)
+            if delete_req is not None:
+                return self._start_delete(ctx, graph, delete_req, session, tid)
             start = {
                 **_TURN_RESET,
                 "turn_id": tid,
                 "scope_snapshot": scope_snapshot(sql_session.scope),
                 "owner": session.profile.user_id,
                 "turn_ctx": {},
+                "pending_action": {},
             }
             config, durable = self._config(session.session_id), self._durability()
             out = run_with_recursion_guard(lambda: graph.invoke(start, config, **durable))
@@ -1254,6 +1393,87 @@ class AgentGraph:
             logger.error("turn failed: %s", type(exc).__name__)
             return TurnResult(ERROR_TEXT, outcome="error")
         return _result(ctx, out)
+
+    # --- iteration 22a: the two-phase delete ---------------------------------------------------
+
+    def _start_delete(
+        self, ctx: TurnContext, graph: Any, req: delete_flow.DeleteRequest, session: Session,
+        tid: str,
+    ) -> TurnResult:  # fmt: skip
+        """Preview a stated selector (AC-12.1). The raw text never enters state; the graph
+        runs delete_preview, then pauses in confirm_delete (interrupt)."""
+        if req.error:
+            return TurnResult(delete_flow.SELECTOR_EMPTY_TEXT, label="delete", route="delete",
+                              outcome="refused")  # fmt: skip
+        if self.services.delete is None or self.checkpointer is None:
+            return TurnResult(delete_flow.UNAVAILABLE_TEXT, label="delete", route="delete",
+                              outcome="refused")  # fmt: skip
+        ctx.delete_request = req
+        ctx.delete_turn = self._turn_seq.get(session.session_id, 0)
+        start = {
+            **_TURN_RESET,
+            "turn_id": tid,
+            "scope_snapshot": scope_snapshot(ctx.sql_session.scope),
+            "owner": session.profile.user_id,
+            "turn_ctx": {},
+            "pending_action": {},
+        }
+        config, durable = self._config(session.session_id), self._durability()
+        out = run_with_recursion_guard(lambda: graph.invoke(start, config, **durable))
+        return _result(ctx, out)
+
+    def delete_reply_turn(self, session_id: str) -> str | None:
+        """The turn id of the last reply that resumed a pending delete in ``session_id``."""
+        return self._delete_reply_turn.get(session_id)
+
+    def _close_stranded(
+        self, raw: str, session: Session, tid: str, forced_label: str | None,
+        delete_req: delete_flow.DeleteRequest | None,
+    ) -> TurnResult:  # fmt: skip
+        """MJ-1: a confirmed delete left before execute_delete (a crash, a kill) is never run
+        by an unrelated next turn. It is expired (``stranded``, audited), the user is told
+        nothing was deleted, and then the turn is answered. Only an explicit resume
+        (``--resume``, :meth:`PendingTurn.finish`) may still execute it (OD-10)."""
+        closed = self.open_resume(session).close_delete(delete_flow.STRANDED, tid)
+        st = _build(_new_context(self.services, "", session, self._sql_session(session), ""),
+                    self.checkpointer).get_state(self._config(session.session_id))  # fmt: skip
+        if DELETE_EXECUTE_NODE in tuple(st.next):  # still stuck: never loop, never delete
+            return closed
+        res = self._run(raw, session, tid, forced_label=forced_label, delete_req=delete_req)
+        return dataclasses.replace(res, text=f"{closed.text}\n\n{res.text}")
+
+    def _answer_delete(
+        self, ctx: TurnContext, graph: Any, values: dict[str, Any], raw: str, session: Session,
+        tid: str, delete_req: delete_flow.DeleteRequest | None,
+    ) -> TurnResult:  # fmt: skip
+        """The next user turn after a preview. Only an exact confirmation carries a proof;
+        anything else resumes with an empty proof (cancelled and audited) and is then
+        answered as a normal turn with a fresh context (AC-12.3). A second delete request
+        cancels the pending one (AC-12.13: one pending delete per session)."""
+        svc = self.services.delete
+        pa = values.get("pending_action") or {}
+        ctx.turn_id = tid  # the confirmation turn is audited under its own id
+        ctx.delete_turn = self._turn_seq.get(session.session_id, 0)
+        config, durable = self._config(session.session_id), self._durability()
+        self._delete_reply_turn[session.session_id] = tid  # MJ-1: a Ctrl-C here closes it
+
+        def resume(payload: dict[str, str]) -> TurnResult:
+            out = run_with_recursion_guard(
+                lambda: graph.invoke(Command(resume=payload), config, **durable)
+            )
+            return _result(ctx, out)
+
+        cancel = {"reply": "", "pending_action_id": str(pa.get("pending_action_id") or ""),
+                  "proof_sha256": ""}  # fmt: skip
+        if delete_req is not None or delete_flow.parse_delete_request(raw) is not None:
+            resume(cancel)
+            return TurnResult(delete_flow.DELETE_PENDING_TEXT, label="delete", route="delete",
+                              outcome="delete_cancelled")  # fmt: skip
+        if delete_flow.is_confirm(raw, pa.get("count")):
+            return resume(svc.reply_payload(raw, pa) if svc is not None else cancel)
+        closed = resume(cancel)
+        res = self._run(raw, session, tid, check_pending=False)
+        return dataclasses.replace(res, text=f"{closed.text}\n\n{res.text}")
 
     # --- iteration 17: the confirm-before-save answer and "save this as a report" -------------
 
@@ -1390,6 +1610,18 @@ class PendingTurn:
         restored. Never starts a new turn. Never raises."""
         if self._built is None or not self.next:
             return TurnResult(ERROR_TEXT, outcome="error")
+        if DELETE_CONFIRM_NODE in self.next:  # iteration 22a: re-shown, never confirmed here
+            svc = self.agent.services.delete
+            pa = self.values.get("pending_action") or {}
+            why = "key_changed" if svc is None else svc.lapse_reason(pa)
+            if why is not None:  # a restart made a new K_delete, or the preview lapsed:
+                # close it (EXPIRED, turn closed) so the next delete request previews afresh
+                tid = str(self.values.get("turn_id") or "") or uuid.uuid4().hex
+                return self.close_delete(why, tid)
+            text = self.values.get("final_text") or ERROR_TEXT
+            return TurnResult(text, label="delete", route="delete", outcome="delete_pending")
+        if DELETE_EXECUTE_NODE in self.next:  # 22a M1: stopped between confirm and execute
+            return self._finish_delete()
         if CONFIRM_NODE in self.next:  # iteration 17: a pending draft is re-shown, never saved
             saved = self._already_saved()
             if saved is not None:
@@ -1407,6 +1639,52 @@ class PendingTurn:
         except Exception as exc:
             logger.error("resume failed: %s", type(exc).__name__)
             return TurnResult(ERROR_TEXT, outcome="error")
+        return _result(ctx, out)
+
+    def close_delete(self, reason: str, turn_id: str) -> TurnResult:
+        """MJ-1: close a delete paused in confirm_delete or stranded before execute_delete
+        WITHOUT running it: ``delete.cancelled`` (``interrupted``, a Ctrl-C) or
+        ``delete.expired`` (``stranded``), then the turn is closed in the checkpoint as if
+        finalize ran. The service drops the proof first, so even a failed state write can
+        never lead to a delete. Never raises."""
+        if self._built is None or not {DELETE_CONFIRM_NODE, DELETE_EXECUTE_NODE} & set(self.next):
+            return TurnResult(ERROR_TEXT, outcome="error")
+        ctx, graph = self._built
+        svc = self.agent.services.delete
+        pa = self.values.get("pending_action") or {}
+        if svc is None or not pa:  # the feature went off while pending: nothing is deleted
+            st = delete_flow.Step("expired", delete_flow.EXPIRED_TEXT, error=reason)
+        else:
+            st = svc.abandon(pa, reason, owner=self.session.profile.user_id,
+                             session_id=self.session.session_id, turn_id=turn_id)  # fmt: skip
+        try:
+            _delete_spans(ctx, st, pa.get("pending_action_id"))
+            graph.update_state(
+                self.agent._config(self.session.session_id),
+                {**_DELETE_ROUTE, "pending_action": {}, "final_text": st.text,
+                 "outcome": st.outcome},
+                as_node="finalize",
+            )  # fmt: skip
+        except Exception as exc:
+            logger.error("delete close failed: %s", type(exc).__name__)
+            return TurnResult(delete_flow.UNSAFE_TEXT, label="delete", route="delete",
+                              outcome="delete_unsafe")  # fmt: skip
+        return TurnResult(st.text, label="delete", route="delete", outcome=st.outcome)
+
+    def _finish_delete(self) -> TurnResult:
+        """Run ONLY execute_delete. It re-verifies before deleting: an executed delete
+        reports its recorded count; a new K_delete (restart) or a confirm older than
+        ``EXECUTE_GRACE_S`` writes ``delete.expired`` and deletes nothing (OD-10)."""
+        ctx, graph = self._built
+        try:
+            ctx.turn_id = ctx.sql_turn.turn_id = str(self.values.get("turn_id") or "")
+            config = self.agent._config(self.session.session_id)
+            durable = self.agent._durability()
+            out = run_with_recursion_guard(lambda: graph.invoke(None, config, **durable))
+        except Exception as exc:
+            logger.error("resume: delete finish failed: %s", type(exc).__name__)
+            return TurnResult(delete_flow.UNSAFE_TEXT, label="delete", route="delete",
+                              outcome="delete_unsafe")  # fmt: skip
         return _result(ctx, out)
 
     def _already_saved(self) -> TurnResult | None:

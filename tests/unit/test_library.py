@@ -111,7 +111,8 @@ def test_list_masks_drifted_report_title(store) -> None:
 def test_view_report_scope_drift(store) -> None:
     rid = _add(store, "k1", title="Wide title", extra="wide body", brands=("Acme", "Zenith"))
     res = library.view_report(store, "analyst_a", ACME, rid)
-    assert res.status == "scope_drift" and rid in res.text
+    # the id is rendered PII-scrubbed: a random hex id with a long digit run reads as <ID>
+    assert res.status == "scope_drift" and library._line(rid, 80) in res.text
     assert "different product scope" in res.text
     assert "Wide title" not in res.text and "wide body" not in res.text
     assert library.view_report(store, "analyst_a", None, rid).status == "scope_drift"
