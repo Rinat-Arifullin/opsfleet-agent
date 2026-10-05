@@ -531,9 +531,13 @@ def test_guard_error_goes_to_finalize(make_env, monkeypatch) -> None:
     _assert_errored_and_idle(env, env.ask("How many complete orders are there?"))
 
 
-def test_context_error_goes_to_finalize(make_env, monkeypatch) -> None:
+def test_assemble_context_error_goes_to_finalize(make_env, monkeypatch) -> None:
+    """load_context raising (here: assemble_context) ends the turn as an error, not a crash.
+
+    A failure inside Golden retrieval degrades instead of erroring: see
+    test_golden_wiring.py::test_broken_index_never_breaks_a_turn."""
     env = make_env(Router("simple"), Scripted(sql_call(SIMPLE), ModelTurn("3 complete orders.")))
-    monkeypatch.setattr(gr, "_retrieve_golden", _boom)
+    monkeypatch.setattr(gr, "assemble_context", _boom)
     _assert_errored_and_idle(env, env.ask("How many complete orders are there?"))
 
 

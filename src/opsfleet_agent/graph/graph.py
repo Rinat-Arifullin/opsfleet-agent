@@ -40,7 +40,7 @@ import sqlite3
 import time
 import unicodedata
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -55,6 +55,7 @@ from langgraph.types import Command, interrupt
 from opsfleet_agent.bq.client import BigQueryRunner
 from opsfleet_agent.bq.schema import TableMetadataCache
 from opsfleet_agent.config import ConfigError, Settings
+from opsfleet_agent.golden.seed import Hit, to_store_items
 from opsfleet_agent.graph.budget import (
     FORCE_ANSWER_ROLE,
     RECURSION_LIMIT,
@@ -65,6 +66,7 @@ from opsfleet_agent.graph.budget import (
 )
 from opsfleet_agent.graph.context import (
     AssembledContext,
+    StoreItem,
     assemble_context,
     covers,
     ledger_entry_for_state,
@@ -293,6 +295,9 @@ class TurnState(TypedDict, total=False):
     turn_ctx: dict[str, Any]  # TurnBudget counters, SQL ledger, tool names, figures
     # iteration 17: the pending report draft (title, markdown, sections, sql_used, hash, ...)
     report: dict[str, Any]
+    # D-117: refs (trio_id@version) of the Golden examples load_context put in the prompt, so a
+    # resumed turn rebuilds the same examples without another embedding call
+    golden_refs: list[str]
 
 
 _TURN_RESET: Final[dict[str, Any]] = {
@@ -312,6 +317,7 @@ _TURN_RESET: Final[dict[str, Any]] = {
     "grounding_blocked": False,
     "context_message": "",
     "report": {},  # iteration 17: a draft lives one turn (until confirm_save resolves it)
+    "golden_refs": [],  # D-117: retrieved per turn
 }
 
 
@@ -332,6 +338,11 @@ class GraphServices:
     jitter: Callable[[float], float] | None = None
     data_window: Callable[[], tuple[date, date]] | None = None
     reports: Any = None  # iteration 17: store.reports.ReportStore; None = saving disabled
+    # D-96: brands for the context name check (assemble_context drops an item naming a known
+    # brand outside the scope). Offline source until the catalogue query lands (OD-12).
+    known_brands: Collection[str] = ()
+    # D-117: golden.GoldenIndex; None = Golden examples disabled
+    golden_index: Any = None
 
     def window(self) -> tuple[date, date]:
         if self.data_window is not None:
@@ -617,16 +628,28 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
         return {"final_text": res.text, "outcome": outcome, "role": "light_path"}
 
     def load_context(state: TurnState) -> dict[str, Any]:
-        _retrieve_golden(state)  # seam: Golden retrieval arrives with iteration 16
         if state.get("label") == "report":
             _promote_report(ctx)  # iteration 17: REPORT caps (14 calls, 180 s) for the turn
         a = _assemble(state, state["message"])
+        golden: dict[str, Any] = {}
+        refs: list[str] = []
+        # D-117: examples only for a turn that goes on to an analyst (no clarification, not
+        # sent back to light), retrieved on the scrubbed message to answer; outside the LLM cap
+        analyst_bound = state.get("route") != "light" or a.resolved_clarification
+        if a.clarification is None and analyst_bound and sv.golden_index is not None:
+            items, refs, golden = _retrieve_golden(ctx, a.message)
+            if items:  # assemble_context is pure: the second pass only adds the examples
+                a = _assemble(state, state["message"], items)
         ctx.assembled = a
-        _record(ctx, "context", "load_context", **a.trace_fields(), **ctx.persona.trace_fields)
+        _record(
+            ctx, "context", "load_context", **a.trace_fields(), **ctx.persona.trace_fields,
+            **({"golden": golden} if golden else {}),
+        )  # fmt: skip
         update: dict[str, Any] = {
             "scope_label": ctx.profile.scope_label,
             "memory": a.memory.to_state(),
             "context_message": a.message,
+            "golden_refs": refs,
         }
         if a.clarification is not None:  # AC-23.2: one question, no SQL
             update.update(route="clarify", final_text=a.clarification.text, outcome="answered")
@@ -636,7 +659,9 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
             update.update(route="full", label="complex")
         return update
 
-    def _assemble(state: TurnState, message: str) -> AssembledContext:
+    def _assemble(
+        state: TurnState, message: str, golden: tuple[StoreItem, ...] | list[StoreItem] = ()
+    ) -> AssembledContext:
         return assemble_context(
             message,
             scope=ctx.sql_session.scope,
@@ -644,9 +669,9 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
             history=state.get("history") or [],
             summary=state.get("history_summary") or None,
             prior_ledger=state.get("prior_ledger") or [],
-            store_items=(),  # seams: report bodies (17/19), Golden trios (16)
+            store_items=golden,  # D-117 Golden examples; seam: saved report bodies (19)
             memory=SessionMemory.from_state(state.get("memory")),
-            known_brands=(),  # seam: brand catalogue for the name check (TODO owner, OD-4)
+            known_brands=sv.known_brands,  # D-96
         )
 
     def _assembled(state: TurnState) -> AssembledContext:
@@ -654,7 +679,9 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
         # context from the checkpointed state. load_context already cleared any pending
         # clarification and saved the merged message, so this neither asks nor merges again.
         if ctx.assembled is None:
-            ctx.assembled = _assemble(state, state.get("context_message") or state["message"])
+            golden = _golden_from_refs(ctx, state.get("golden_refs"))  # D-117: no embed call
+            msg = state.get("context_message") or state["message"]
+            ctx.assembled = _assemble(state, msg, golden)
         return ctx.assembled
 
     def quick(state: TurnState) -> dict[str, Any]:
@@ -785,8 +812,45 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
     }
 
 
-def _retrieve_golden(state: TurnState) -> list[Any]:
-    return []  # no-op seam (iteration 16)
+def _retrieve_golden(
+    ctx: TurnContext, question: str
+) -> tuple[list[StoreItem], list[str], dict[str, Any]]:
+    """D-117: top-k Golden examples for ``question`` as store items, their refs, trace fields.
+
+    ``GoldenIndex.retrieve`` never raises and makes at most one embedding call; it is not an LLM
+    call, so it does not count against the turn cap (HLD 6.1). The items are untrusted data:
+    ``assemble_context`` fences them as EXAMPLE blocks, scrubs them, caps them per kind and by
+    characters, and drops one naming a known brand outside the scope. Any failure here means
+    no examples and ``unavailable`` in the trace, never a failed turn."""
+    scope = ctx.sql_session.scope
+    try:
+        r = ctx.services.golden_index.retrieve(question, scope)
+        items = to_store_items(r.hits, scope)
+        refs = [h.trio.ref for h in r.hits]
+        trace = {"trio_refs": r.trio_refs, "unavailable": r.unavailable, "mode": r.mode}
+    except Exception as exc:  # noqa: BLE001 - a broken index never breaks a turn
+        logger.error("golden retrieval failed: %s", type(exc).__name__)
+        return [], [], {"trio_refs": [], "unavailable": True, "mode": "none"}
+    return items, refs, trace
+
+
+def _golden_from_refs(ctx: TurnContext, refs: Any) -> list[StoreItem]:
+    """D-117 resume: rebuild the examples load_context chose, by ref, with no embedding call.
+
+    Only trios still in the index and still eligible for the current scope come back, each once
+    (a tampered checkpoint cannot repeat one), in the saved order, at most ``k`` of them."""
+    index = ctx.services.golden_index
+    if index is None or not isinstance(refs, list) or not refs:
+        return []
+    scope = ctx.sql_session.scope
+    try:
+        by_ref = {t.ref: t for t in index.eligible(scope)}
+        wanted = [r for r in dict.fromkeys(r for r in refs if isinstance(r, str)) if r in by_ref]
+        hits = [Hit(by_ref[r], 0.0) for r in wanted[: index.k]]  # deduped, order kept
+        return to_store_items(hits, scope)
+    except Exception as exc:  # noqa: BLE001 - resume falls back to no examples
+        logger.error("golden rebuild failed: %s", type(exc).__name__)
+        return []
 
 
 # --- iteration 17: report helpers ----------------------------------------------------------------

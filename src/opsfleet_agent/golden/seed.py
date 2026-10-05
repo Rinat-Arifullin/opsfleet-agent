@@ -43,7 +43,13 @@ import sqlglot
 import yaml
 from sqlglot import exp
 
-from opsfleet_agent.graph.context import KIND_GOLDEN, StoreItem, covers, snapshot_of
+from opsfleet_agent.graph.context import (
+    KIND_GOLDEN,
+    MAX_STORE_ITEMS,
+    StoreItem,
+    covers,
+    snapshot_of,
+)
 from opsfleet_agent.guards.input import scan_injection
 from opsfleet_agent.guards.pii_regex import scrub
 from opsfleet_agent.guards.scope import ProductScope, ScopedQuery, ScopeError, apply_scope
@@ -484,6 +490,9 @@ class GoldenIndex:
 
     def __post_init__(self) -> None:
         self.trios = tuple(self.trios)
+        # k is never trusted: clamp to 1..MAX_STORE_ITEMS (assemble_context renders no more)
+        k = self.k if isinstance(self.k, int) and not isinstance(self.k, bool) else DEFAULT_K
+        self.k = max(1, min(k, MAX_STORE_ITEMS))
         self._cache = _VectorCache(self.cache_dir, self.dimensionality)
         self._queries = OrderedDict()
 

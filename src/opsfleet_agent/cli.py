@@ -204,6 +204,7 @@ def build_runtime(
     """Wire the production graph: BigQuery runner, schema cache, guards, stores, tracer."""
     from opsfleet_agent.bq.client import BigQueryRunner, make_bigquery_client
     from opsfleet_agent.bq.schema import TableMetadataCache
+    from opsfleet_agent.golden.runtime import build_golden_index, offline_known_brands
     from opsfleet_agent.graph.graph import AgentGraph, GraphServices, build_run_sql_tool
     from opsfleet_agent.guards.differencing import DifferencingGuard
     from opsfleet_agent.guards.pii import default_detector
@@ -217,6 +218,9 @@ def build_runtime(
     from opsfleet_agent.store.reports import ReportStore
     from opsfleet_agent.tools.run_sql import scoped_job_config_factory
 
+    golden = build_golden_index(settings, cache_dir=data_dir)  # D-114/D-117; first: may refuse
+    profiles = load_profiles_with_overrides(None, data_dir).values()
+    known_brands = offline_known_brands(profiles, golden.trios if golden else ())  # D-96
     project = settings.google_cloud_project
     client = make_bigquery_client(project)
     runner = BigQueryRunner(client, project, job_config_factory=scoped_job_config_factory())
@@ -245,6 +249,8 @@ def build_runtime(
         cache=cache,
         tracer=tracer,
         reports=reports,
+        known_brands=known_brands,
+        golden_index=golden,
     )
     return Runtime(
         graph=AgentGraph(services, checkpointer),
