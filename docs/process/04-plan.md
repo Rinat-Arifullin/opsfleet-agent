@@ -560,10 +560,10 @@ The checkpointer exists **before** 17 (M-3). Role subgraphs are compiled with `c
 - `src/opsfleet_agent/commands/__init__.py`: the table
 - `tests/unit/test_cli.py`
 **Done criteria**:
-- [ ] Named tests: `test_cli_commands`, `test_resume_rejects_other_users_session`, `test_resume_scope_drift_new_session`
-- [ ] `/audit` is a command-table entry only, not a tool. No role can reach it (SEC-17; asserted in 21).
-- [ ] Ctrl-C cancels the running BigQuery job through the hook from 5 (the pending-delete half is in 22b)
-- [ ] [std]
+- [x] Named tests: `test_cli_commands`, `test_resume_rejects_other_users_session`, `test_resume_scope_drift_new_session`
+- [x] `/audit` is a command-table entry only, not a tool. No role can reach it (SEC-17; asserted in 21).
+- [x] Ctrl-C cancels the running BigQuery job through the hook from 5 (the pending-delete half is in 22b)
+- [x] [std]
 **Effort**: M+ (1.5) · **Depends on**: 5, 14b, 16 · **Risk**: high. **Rollback:** `--resume` is disabled, and the owner is told.
 
 ## Iteration 21: Audit log and audit viewer 🔴 `[PARALLEL OK with 17]`
