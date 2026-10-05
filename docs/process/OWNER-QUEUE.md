@@ -225,6 +225,7 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | D-168 | ✅ Owner 2026-10-05: fix the golden report cases, not the graph: `q1_report` expects `report_pending`, `report_save_confirm` and `save_this` expect `report_saved`; `report_save_confirm` runs live (Live-1 OD-9). Done (3a52947) | — | nothing |
 | D-169 | ✅ Owner 2026-10-05: one session-id shape. The live eval SUT uses `uuid4().hex` like the CLI, so live graph paths audit (Live-1 OD-12). Done (3a52947) | — | nothing |
 | D-170 | ✅ Owner 2026-10-05: D-162 aggregate-only stickiness lasts the whole session (bands OD-1/OD-2 confirmed, no code change). OD-3 (hide vs merge small bands) still open. Done (3a52947) | — | nothing |
+| D-171 | ✅ Owner 2026-10-05: analytical section headings (Takeaways, Summary, Insights, Note, Highlights, …) are in every PII allowlist (`REPORT_TERMS`, like `SCHEMA_TERMS`); spaCy masked "Takeaways:" as `<PERSON>` and the masked heading leaked into later turns (smoke-9080868). Names next to or sharing a word with a heading are still masked. Product names starting with a name-like word (e.g. "<PERSON> 2 Button … Suit") are a separate open issue. Done (pending) | — | nothing |
 
 ## Scope questions (🟡: add now / defer to README "future work" / skip)
 
@@ -291,3 +292,4 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | D-168 | done | 3a52947. GOLDEN_OUTCOMES in the golden shape test admits report_pending/report_saved; report_save_confirm live skip dropped. |
 | D-169 | done | 3a52947. live_sut sid = uuid4().hex; tests assert SESSION_ID_RE. Offline ids keep the ev- form (no audit writes offline). |
 | D-170 | done | 3a52947. Docs only (iter-d162-d163-bands.md OD-2). |
+| D-171 | done | pending. guards/pii.py REPORT_TERMS, tests/unit/test_d171_report_terms.py. |

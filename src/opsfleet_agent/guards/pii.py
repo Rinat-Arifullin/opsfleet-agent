@@ -162,6 +162,7 @@ MAX_TERM_CHARS = 200
 __all__ = [
     "CATALOGUE_CATEGORIES",
     "CATALOGUE_DEPARTMENTS",
+    "REPORT_TERMS",
     "ADDRESS",
     "ENTITY_TYPES",
     "MIN_SCORE",
@@ -283,6 +284,18 @@ SCHEMA_TERMS: tuple[str, ...] = (
 )  # fmt: skip
 
 
+#: D-171: section headings of an analytical answer. spaCy tags some of them as PERSON
+#: ("Takeaways:" in a live run), and the masked heading then leaks into later turns through
+#: the history. Part of every allowlist, like ``SCHEMA_TERMS``.
+REPORT_TERMS: tuple[str, ...] = (
+    "Takeaway", "Takeaways", "Key Takeaway", "Key Takeaways", "Summary", "Executive Summary",
+    "Insight", "Insights", "Key Insights", "Note", "Notes", "Highlight", "Highlights",
+    "Key Highlights", "Observation", "Observations", "Finding", "Findings", "Key Findings",
+    "Recommendation", "Recommendations", "Conclusion", "Conclusions", "Overview", "Trend",
+    "Trends", "Caveat", "Caveats", "Next Steps", "Breakdown", "Bottom Line",
+)  # fmt: skip
+
+
 #: D-167: the product categories and departments of thelook_ecommerce (a fixed public
 #: catalogue). spaCy tags some of them as PERSON ("Swim"), so every CLI allowlist has them.
 CATALOGUE_CATEGORIES: tuple[str, ...] = (
@@ -302,14 +315,14 @@ def build_allowlist(
 ) -> BrandAllowlist:
     """Build the allowlist from catalogue values. Pure: no I/O, the inputs are injected.
 
-    ``SCHEMA_TERMS`` are always included. Values are folded like ``pii_regex`` folds and
-    compared case-insensitively. Empty or word-less values are skipped. More than
-    ``MAX_ALLOWLIST_TERMS`` distinct terms, or a term longer than ``MAX_TERM_CHARS``,
-    raises ``ValueError`` (a catalogue that large is a bug, not something to truncate
-    silently).
+    ``SCHEMA_TERMS`` and ``REPORT_TERMS`` are always included. Values are folded like
+    ``pii_regex`` folds and compared case-insensitively. Empty or word-less values are
+    skipped. More than ``MAX_ALLOWLIST_TERMS`` distinct terms, or a term longer than
+    ``MAX_TERM_CHARS``, raises ``ValueError`` (a catalogue that large is a bug, not
+    something to truncate silently).
     """
     seen: dict[tuple[str, ...], str] = {}
-    for source in (SCHEMA_TERMS, brands, categories, departments):
+    for source in (SCHEMA_TERMS, REPORT_TERMS, brands, categories, departments):
         for raw in source:
             if not isinstance(raw, str):
                 continue
