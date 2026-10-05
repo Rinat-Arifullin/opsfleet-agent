@@ -9,6 +9,7 @@ Clock, sleep and jitter are injectable so tests never sleep.
 
 from __future__ import annotations
 
+import logging
 import random
 import time
 from collections.abc import Callable, Mapping
@@ -299,6 +300,26 @@ def _with_attempts(res: LLMSuccess | LLMFailure, attempts: int) -> LLMSuccess | 
     return res
 
 
+GENAI_MODELS_LOGGER = "google_genai.models"
+AFC_ADVICE_PREFIX = "Direct use of automatic function calling (AFC)"
+
+
+class _DropAfcAdvice(logging.Filter):
+    """Drops the SDK's one-off AFC advice, which breaks the CLI spinner line. It does not
+    apply here: langchain passes function declarations, not callables, so the SDK makes a
+    single request and our graph runs every tool. Other SDK warnings pass."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not record.getMessage().startswith(AFC_ADVICE_PREFIX)
+
+
+def silence_afc_advice() -> None:
+    """Attach :class:`_DropAfcAdvice` to the google-genai models logger. Idempotent."""
+    logger = logging.getLogger(GENAI_MODELS_LOGGER)
+    if not any(isinstance(f, _DropAfcAdvice) for f in logger.filters):
+        logger.addFilter(_DropAfcAdvice())
+
+
 def build_chat_model(
     model: str,
     api_key: str,
@@ -313,6 +334,7 @@ def build_chat_model(
     """
     from langchain_google_genai import ChatGoogleGenerativeAI
 
+    silence_afc_advice()
     kwargs: dict[str, Any] = {"model": model, "api_key": api_key, "max_retries": 1}
     if thinking_level is not None:
         kwargs["thinking_level"] = thinking_level

@@ -325,3 +325,23 @@ def test_classify_error_httpx_and_genai_by_name():
         assert isinstance(classify_error(APIError(code)), TransientLLMError)
     for code in (400, 401, 403):
         assert not isinstance(classify_error(APIError(code)), TransientLLMError)
+
+
+def test_afc_advice_is_dropped_and_other_sdk_warnings_pass(caplog):
+    import logging
+
+    from opsfleet_agent.graph.llm import AFC_ADVICE_PREFIX, GENAI_MODELS_LOGGER, silence_afc_advice
+
+    logger = logging.getLogger(GENAI_MODELS_LOGGER)
+    before = list(logger.filters)
+    logger.filters[:] = []  # another test may have built a chat model already
+    try:
+        silence_afc_advice()
+        silence_afc_advice()
+        assert len(logger.filters) == 1
+        with caplog.at_level(logging.WARNING, logger=GENAI_MODELS_LOGGER):
+            logger.warning(AFC_ADVICE_PREFIX + " in Models.generate_content is not recommended.")
+            logger.warning("quota exceeded")
+        assert [r.getMessage() for r in caplog.records] == ["quota exceeded"]
+    finally:
+        logger.filters[:] = before
