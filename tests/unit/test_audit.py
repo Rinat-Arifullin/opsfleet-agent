@@ -211,11 +211,11 @@ def test_audit_append_only(log: A.AuditLog, rec, conn: sqlite3.Connection) -> No
     )
     (only,) = log.events()
     assert only.actor_user_id == USER and only.event_type == A.GUARDRAIL_REFUSED
-    # No mutation API exists on the log; erasure is a documented, unimplemented seam.
+    # No mutation API exists on the log; the only audit mutation is the pseudonymisation
+    # inside the module-level audited_erase (iteration 35, tests/unit/test_erase.py).
     public = {n for n in dir(A.AuditLog) if not n.startswith("_")}
     assert not public & {"update", "delete", "remove", "erase", "clear", "purge", "edit"}
-    with pytest.raises(NotImplementedError):
-        A.erase_actor(log, USER)
+    assert not hasattr(A, "erase_actor")
     assert rows(conn) == 1
 
 
@@ -754,7 +754,9 @@ def test_delete_keyboard_interrupt_after_audit_insert(
 # --- round 4: unforgeable delete outcomes, kind integrity, commit/transaction windows ---
 
 
-@pytest.mark.parametrize("event_type", [A.DELETE_EXECUTED, A.DELETE_FAILED])
+@pytest.mark.parametrize(
+    "event_type", [A.DELETE_EXECUTED, A.DELETE_FAILED, A.ERASE_EXECUTED, A.ERASE_FAILED]
+)
 def test_delete_outcome_events_cannot_be_forged(
     log: A.AuditLog, conn: sqlite3.Connection, rec, event_type: str
 ) -> None:

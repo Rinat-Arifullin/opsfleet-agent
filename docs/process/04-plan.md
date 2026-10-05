@@ -856,9 +856,9 @@ These iterations run in the reverse of the drop order: the most protected item (
 - `src/opsfleet_agent/commands/erase.py`
 - `tests/unit/test_erase.py`
 **Done criteria**:
-- [ ] Named tests: `test_erase_audit_first_aborts_on_audit_failure`, `test_erase_removes_all_user_rows`
-- [ ] The residue test of 23 is re-run for the erased user
-- [ ] [std]
+- [x] Named tests: `test_erase_audit_first_aborts_on_audit_failure`, `test_erase_removes_all_user_rows`
+- [x] The residue test of 23 is re-run for the erased user (`tests/unit/test_residue.py`: every table in `sqlite_master` mapped or allowlisted, a byte scan of `data/`, user B intact)
+- [x] [std] (a maintainer CLI with a typed, expiring confirmation; `/erase` in the REPL is info only; see iter35-ods.md D-222..D-226). 🔴 owner approval pending
 **Effort**: M (1) · **Depends on**: 21, 23 (and 32, 34, 39 when they exist) · **Risk**: high. **Rollback:** the command stays unregistered, and the owner is told. If 35 is dropped, the README documents the retention gap (SEC-18).
 
 ## Iteration 34: `/history` browse (drop 6)

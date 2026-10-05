@@ -14,6 +14,8 @@ rename a report, write it as a Markdown file under ``<data dir>/exports/`` and r
 report phase of this session's last failed report (no SQL).
 ``/delete`` (iteration 22a, ``commands.delete``) is registered at startup only when the delete
 service is ready; otherwise it stays unregistered (feature-off rollback path).
+``/erase`` (iteration 35, D-222) only explains the erasure process: erasure itself is the
+maintainer CLI ``commands.erase``, so no chat session can erase a user.
 """
 
 from __future__ import annotations
@@ -305,6 +307,12 @@ def _export(args: str, ctx: CommandContext) -> CommandResult:
 
 
 RETRY_TURN_TEXT: Final = "retry report"
+ERASE_INFO_TEXT: Final = (
+    "Erasing your data is done by the support team, not from the chat: ask a maintainer to "
+    "run the erase command for your user id. It removes your saved reports, preferences, "
+    "feedback, quotas, sessions, local traces and export files, and keeps only a "
+    "pseudonymous audit record. Nothing was deleted now."
+)
 
 
 def _retry(args: str, _ctx: CommandContext) -> CommandResult:
@@ -312,6 +320,11 @@ def _retry(args: str, _ctx: CommandContext) -> CommandResult:
     if args.strip():
         return CommandResult("Usage: /retry (re-runs the last failed report of this session)")
     return CommandResult("", turn=RETRY_TURN_TEXT)
+
+
+def _erase(_args: str, _ctx: CommandContext) -> CommandResult:
+    """D-222: information only. No chat path can erase a user (SEC-18)."""
+    return CommandResult(ERASE_INFO_TEXT)
 
 
 def _table() -> dict[str, Command]:
@@ -353,6 +366,7 @@ def _table() -> dict[str, Command]:
             _export,
         ),  # fmt: skip
         Command("/retry", "/retry", "Retry the last failed report (no new queries).", _retry),
+        Command("/erase", "/erase", "How to have all your data erased (support only).", _erase),
     ]
     return {c.name: c for c in cmds}
 

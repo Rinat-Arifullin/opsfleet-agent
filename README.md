@@ -295,6 +295,7 @@ with `/` is a command and never reaches the LLM. Any other line is a turn with i
 | `/audit [--session \| --user]` | Show audit events: saves, deletes, refusals |
 | `/persona` | Show the active persona version |
 | `/prefs [set format\|depth\|charts <value> \| note <text> \| reset]` | View or change your answer preferences (format, depth, charts, short notes); kept across sessions, never above the safety rules |
+| `/erase` | Explains how to have your data erased; erasure itself is a maintainer CLI ([User erasure](#user-erasure-maintainers)), so no chat command can erase anyone |
 
 Ctrl-C during an answer cancels the turn within about a second: the BigQuery job is cancelled
 and the turn is closed in the checkpoint. A second Ctrl-C at the prompt quits with exit code
@@ -777,6 +778,32 @@ uv run python -m opsfleet_agent.commands.triage --as support_demo promote <id> \
 - Every state change writes an audit row first (`/audit` shows it); if that fails, nothing
   changes. The CLI prints only scrubbed text.
 
+### User erasure (maintainers)
+
+A user's local data is erased by a maintainer (same `config/maintainers.yaml` allowlist as
+triage), never from the chat. The first run is a preview: it prints counts per store, never
+content, and a confirmation token that expires after 5 minutes and is bound to the maintainer,
+the user and exactly the previewed data.
+
+```bash
+uv run python -m opsfleet_agent.commands.erase --as support_demo --user <user id>
+uv run python -m opsfleet_agent.commands.erase --as support_demo --user <user id> \
+    --confirm <token> --retype <user id>
+```
+
+- Erased: saved reports with their full-text and vector rows, preferences, feedback, quota
+  rows, differencing fingerprints (one transaction in `app.db`), then the user's checkpoint
+  threads, local trace files, export files and Golden candidates built from their feedback.
+- The `erase.executed` audit row is written first and names the user only by a random
+  pseudonym; the user's earlier audit rows are rewritten to that pseudonym. If the audit write
+  fails, nothing is deleted. A file that cannot be deleted is printed, audited as
+  `erase.failed`, and the command exits 1.
+- Listed for a person, not erased: regression-case drafts in `evals/cases/`, the user's entry
+  in `config/profiles.yaml`, checkpoint threads that cannot be decrypted, remote Langfuse
+  traces and backups.
+- A second erase of the same user deletes nothing and is still audited. A maintainer cannot
+  erase themselves.
+
 ---
 
 ## Configuration reference
@@ -854,16 +881,16 @@ design.
 | `retry report` (rewrite from the stored evidence, no SQL) | Not built | architecture.md §2.3 |
 | `/export`, report rename | `/export` is a stub | architecture.md §6.3.1 |
 | Admin commands for access and persona changes in the REPL | Audit-first APIs exist; not wired to the REPL | technical.md §1.5 |
-| **Erasure (`/erase`, right to be forgotten)** | **Not built** (`erase_actor` raises `NotImplementedError`) | architecture.md §6.7 |
+| Erasure (right to be forgotten) | Built (iteration 35) as a maintainer CLI, see [User erasure](#user-erasure-maintainers); `/erase` in the REPL only explains it. Not built: erasing remote Langfuse traces and backups, and a self-service erase | architecture.md §6.7 |
 | Sessions and preferences stores | Memory lives in the encrypted checkpoint | technical.md §9 |
 | Some adversarial and resilience eval categories; gitleaks and a live eval job in CI | Not built | technical.md §9 |
 
-**Retention gap caused by the missing erasure.** Without `/erase`, data a user leaves behind is
-only removed by deleting files. That covers saved reports, audit events, checkpoints and
-traces. Saved reports can be deleted with `/delete`, but audit events are append-only by design
-and stay. Checkpoints and traces stay in `data/` until you remove that folder. Differencing
-fingerprints expire after 30 days. Everything stored is scrubbed of PII first, but production
-needs the erasure flow in the HLD before real users.
+**Retention gaps after erasure.** The erasure CLI removes a user's rows and local files and
+pseudonymises their audit events, which are otherwise append-only. It cannot reach remote
+Langfuse traces, backups of `data/`, or `config/profiles.yaml`; it lists those for a person.
+It does not VACUUM `app.db`: `secure_delete` zeroes freed pages and the WAL is truncated after
+the erase (D-224). Without an erase request, checkpoints and traces stay in `data/` until you
+remove them, and differencing fingerprints expire after 30 days.
 
 Other open items, such as product names that begin with a name-like word being masked by NER,
 are tracked in [technical.md §11](docs/technical.md) and the
