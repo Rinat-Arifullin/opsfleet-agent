@@ -894,7 +894,8 @@ def _fts_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {str(r[1]).lower() for r in conn.execute(f"PRAGMA main.table_info({_q(table)})")}
 
 
-# Empty in production until iterations 22a/23 register reports and the library.
+# Empty until startup registers the deletable kinds (`delete.flow.setup_delete`: saved_report
+# and its index dependents).
 # Each entry keeps the kind and a value fingerprint taken at registration (L1): a frozen
 # dataclass can still be changed through object.__setattr__, even into another valid
 # definition, so every delete compares the live fields against the registered ones.

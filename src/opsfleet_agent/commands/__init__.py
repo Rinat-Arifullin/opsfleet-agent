@@ -30,7 +30,6 @@ log = logging.getLogger(__name__)
 
 MAX_LINE_CHARS: Final = 4000  # bound on the argument text handed to a handler
 UNKNOWN_TEXT: Final = "Unknown command; type /help."
-NOT_AVAILABLE_TEXT: Final = "{name} is not available yet in this version."
 STORE_UNAVAILABLE_TEXT: Final = "This command is unavailable right now (local store not open)."
 EXAMPLE_QUESTIONS: Final = (
     "How many orders were completed last month?",
@@ -89,14 +88,12 @@ class Command:
     usage: str
     help: str
     handler: Callable[[str, CommandContext], CommandResult]
-    stub: bool = field(default=False)
 
 
 def _help(_args: str, _ctx: CommandContext) -> CommandResult:
     lines = ["Commands:"]
     for cmd in COMMANDS.values():
-        suffix = " (not available yet)" if cmd.stub else ""
-        lines.append(f"  {cmd.usage:<34} {cmd.help}{suffix}")
+        lines.append(f"  {cmd.usage:<34} {cmd.help}")
     lines.append("Example questions:")
     lines += [f"  {q}" for q in EXAMPLE_QUESTIONS]
     lines.append("Ctrl-C cancels a running answer; Ctrl-C twice at the prompt quits.")
@@ -352,7 +349,7 @@ def _table() -> dict[str, Command]:
         Command("/open", "/open <id|n|title>", "Open a saved report.", _open),
         Command(
             "/search",
-            "/search <words> [tag:x]",
+            "/search <words> [tag:x] [from:D] [to:D]",
             "Search saved reports by words and meaning, best match first.",
             _search,
         ),

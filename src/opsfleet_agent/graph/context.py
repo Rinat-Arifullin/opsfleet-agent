@@ -2,8 +2,8 @@
 
 :func:`assemble_context` is a pure function: no I/O, no model, no graph state mutation. From the
 current scope, the session history, the history summary (a seam until the summarising call
-lands), prior ledger entries, stored items (saved-report bodies, Golden seed trios and
-preference notes; seams until iterations 16/19/39) and session memory it returns an
+lands), prior ledger entries, stored items (saved-report bodies, Golden seed trios and stored
+preference notes) and session memory it returns an
 :class:`AssembledContext`.
 
 Rules enforced here, in code:
