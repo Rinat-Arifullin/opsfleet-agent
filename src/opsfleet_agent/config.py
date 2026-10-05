@@ -32,6 +32,16 @@ SAFE_KEYS = ("google_cloud_project", "models_path", "limiter_fraction")
 
 ModelLister = Callable[[], Iterable[str]]
 
+# D-143: dev-only local LLM provider. Gemini stays the default; unset means unchanged behaviour.
+PROVIDER_ENV = "OPSFLEET_LLM_PROVIDER"
+BASE_URL_ENV = "OPSFLEET_LLM_BASE_URL"
+GEMINI = "gemini"
+LMSTUDIO = "lmstudio"
+PROVIDERS = (GEMINI, LMSTUDIO)
+# 127.0.0.1, not localhost: avoids IPv6 localhost resolution issues on macOS.
+MAX_EMBEDDING_DIM = 8192  # sanity bound for local.embedding_dim
+DEFAULT_LMSTUDIO_BASE_URL = "http://127.0.0.1:1234/v1"
+
 
 class ConfigError(Exception):
     """Raised with one actionable line; never contains secret values."""
@@ -67,6 +77,8 @@ class Settings:
     quota_llm_per_hour: int = 300  # per user, iteration 24 (D-138)
     quota_llm_per_day: int = 2000
     quota_bq_bytes_per_day: int = 100_000_000_000
+    llm_provider: str = GEMINI
+    llm_base_url: str = ""
 
     def configured_model_ids(self) -> list[str]:
         ids: list[str] = []
@@ -204,6 +216,65 @@ def parse_quota(path: Path) -> dict[str, int]:
     return out
 
 
+def parse_local_section(path: Path) -> tuple[str, str, int]:
+    """`local.chat_model`, `local.embedding_model` and `local.embedding_dim` (D-143). Read only
+    under lmstudio, so a missing `local:` section never affects the Gemini path. Model ids are
+    pure config values."""
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        raise ConfigError(
+            f"{path.name} cannot be read or is not valid YAML. Fix it or restore it from git."
+        ) from None
+    local = (raw or {}).get("local") if isinstance(raw, dict) else None
+    if not isinstance(local, dict):
+        raise ConfigError(
+            f"{path.name} has no 'local' section; {PROVIDER_ENV}={LMSTUDIO} needs "
+            "local.chat_model, local.embedding_model and local.embedding_dim."
+        )
+    chat, emb = local.get("chat_model"), local.get("embedding_model")
+    if not isinstance(chat, str) or not chat.strip() or not isinstance(emb, str) or not emb.strip():
+        raise ConfigError(
+            f"{path.name} is invalid: local.chat_model and local.embedding_model must be "
+            "non-empty strings."
+        )
+    dim = local.get("embedding_dim")
+    if isinstance(dim, bool) or not isinstance(dim, int) or not 1 <= dim <= MAX_EMBEDDING_DIM:
+        raise ConfigError(
+            f"{path.name} is invalid: local.embedding_dim must be a positive integer "
+            f"(1..{MAX_EMBEDDING_DIM})."
+        )
+    return chat.strip(), emb.strip(), dim
+
+
+def redact_url(url: str) -> str:
+    """The URL with any userinfo (``user:pass@``) removed, for error and log messages.
+
+    Works on the raw string, not ``urlsplit``: a password containing ``/`` makes ``urlsplit``
+    put part of the userinfo into the path. Everything from ``//`` through the last ``@`` goes;
+    an ``@`` in a path would over-redact, which is harmless in a message."""
+    if not isinstance(url, str):
+        return "<invalid url>"
+    scheme_end = url.find("//")
+    if scheme_end < 0 or "@" not in url[scheme_end + 2 :]:
+        return url
+    return url[: scheme_end + 2] + url[url.rindex("@") + 1 :]
+
+
+def _provider_from_env() -> tuple[str, str]:
+    provider = os.environ.get(PROVIDER_ENV, "").strip().lower() or GEMINI
+    if provider not in PROVIDERS:
+        raise ConfigError(f"{PROVIDER_ENV} must be one of: {', '.join(PROVIDERS)}.")
+    if provider == GEMINI:
+        return provider, ""
+    url = os.environ.get(BASE_URL_ENV, "").strip() or DEFAULT_LMSTUDIO_BASE_URL
+    if not url.startswith(("http://", "https://")):
+        raise ConfigError(
+            f"{BASE_URL_ENV} must be an http(s) URL, e.g. {DEFAULT_LMSTUDIO_BASE_URL}."
+        )
+    return provider, url.rstrip("/")
+
+
 def load_settings(models_path: Path | None = None, *, dotenv: bool = True) -> Settings:
     """Load settings. Raises ConfigError (one line, no secret values) on the first failure."""
     if dotenv:
@@ -211,13 +282,20 @@ def load_settings(models_path: Path | None = None, *, dotenv: bool = True) -> Se
     project = os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
     if not project:
         raise ConfigError("GOOGLE_CLOUD_PROJECT is not set. See README → Setup.")
+    provider, base_url = _provider_from_env()
     key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if not key:
+    if not key and provider == GEMINI:
         raise ConfigError("GEMINI_API_KEY is not set. See README → Setup.")
     path = models_path or default_models_path()
     roles, emb_model, emb_dim, limits, fraction = parse_models_yaml(path)
     small_cell_k, retry_delay_s = parse_tunables(path)
     quota = parse_quota(path)
+    if provider == LMSTUDIO:
+        # Every role maps to the one local chat model: no fallback (it would be the same model),
+        # no Gemini thinking params, no free-tier limiter.
+        chat_model, emb_model, emb_dim = parse_local_section(path)
+        roles = {name: RoleModel(model=chat_model) for name in roles}
+        limits = {}
     return Settings(
         google_cloud_project=project,
         gemini_api_key=key,
@@ -232,6 +310,8 @@ def load_settings(models_path: Path | None = None, *, dotenv: bool = True) -> Se
         quota_llm_per_hour=quota["llm_per_hour"],
         quota_llm_per_day=quota["llm_per_day"],
         quota_bq_bytes_per_day=quota["bq_bytes_per_day"],
+        llm_provider=provider,
+        llm_base_url=base_url,
     )
 
 
@@ -247,6 +327,50 @@ def genai_model_lister(api_key: str) -> ModelLister:
     return _list
 
 
+LMSTUDIO_LIST_TIMEOUT_S = 5.0
+
+
+def lmstudio_model_lister(base_url: str, timeout_s: float = LMSTUDIO_LIST_TIMEOUT_S) -> ModelLister:
+    """Real lister: GET <base_url>/models on the OpenAI-compatible server. Network; one attempt."""
+
+    def _list() -> list[str]:
+        import json
+        import urllib.request
+
+        req = urllib.request.Request(f"{base_url}/models", headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:  # noqa: S310 (http(s) only)
+            body = json.loads(resp.read().decode("utf-8"))
+        return [str(m["id"]) for m in body.get("data", []) if isinstance(m, dict) and m.get("id")]
+
+    return _list
+
+
+MAX_LISTED_IDS = 20
+
+
+def _lmstudio_check(settings: Settings, lister: ModelLister | None) -> Settings:
+    url = redact_url(settings.llm_base_url)
+    chat_model = settings.roles["router"].model
+    list_models = lister or lmstudio_model_lister(settings.llm_base_url)
+    try:
+        available = [str(m) for m in list_models()]
+    except Exception:
+        raise ConfigError(
+            f"LM Studio is not reachable at {url}; start the server and load {chat_model}."
+        ) from None
+    shown = ", ".join(available[:MAX_LISTED_IDS]) or "none"
+    if len(available) > MAX_LISTED_IDS:
+        shown += f", ... ({len(available) - MAX_LISTED_IDS} more)"
+    for model_id in settings.configured_model_ids():
+        if model_id not in available:
+            raise ConfigError(
+                f"Model {model_id} is not loaded in LM Studio at {url}. "
+                f"LM Studio reports: {shown}. Load it, or copy one of these ids into "
+                "local.chat_model / local.embedding_model in config/models.yaml."
+            )
+    return settings
+
+
 def startup_check(
     lister: ModelLister | None = None,
     models_path: Path | None = None,
@@ -255,6 +379,8 @@ def startup_check(
 ) -> Settings:
     """Stop at the first failure with one actionable ConfigError line."""
     settings = load_settings(models_path, dotenv=dotenv)
+    if settings.llm_provider == LMSTUDIO:
+        return _lmstudio_check(settings, lister)
     list_models = lister or genai_model_lister(settings.gemini_api_key)
     try:
         available = {m.removeprefix("models/") for m in list_models()}

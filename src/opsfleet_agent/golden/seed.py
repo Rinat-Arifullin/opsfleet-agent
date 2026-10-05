@@ -117,8 +117,13 @@ class GoldenTrio:
     def embed_text(self) -> str:
         return f"{self.question}\n{self.report_summary}"
 
-    def content_key(self, model: str, dim: int) -> str:
-        """sha256 of the normalised trio plus model id plus dimension (AC-26.3)."""
+    def content_key(
+        self, model: str, dim: int, query_prefix: str = "", document_prefix: str = ""
+    ) -> str:
+        """sha256 of the normalised trio plus model id plus dimension (AC-26.3).
+
+        D-143: non-empty embedding prefixes join the key, so changing a prefix invalidates the
+        cached vectors. Empty prefixes (Gemini) give the original key byte for byte."""
         norm = {
             "id": self.trio_id,
             "v": self.version,
@@ -128,7 +133,10 @@ class GoldenTrio:
             "tags": sorted(_norm(t) for t in self.tags),
             "brands": sorted(self.brands),
         }
-        blob = json.dumps([norm, model, dim], sort_keys=True, separators=(",", ":"))
+        parts: list[Any] = [norm, model, dim]
+        if query_prefix or document_prefix:
+            parts.append({"qp": query_prefix, "dp": document_prefix})
+        blob = json.dumps(parts, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
@@ -485,6 +493,10 @@ class GoldenIndex:
     k: int = DEFAULT_K
     min_score: float = DEFAULT_MIN_SCORE
     degrade: Literal["none", "lexical"] = "none"
+    # D-143: task prefixes some embedding models need (nomic: "search_query: " and
+    # "search_document: "). Empty for Gemini, so its embed texts are unchanged.
+    query_prefix: str = ""
+    document_prefix: str = ""
     _cache: _VectorCache = field(init=False, repr=False)
     _queries: OrderedDict[str, list[float]] = field(init=False, repr=False)
 
@@ -519,15 +531,22 @@ class GoldenIndex:
             return Retrieval((), True, "none")
         return Retrieval(tuple(hits), False, "embedding")
 
+    def _key(self, t: GoldenTrio) -> str:
+        return t.content_key(
+            self.model, self.dimensionality, self.query_prefix, self.document_prefix
+        )
+
     def _embedding_hits(self, q: str, pool: list[GoldenTrio]) -> list[Hit]:
         if self.embedder is None:
             raise RuntimeError("no embedder")
         qkey = hashlib.sha256(f"{self.model}|{self.dimensionality}|{_norm(q)}".encode()).hexdigest()
         qvec = self._queries.get(qkey)
-        keys = {t.trio_id: t.content_key(self.model, self.dimensionality) for t in pool}
+        keys = {t.trio_id: self._key(t) for t in pool}
         missing = [t for t in pool if self._cache.get(keys[t.trio_id]) is None]
         if qvec is None or missing:
-            texts = ([q] if qvec is None else []) + [t.embed_text() for t in missing]
+            texts = ([self.query_prefix + q] if qvec is None else []) + [
+                self.document_prefix + t.embed_text() for t in missing
+            ]
             out = self.embedder.embed(texts)
             if len(out) != len(texts) or not all(
                 _valid_vector(v, self.dimensionality) for v in out
@@ -541,7 +560,7 @@ class GoldenIndex:
                     self._queries.popitem(last=False)
             self._cache.put_many(
                 {keys[t.trio_id]: v for t, v in zip(missing, vecs, strict=True)},
-                frozenset(t.content_key(self.model, self.dimensionality) for t in self.trios),
+                frozenset(self._key(t) for t in self.trios),
             )
         else:
             self._queries.move_to_end(qkey)

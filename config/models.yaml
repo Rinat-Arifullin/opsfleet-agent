@@ -40,3 +40,11 @@ quota:
   llm_per_hour: 300
   llm_per_day: 2000
   bq_bytes_per_day: 100000000000   # 100 GB scanned per user per UTC day
+# D-143: dev-only local provider, used only when OPSFLEET_LLM_PROVIDER=lmstudio (default: gemini).
+# Every role then uses chat_model; ids must match what LM Studio lists at GET <base_url>/models.
+# embedding_dim is checked against every vector the local embedding model returns.
+# Everything local is test-only: no fallback model, no limiter.
+local:
+  chat_model: qwen/qwen3.8-27b
+  embedding_model: text-embedding-nomic-embed-text-v1.5
+  embedding_dim: 768

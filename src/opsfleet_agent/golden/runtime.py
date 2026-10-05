@@ -25,12 +25,12 @@ from opsfleet_agent.config import ConfigError
 from opsfleet_agent.golden.seed import (
     AGNOSTIC,
     Embedder,
-    GenaiEmbedder,
     GoldenIndex,
     GoldenSeedError,
     GoldenTrio,
     load_seed,
 )
+from opsfleet_agent.graph.providers import build_embedder, embedding_prefixes, golden_cache_dir
 
 log = logging.getLogger(__name__)
 
@@ -57,7 +57,8 @@ def build_golden_index(
     Strict: any bad trio or an unreadable seed raises :class:`ConfigError` (startup refuses;
     the message carries the trio id and reason code only).
     Lenient: bad trios are skipped (count logged); an unreadable seed or an empty result
-    returns None. ``embedder`` defaults to the lazy :class:`GenaiEmbedder` from settings."""
+    returns None. ``embedder`` defaults to the lazy provider embedder from settings (D-143:
+    Gemini, or the OpenAI-compatible local server with its own prefixes and cache directory)."""
     strict = seed_strict() if strict is None else strict
     try:
         loaded = load_seed(seed_path, strict=strict)
@@ -74,8 +75,17 @@ def build_golden_index(
     model = settings.embedding_model
     dim = settings.embedding_dimensionality
     if embedder is None:
-        embedder = GenaiEmbedder(settings.gemini_api_key, model, dim)
-    return GoldenIndex(loaded.trios, embedder, model, dim, cache_dir=cache_dir)
+        embedder = build_embedder(settings)
+    query_prefix, document_prefix = embedding_prefixes(settings)
+    return GoldenIndex(
+        loaded.trios,
+        embedder,
+        model,
+        dim,
+        cache_dir=golden_cache_dir(settings, cache_dir),
+        query_prefix=query_prefix,
+        document_prefix=document_prefix,
+    )
 
 
 def offline_known_brands(

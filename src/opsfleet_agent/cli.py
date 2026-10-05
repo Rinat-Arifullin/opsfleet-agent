@@ -181,19 +181,14 @@ def _make_router_invoke(settings: Settings) -> Any:  # pragma: no cover - needs 
     """Adapter from the router protocol (system/user messages) to the Gemini chat model."""
     from langchain_core.messages import HumanMessage, SystemMessage
 
-    from opsfleet_agent.graph.llm import LLMResponse, build_chat_model
+    from opsfleet_agent.graph.llm import LLMResponse
+    from opsfleet_agent.graph.providers import chat_model_for
 
     cache: dict[str, Any] = {}
 
     def invoke(model: str, messages: Sequence[Any], timeout: float) -> LLMResponse:
         if model not in cache:
-            cfg = next((r for r in settings.roles.values() if r.model == model), None)
-            cache[model] = build_chat_model(
-                model,
-                settings.gemini_api_key,
-                thinking_level=getattr(cfg, "thinking_level", None),
-                thinking_budget=getattr(cfg, "thinking_budget", None),
-            )
+            cache[model] = chat_model_for(settings, model)  # D-143: Gemini or local provider
         lc = [
             SystemMessage(m.content) if m.role == "system" else HumanMessage(m.content)
             for m in messages

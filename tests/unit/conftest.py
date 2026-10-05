@@ -15,3 +15,10 @@ def _block_network(request, monkeypatch):
     monkeypatch.setattr(socket.socket, "connect_ex", _blocked)
     monkeypatch.setattr(socket, "create_connection", _blocked)
     monkeypatch.setattr(socket, "getaddrinfo", _blocked)
+
+
+@pytest.fixture(autouse=True)
+def _default_llm_provider(monkeypatch):
+    """D-143: a developer's local-provider env never leaks into unit tests."""
+    monkeypatch.delenv("OPSFLEET_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("OPSFLEET_LLM_BASE_URL", raising=False)

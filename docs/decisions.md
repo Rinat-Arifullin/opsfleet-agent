@@ -2,7 +2,7 @@
 
 Gate approvals and ADRs, newest last. Each ADR records the context, the decision, the rejected alternatives and the consequences.
 
-**Status:** rev. 4.4 (2026-10-04). ADR-001..014, all **Accepted** at 🔴 G2 (owner approval 2026-10-04). Rev. 4.3 applied the independent review (`docs/process/03b-independent-review.md`) and recorded four owner decisions as proposals. Rev. 4.4 records the owner's answers to those four (2026-10-04) and closes the five residual risks in the design (ADR-004, 005, 007, 013, 014; section "Owner decisions at G2 review" below). Owner choices on open questions are not ADR approvals; every ADR stays Proposed until 🔴 G2.
+**Status:** rev. 4.4 (2026-10-04). ADR-001..015 (15 ADRs): ADR-001..014 **Accepted** at 🔴 G2 (owner approval 2026-10-04); ADR-015 (dev-only local LLM provider) **Accepted** by the owner as D-143 (2026-10-05). Rev. 4.3 applied the independent review (`docs/process/03b-independent-review.md`) and recorded four owner decisions as proposals. Rev. 4.4 records the owner's answers to those four (2026-10-04) and closes the five residual risks in the design (ADR-004, 005, 007, 013, 014; section "Owner decisions at G2 review" below). Owner choices on open questions are not ADR approvals; every ADR stays Proposed until 🔴 G2.
 
 ## G1: Requirements approved (2026-10-04)
 
@@ -403,6 +403,27 @@ The ADRs below were written by the architect from the approved digest (`docs/pro
   - Remainder: in production, deleted reports (aggregates only) may survive in PITR backups for up to 7 days, readable only through break-glass access; conversation checkpoints may still quote report text until their own retention or `/erase` removes them.
   - Requirements A-34 and the HLD notice wording change from 30 to 7 days (by their owners).
 
+## ADR-015: Dev-only local LLM provider (LM Studio)
+
+- **Status:** Accepted by the owner as D-143 (2026-10-05). Dev tooling only; it changes no product behaviour, guardrail or gate. Not a 🔴 risk area: PII, scope, deletion and the SQL policy are enforced in code and do not depend on the provider.
+- **Context:** the Gemini free tier (5 RPM / 20 RPD on gemini-3.8-flash) runs out during development and manual testing. The owner runs LM Studio locally, which serves an OpenAI-compatible API. The local model may change (the default is now `qwen/qwen3.8-27b`; it was Qwen3-30B-A3B-Instruct-2507 and may change again), and newer Qwen models can emit reasoning text.
+- **Decision:**
+  - `OPSFLEET_LLM_PROVIDER=gemini|lmstudio` (default `gemini`) and optional `OPSFLEET_LLM_BASE_URL` (default `http://127.0.0.1:1234/v1`; the IPv4 loopback avoids IPv6 `localhost` resolution issues on macOS), read only in `config.py`. Unset means today's behaviour exactly. Any userinfo (`user:pass@`) in the URL is removed before it appears in an error or log message.
+  - Model ids are config values in the `local:` section of `config/models.yaml` (`chat_model`, `embedding_model`, `embedding_dim`; defaults `qwen/qwen3.8-27b`, `text-embedding-nomic-embed-text-v1.5`, 768); `embedding_dim` must be an integer in 1..8192 and is required when the section exists. No code depends on a specific model. Under `lmstudio` every role maps to `local.chat_model`, with no fallback, no Gemini thinking params and no free-tier limiter. `GEMINI_API_KEY` is not required.
+  - Chat: `ChatOpenAI` with SDK retries off (the ADR-003 ladder still owns retries and the turn deadline). OpenAI SDK errors map onto the existing classes: timeout, 429 and 5xx are transient; a connection error whose cause chain contains `ConnectionRefusedError` or `httpx.ConnectError` (server not running) is non-retryable with the message "LM Studio is not reachable at <url>; start the server and load <model>"; any other connection error (reset, read error) is transient and bounded by the ADR-003 ladder; other statuses are non-retryable. ChatOpenAI runs with `use_responses_api=False` (LM Studio serves Chat Completions). Reasoning is stripped with a bias towards not leaking it (dev-only provider): if the first think tag is `</think>`, or a `</think>` stands alone on its line in text that does not open with `<think>`, everything up to it is a template-opened reasoning prefix and goes; complete `<think>...</think>` blocks go anywhere; any `</think>` still left (nested or unbalanced tags) drops everything through the last one; an unterminated `<think>` goes only at the start. Dropping a prefix logs a warning with its length, never the content. A `<think>` mentioned mid-answer with no closing tag is kept. These blocks and `reasoning_content` are stripped in the adapter, before any parser, JSON extraction or the user sees the text.
+  - Startup check: `GET <base_url>/models` replaces the Gemini model list; a missing model fails with the ids LM Studio reports.
+  - Embeddings: `/v1/embeddings` with the `search_query: ` / `search_document: ` prefixes; any vector whose length differs from `local.embedding_dim` is rejected. Golden vectors of the local provider live in `<data dir>/lmstudio/`, and cache keys carry the model id, dimension and the query/document prefixes (Gemini has empty prefixes, so its keys are byte-identical to before), so vectors of different models never mix and switching provider does not evict the Gemini cache.
+  - Provider logic lives in `graph/providers.py`; call sites change one line each.
+- **Alternatives:**
+  - **LiteLLM or another gateway:** rejected; a new dependency and a proxy for one dev use case.
+  - **Gemma via the Gemini API:** rejected; it uses the same key quota.
+  - **Mock LLM for manual testing:** rejected; it does not exercise real tool calling.
+- **Consequences:**
+  - Development no longer spends the Gemini quota; evals and the deliverable stay on Gemini.
+  - Local answer quality, latency and tool-calling reliability differ from Gemini; a pass under `lmstudio` is not evidence for Gemini.
+  - The app database (`app.db`), checkpoints and traces are shared between providers; they hold no vectors. Sessions, saved reports and audit rows created under `lmstudio` are visible under `gemini` and the other way round.
+  - No fallback: everything local is test-only. There is no automatic switch between providers and no fallback from LM Studio to Gemini or back; the eval judge (`evals/judge.py`) stays on Gemini.
+
 ## Client answers to requirements questions (2026-10-04)
 
 The client answered the six questions of requirements §8.2 on 2026-10-04. Requirements revision 3 (`docs/process/01-requirements.md`) incorporates them. **Status: confirmed by the owner on 2026-10-04 as part of requirements revision 4 (🔴 gate passed; see "Owner confirmation of requirements rev. 4").**
@@ -562,7 +583,7 @@ Inputs for the Step 4 plan; they are not decisions and change no requirement.
   - the self-hosted Langfuse bootstrap uses the `LANGFUSE_INIT_*` environment variables;
   - pin `sqlglot>=30,<31`;
   - a day-1 spike on the sqlglot BigQuery dialect (parse, qualify, rewrite) and on `interrupt()` / resume;
-  - `requirements.txt` is produced with `uv export --locked --no-dev --no-hashes`;
+  - `requirements.txt` is produced with `uv export --no-hashes --format requirements-txt > requirements.txt` (it keeps the `-e .` line, so pip installs the project too);
   - BigQuery `to_dataframe` warns without optional extras; use `result.to_arrow()` or iterate rows.
 - **Hashes (R3-L22):** uv users install from `uv.lock` with hashes; pip users get pinned versions without hashes. The README states this.
 

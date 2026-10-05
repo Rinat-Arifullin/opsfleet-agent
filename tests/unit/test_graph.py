@@ -1526,3 +1526,33 @@ def test_blocked_grounding_still_tags_figures_with_scope(tmp_path, settings, det
     assert out.outcome == "blocked" and out.text == REFUSAL_TEXT
     figs = _state(env)["figures"]
     assert figs and all(f.get("scope") == {"all": False, "brands": ["Acme"]} for f in figs)
+
+
+# --- role span diagnosability (iteration 24b) ---
+
+
+def _role_spans(env) -> list[dict]:
+    return [f for t, _n, f in env.spans if t == "role"]
+
+
+def test_role_span_carries_status_on_success(make_env) -> None:
+    env = make_env(Router("simple"), Scripted(ModelTurn("Orders are tracked per status.")))
+    env.ask("how many orders are there?")
+    spans = _role_spans(env)
+    assert spans and spans[0]["agent"] == QUICK
+    assert spans[0]["status"] == "ok" and spans[0]["error_class"] is None
+
+
+def test_role_span_carries_error_class_on_failure(make_env) -> None:
+    from opsfleet_agent.graph.llm import NonRetryableLLMError
+
+    def _fail(messages, specs):
+        raise NonRetryableLLMError("SENTINEL-provider-detail")
+
+    env = make_env(Router("simple"), Scripted(_fail))
+    env.ask("how many orders are there?")
+    spans = _role_spans(env)
+    assert spans and spans[0]["agent"] == QUICK
+    assert spans[0]["status"] == "failed"
+    assert spans[0]["error_class"] == "NonRetryableLLMError"
+    assert "SENTINEL" not in json.dumps(spans, default=str)  # class name only, no content

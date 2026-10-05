@@ -44,8 +44,8 @@ from opsfleet_agent.graph.llm import (
     LLMResponse,
     LLMSuccess,
     LLMWrapper,
-    build_chat_model,
 )
+from opsfleet_agent.graph.providers import chat_model_for
 from opsfleet_agent.guards.output import normalise_for_display
 from opsfleet_agent.persona import PERSONA_LABEL, SAFETY_PREAMBLE, Persona, assemble_prompt
 from opsfleet_agent.tools.registry import RUN_SQL, tools_for
@@ -520,6 +520,8 @@ def run_analyst(
                 prompt_version=ANALYST_PROMPT_VERSION,
                 llm_calls=used.llm_calls,
                 sql=used.sql,
+                status=used.status,
+                error_class=used.error_class,
             )
         except Exception:
             pass
@@ -530,18 +532,13 @@ def run_analyst(
 
 
 def make_gemini_invoke(settings: Any) -> AnalystInvoke:  # pragma: no cover - needs the network
-    """Adapter from the analyst protocol to ``ChatGoogleGenerativeAI``; tools bound per model."""
+    """Adapter from the analyst protocol to the provider chat model (D-143: Gemini by default,
+    or the local OpenAI-compatible server); tools bound per model."""
     cache: dict[str, Any] = {}
 
     def chat_model(model: str) -> Any:
         if model not in cache:
-            cfg = next((r for r in settings.roles.values() if r.model == model), None)
-            cache[model] = build_chat_model(
-                model,
-                settings.gemini_api_key,
-                thinking_level=getattr(cfg, "thinking_level", None),
-                thinking_budget=getattr(cfg, "thinking_budget", None),
-            )
+            cache[model] = chat_model_for(settings, model)  # D-143: Gemini or local provider
         return cache[model]
 
     def invoke(
