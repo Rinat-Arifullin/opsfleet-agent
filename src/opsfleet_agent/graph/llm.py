@@ -66,10 +66,15 @@ def classify_error(exc: BaseException) -> Exception:
     # httpx timeout/connect errors, matched by class name so httpx need not be imported.
     if any(c.__name__ in TRANSIENT_CLASS_NAMES for c in type(exc).__mro__):
         return TransientLLMError(type(exc).__name__)
-    # google-genai APIError (and subclasses) expose the HTTP status as `.code`.
-    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
-    if isinstance(code, int) and code in TRANSIENT_STATUS:
-        return TransientLLMError(f"http_{code}")
+    # langchain-core ModelError subclasses (e.g. GoogleRateLimitError for a 429) say so directly.
+    if getattr(exc, "is_retryable", False) is True:
+        return TransientLLMError(type(exc).__name__)
+    # google-genai APIError (and subclasses) expose the HTTP status as `.code`; langchain wraps
+    # it with `raise ... from e`, so the status may sit on the cause.
+    for err in (exc, exc.__cause__):
+        code = getattr(err, "code", None) or getattr(err, "status_code", None)
+        if isinstance(code, int) and code in TRANSIENT_STATUS:
+            return TransientLLMError(f"http_{code}")
     return NonRetryableLLMError(type(exc).__name__)
 
 

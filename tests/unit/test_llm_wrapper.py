@@ -359,6 +359,44 @@ def test_classify_error_httpx_and_genai_by_name():
         assert not isinstance(classify_error(APIError(code)), TransientLLMError)
 
 
+def test_classify_error_langchain_wrapped_429_is_transient():
+    # langchain-google-genai re-raises a 429 as GoogleRateLimitError (no .code) from the
+    # genai ClientError; it must still retry and reach the fallback, not fail the role.
+    from google.genai.errors import ClientError
+    from langchain_google_genai.chat_models import GoogleRateLimitError
+
+    class Cause(Exception):
+        code = 429
+
+    try:
+        raise GoogleRateLimitError("Error calling model 'm1' (RESOURCE_EXHAUSTED)") from Cause()
+    except GoogleRateLimitError as exc:
+        assert isinstance(classify_error(exc), TransientLLMError)
+
+    class Wrapped(Exception):
+        pass
+
+    try:
+        raise Wrapped() from ClientError(429, {"error": {"message": "quota"}})
+    except Wrapped as exc:
+        assert isinstance(classify_error(exc), TransientLLMError)
+    try:
+        raise Wrapped() from ClientError(400, {"error": {"message": "bad"}})
+    except Wrapped as exc:
+        assert not isinstance(classify_error(exc), TransientLLMError)
+
+
+def test_langchain_rate_limit_error_falls_back():
+    from langchain_google_genai.chat_models import GoogleRateLimitError
+
+    ft, budget, w = make()
+    primary = Model(ft, always=True, exc=GoogleRateLimitError("429"))
+    fb = Model(ft)
+    out = w.call("deep_analyst", "m1", primary, "m2", fb)
+    assert isinstance(out, LLMSuccess) and out.used_fallback
+    assert primary.calls == 3 and fb.calls == 1
+
+
 def test_afc_advice_is_dropped_and_other_sdk_warnings_pass(caplog):
     import logging
 
