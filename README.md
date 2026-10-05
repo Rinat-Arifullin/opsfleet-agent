@@ -3,6 +3,55 @@
 > The full README (setup, usage, evals, dropped items) is written in iteration 43. This file
 > currently holds only the dev-only local model section.
 
+## Documentation
+
+| Document | What it covers |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | Production HLD: components, data flow, security, PII, cost, scaling, ADR summaries |
+| [docs/technical.md](docs/technical.md) | Technical description of the built prototype, taken from the code: module map, one turn end to end, SQL checks, delete, stores, evals, deviations from the HLD |
+| [docs/decisions.md](docs/decisions.md) | Architecture decision records (ADR-001 onwards) |
+| [docs/data-model.md](docs/data-model.md) | The `thelook_ecommerce` tables the agent uses |
+| [docs/process/](docs/process/) | SDLC artifacts: requirements, design reviews, plan, per-iteration decisions, [owner queue](docs/process/OWNER-QUEUE.md) |
+
+### Module map
+
+Arrows point from a module to the modules it calls (details in [technical.md §1–2](docs/technical.md)).
+
+```mermaid
+flowchart TD
+  CLI["cli.py / commands"] --> CFG["config.py / session.py / persona.py"]
+  CLI --> DG["graph/degraded.py"]
+  CLI --> DEL["delete/"]
+  CLI --> OBS["obs/"]
+  DG --> G["graph/graph.py"]
+  G --> BUD["graph/budget.py"]
+  G --> CTX["graph/context.py + memory.py"]
+  G --> R["roles/router.py"]
+  G --> LP["roles/light_path.py"]
+  G --> AN["roles/analyst.py"]
+  G --> RW["roles/report_writer.py + verifier.py"]
+  G --> GR["graph/grounding.py"]
+  G --> DEL
+  G --> GI["guards/input.py"]
+  G --> GO["guards/output.py + plain_language + echo"]
+  R & LP & AN & RW --> LLM["graph/llm.py + providers.py"]
+  AN --> T["tools/run_sql.py + schema_tool.py"]
+  AN --> GOLD["golden/"]
+  T --> SP["guards/sql_policy.py"]
+  T --> SC["guards/scope.py"]
+  T --> SM["guards/small_cell.py"]
+  T --> DF["guards/differencing.py"]
+  T --> PII["guards/pii.py + pii_regex.py"]
+  T --> BQ["bq/"]
+  DF --> ST["store/"]
+  RW --> REP["reports/"]
+  REP --> ST
+  DEL --> ST
+  GI & GO --> PII
+  LLM --> ST
+```
+
+
 ## Local model (LM Studio, dev only)
 
 Gemini is the default and the only provider used for evaluation. For development you can run
