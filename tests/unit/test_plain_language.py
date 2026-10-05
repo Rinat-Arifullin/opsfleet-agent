@@ -148,6 +148,16 @@ def test_analyst_prompts_contain_rule(role: str) -> None:
     assert system.index("## Analyst rules") < system.index(f"## {PLAIN_LANGUAGE_SECTION}")
 
 
+def test_tables_section_follows_the_rules_and_is_optional() -> None:
+    window = (date(2019, 1, 1).isoformat(), date(2026, 9, 30).isoformat())
+    kw = {"scope_label": "Acme", "persona": builtin_persona(), "window": window}
+    assert "## Tables" not in build_system_prompt(DEEP, **kw)
+    system = build_system_prompt(DEEP, tables="- orders (Orders)", **kw)
+    assert "- orders (Orders)" in system.split("## Tables", 1)[1]
+    assert system.index("## Analyst rules") < system.index("## Tables")
+    assert system.index("## Tables") < system.index(f"## {PLAIN_LANGUAGE_SECTION}")
+
+
 def test_light_prompt_contains_rule(make_env) -> None:
     env = make_env(Router("smalltalk", "Hi! Ask me about the store data."))
     env.ask("hello")

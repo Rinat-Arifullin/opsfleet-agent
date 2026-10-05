@@ -566,6 +566,16 @@ def test_force_answer_without_a_query_shows_the_template(make_env) -> None:
     assert not [c for c in analyst.calls if c[2] == 0]  # no force_answer LLM call
 
 
+def test_analyst_prompt_carries_the_schema(make_env) -> None:
+    # The schema is in the prompt, so the first model round can already write SQL
+    analyst = Scripted(sql_call(SIMPLE), ModelTurn("3 complete orders."))
+    env = make_env(Router("complex"), analyst)
+    env.ask("How many complete orders are there?")
+    system = analyst.calls[0][1][0]["content"]
+    assert "## Tables" in system and "- orders (" in system
+    assert "status STRING" in system and "email" not in system.split("## Tables", 1)[1]
+
+
 def test_force_answer_without_a_query_keeps_the_previous_answer(make_env) -> None:
     analyst = Scripted(sql_call(SIMPLE), ModelTurn("3 complete orders."), ModelTurn(""))
     env = make_env(Router("complex"), analyst)

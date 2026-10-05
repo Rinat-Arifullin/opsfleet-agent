@@ -91,7 +91,7 @@ QUICK: Final = "quick_analyst"
 DEEP: Final = "deep_analyst"
 ESCALATE_SENTINEL: Final = "[[ESCALATE]]"
 _SENTINEL_RE: Final = re.compile(r"\[\[\s*escalate\s*\]\]", re.IGNORECASE)
-ANALYST_PROMPT_VERSION: Final = "analyst-v2"
+ANALYST_PROMPT_VERSION: Final = "analyst-v3"
 QUICK_ESCALATE_FAILED_SQL: Final = 2
 QUICK_ESCALATE_CALLS: Final = 4
 MAX_TOOL_CALLS_PER_STEP: Final = 4
@@ -231,12 +231,14 @@ def build_system_prompt(
     prompt: str | None = None,
     context_section: str = "",
     extra_rules: Sequence[tuple[str, str]] = (),
+    tables: str = "",
 ) -> str:
     """Code-built safety preamble first, then the rules, then the fenced persona (layers 1..7).
 
     ``context_section`` is iteration 15's code-assembled turn context (defaults, fenced
     restatement, prior queries, store blocks). It goes after the rules, never before them.
     ``extra_rules`` are further code-owned sections, e.g. the D-156 echo retry rule.
+    ``tables`` is the code-built schema block (``schema_section``); empty leaves it out.
     """
     body = prompt if prompt is not None else load_analyst_prompt()
     mode = _MODE_TEXT[role]
@@ -248,6 +250,8 @@ def build_system_prompt(
         (PLAIN_LANGUAGE_SECTION, PLAIN_LANGUAGE_RULE),  # D-151: code-owned, not the persona
         *extra_rules,
     ]
+    if tables:
+        sections.insert(3, ("Tables", tables))
     if prior_queries:
         sections.insert(2, ("Queries already run this turn", _fenced_queries(prior_queries)))
     if context_section:

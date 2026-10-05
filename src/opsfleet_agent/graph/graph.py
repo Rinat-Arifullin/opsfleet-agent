@@ -147,7 +147,7 @@ from opsfleet_agent.tools.run_sql import (
     RunSqlTurn,
     _injects_parameters,
 )
-from opsfleet_agent.tools.schema_tool import get_schema, list_tables
+from opsfleet_agent.tools.schema_tool import get_schema, list_tables, schema_section
 
 __all__ = [
     "CHECKPOINT_FILE",
@@ -877,13 +877,14 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
     def _analyst(role: str, state: TurnState) -> dict[str, Any]:
         lo, hi = sv.window()
         a = _assembled(state)  # iteration 15: scope-filtered, fenced context (FR-76)
+        tables = schema_section(sv.cache)  # metadata cache only: no query, no bytes
 
         def messages(extra: tuple[tuple[str, str], ...] = ()) -> list[dict[str, Any]]:
             system = build_system_prompt(
                 role, scope_label=ctx.profile.scope_label, persona=ctx.persona,
                 window=(lo.isoformat(), hi.isoformat()),
                 prior_queries=ctx.sql_turn.ledger if role == DEEP else (),
-                context_section=a.prompt_section(), extra_rules=extra,
+                context_section=a.prompt_section(), extra_rules=extra, tables=tables,
             )  # fmt: skip
             return [
                 {"role": "system", "content": system},

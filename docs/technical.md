@@ -99,7 +99,7 @@ There are 4 LLM roles plus the light path. The HLD's fifth role, the Library age
 | `config/models.yaml` | Model ids per role, limits, `small_cell_k: 5`, quotas, local-provider settings. It also lists `library_agent` and `summary` roles, which no code uses |
 | `config/profiles.yaml` | Demo profiles: `analyst_a` (one brand), `analyst_b` (two brands), `ceo_demo` (`all`) |
 | `config/golden_seed.yaml` | Golden Bucket seed |
-| `prompts/` | `analyst.md`, `router.md`, `report_writer.md`, `persona.md` (versioned in-file: analyst-v2, router-v3, report-writer-v1) |
+| `prompts/` | `analyst.md`, `router.md`, `report_writer.md`, `persona.md` (versioned in-file: analyst-v3, router-v3, report-writer-v1) |
 | `evals/` | Runner, live SUT, gates, judge, profile matrix, Langfuse dataset tool, case folders (§7) |
 | `tests/unit/`, `tests/live/` | Offline unit tests (no network) and `@pytest.mark.live` tests |
 
