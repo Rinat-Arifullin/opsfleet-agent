@@ -40,18 +40,19 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | D-3 | Night run accepted; owner reviews the 🔴 iterations now | — |
 | 22a OD-10 (AC-12.13 vs AC-12.15) | Strict: after a restart a confirmed but not executed delete is expired, nothing deleted | amend AC-12.13 |
 | 22a OD-1 | Accepted: `/delete` command plus strict phrase parsing; both always need the user's confirmation | — |
-| 22a OD-14 (subset delete) | Answer did not address the case; re-asked | open |
+| 22a OD-14 (subset delete) | **Re-ask**: if any previewed report vanished before execute, delete nothing and ask again | 22a fix round |
 | D-133 | Accepted (newest 200 reports) | — |
 | D-6 | **2 retries, 1 s / 2 s backoff** (neither the plan nor ADR-003) | code change in the retry wrapper + ADR-003 text |
 | D-9, D-13, D-48 | Typed tokens (`<EMAIL>`, `<PHONE>`...) everywhere | align ACs and any remaining `[REDACTED]` text |
 | D-22 | Take the HLD: table-not-found maps to `UNKNOWN_COLUMN` | code change (iteration 13 error mapping) |
 | D-45 | Keep the code (QI expressions inside counting aggregates refused) | fix HLD §5.2 |
-| D-28 | Owner asked what UNNEST is; explained | open |
-| D-46, D-47 | Owner asked when a URL is a problem; explained | open |
+| D-28 | Keep the UNNEST rejection | fix HLD §5.3 |
+| D-46, D-47 | Keep: links become `<URL>`; an injection hit blocks the whole answer | fix the HLD failure-table row |
 | D-20, D-31, D-35, D-60, D-75, D-94, D-103, D-115 | Add to the HLD, low priority | HLD batch edit |
 | D-137 | Accepted (DegradedGraph wrapper) | — |
 | D-138 | Accepted: quotas move to `config/models.yaml` | apply the config diff |
 | D-139 | Accepted: apply the `user_quota` migration | apply the migration diff |
+| Iterations 33–42 (drops) | Keep in the plan for now; decide by time left | — |
 | Every row whose "Blocks" is "nothing" | Defaults accepted | — |
 
 ## Decisions needed from you
