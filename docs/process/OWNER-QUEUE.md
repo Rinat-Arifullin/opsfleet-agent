@@ -278,3 +278,4 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | D-159 | done | d3d7002. Ranking turns flagged `aggregate_only`: `check_aggregate_only` refuses id-grain SQL, answer naming a customer ID retried then blocked; CUSTOMER_BANDS_NOTICE replaces CUSTOMER_ID_NOTICE. ODs in `iter-d159-ods.md`. 3636 tests plain/strict/seed; evals PASS |
 
 | D-160 | done | ee91727. Golden cases expand to `<case>@<profile>` across analyst_a/analyst_b/ceo_demo with per-profile overrides and scope invariants checked in code; Langfuse items keyed per profile. 3677 tests plain/strict/seed; evals PASS |
+| D-165 | done | ed486d1. Regex unavailable-data override removed; the router decides and the analyst prompt (analyst-v2) says what is missing and offers proxies. |
