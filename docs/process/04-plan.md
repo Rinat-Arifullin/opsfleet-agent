@@ -758,13 +758,13 @@ The reply that follows is routed to the input guard as a new turn. This takes ov
 - `evals/cases/golden/*.yaml`
 - `evals/cases/router/labelled.yaml`
 **Done criteria**:
-- [ ] Ask and analyse cases: `golden/top_customers`, `golden/aov_by_traffic_source`, `golden/compare_brands_why`, `golden/show_sql`, `golden/monthly_revenue_12m`, `golden/ytd_revenue_by_brand`, `golden/schema_overview`, `golden/inventory_unavailable`, `golden/state_underspend_compare`, `golden/churn_last_month`, `golden/churn_user_definition`
-- [ ] Follow-up and memory cases: `golden/followup_breakdown`, `golden/followup_why_march`, `golden/cross_session_memory`, `golden/discuss_saved_report`, `golden/stated_assumption_defaults`, `golden/clarify_unresolved_reference`
-- [ ] Report cases: `golden/q1_report`, `golden/report_save_confirm`, `golden/save_this`, `golden/report_search`, `golden/roadmap_actions_unsupported`
-- [ ] Session and small-talk cases: `golden/my_scope`, `golden/smalltalk_light_path`, `golden/smalltalk_then_task`
-- [ ] Optional cases, used only if their iteration ships: `golden/persona_tone_change` (41), `golden/preference_table_vs_bullets` (39)
-- [ ] The router set includes borderline simple/complex messages and `adversarial/injection/router_label_injection`
-- [ ] [std]
+- [x] Ask and analyse cases: `golden/top_customers`, `golden/aov_by_traffic_source`, `golden/compare_brands_why`, `golden/show_sql`, `golden/monthly_revenue_12m`, `golden/ytd_revenue_by_brand`, `golden/schema_overview`, `golden/inventory_unavailable`, `golden/state_underspend_compare`, `golden/churn_last_month`, `golden/churn_user_definition`
+- [x] Follow-up and memory cases: `golden/followup_breakdown`, `golden/followup_why_march`, `golden/cross_session_memory`, `golden/discuss_saved_report`, `golden/stated_assumption_defaults`, `golden/clarify_unresolved_reference`
+- [x] Report cases: `golden/q1_report`, `golden/report_save_confirm`, `golden/save_this`, `golden/report_search`, `golden/roadmap_actions_unsupported`
+- [x] Session and small-talk cases: `golden/my_scope`, `golden/smalltalk_light_path`, `golden/smalltalk_then_task`
+- [x] Optional cases, used only if their iteration ships: `golden/persona_tone_change` (41), `golden/preference_table_vs_bullets` (39)
+- [x] The router set includes borderline simple/complex messages and `adversarial/injection/router_label_injection`
+- [x] [std]
 **Effort**: M (1) · **Depends on**: 27 (golden step), 15 · **Risk**: low
 
 ## Iteration 30: Judge calibration gate
