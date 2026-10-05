@@ -55,6 +55,7 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | Iterations 33–42 (drops) | Keep in the plan for now; decide by time left | — |
 | D-143 (new, owner-raised) | **Accepted**: dev-only local LLM provider (LM Studio, OpenAI-compatible) to save free-tier quota; Gemini stays the default and the deliverable | iteration 24b (parallel to 22a) |
 | Every row whose "Blocks" is "nothing" | Defaults accepted | — |
+| 22a | cb593d2 | three rounds: r1 (M1 execute without re-deriving the token, M2 phrase grammar, minors) fixed → r2 FAIL (MJ-1: Ctrl-C after "yes" deleted on the next unrelated turn; mn-1..mn-6) fixed → r3 PASS with 2 minors (lapsed confirm on `--resume` not audited; two terminal rows if a checkpoint write fails), fixed and verified by the orchestrator (probes now fail, mutants caught), not independently re-reviewed; 79 delete-flow tests | `delete/token.py` HMAC token, only sha256 checkpointed, key in memory; `delete/flow.py` preview → confirm → execute; execute re-derives the token (key_changed / confirm_lost / timeout after 60 s grace → EXPIRED); OD-14 re-ask (`set_changed`, nothing deleted); Ctrl-C → CANCELLED `interrupted`; stranded delete closed on the next turn, runs only on explicit resume; exactly one terminal audit row per path; strict phrase grammar (verb first, negations refused). ODs in `docs/process/iter22a-ods.md`. Decisions D-144..D-146 |
 
 ## Decisions needed from you
 
@@ -196,6 +197,9 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | D-134 | The follow-up-context half of AC-22.3 (an opened report becomes context for the next question) is not done; it needs a graph.py change | Land it as a small follow-up after 22a/22b, when graph.py is quiet | before 45 |
 | D-135 | /open grammar: an id, a 1-2 digit row number from the last listing (always a row, never an id), or title words (one hit opens, several are listed). /search takes words plus tag:, from:, to:. Queries need at least 3 letters or digits; wildcard characters are literals | Accept | any time |
 | D-136 | library.py imports the private _one_line from graph.context | Make it public (one_line) during the graph.py follow-up in D-134 | with D-134 |
+| D-144 | Ctrl-C landing after the delete committed but before the checkpoint write: the audit records the real count, but the CLI still prints its generic "Cancelled." line | Accept for the prototype; fix in cli.py with 22b | 22b |
+| D-145 | "Delete my report? No wait, show revenue by month instead" is refused as SELECTOR_EMPTY (fails closed) instead of answering the analysis question | Accept (safe direction) | nothing |
+| D-146 | Phrase grammar: "report(s)" must end the request or be followed by a selector word, an id or a wildcard, so "delete reports quarterly widgets" is analysis and needs `/delete` or "about …" | Accept (safe direction; avoids "report header" false positives) | nothing |
 
 ## Scope questions (🟡: add now / defer to README "future work" / skip)
 
@@ -239,3 +243,4 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | 17 | done (🔴 pending) | cfa876a. Three review rounds (1 BLOCKER + 4 MAJOR + 7 MINOR, then 2 MAJOR + 2 MINOR in the re-review, all fixed or documented). 3056 tests. Owner items D-123..D-128 |
 | wire (D-96/D-117/D-114) | done (🔴 pending) | 3093 passed, plain and strict; seeds 1/7 green; review: no blocker, 5 fixes applied |
 | 18 | done (7736216) | 3131 passed, plain and strict; seed 5 green; review: no blocker, 3 major + 6 minor fixed, AC-22.3 follow-up half deferred (D-134) |
+| 22a | done, owner review pending | cb593d2. Three review rounds (r2 FAIL on MJ-1, r3 PASS with 2 minors fixed). 3228 tests, plain and strict; seeds 1-3 green; mutants exec_bind / exec_owner / confirm_ids caught. Owner decisions OD-1, OD-10 strict, OD-14 re-ask, D-133 applied. Owner items D-144..D-146 |

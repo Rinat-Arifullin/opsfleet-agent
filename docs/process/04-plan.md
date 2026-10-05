@@ -625,14 +625,14 @@ The checkpointer exists **before** 17 (M-3). Role subgraphs are compiled with `c
 - `tests/unit/test_delete_flow.py`
 - `tests/unit/test_delete_token.py`
 **Done criteria (M-2)**:
-- [ ] Named tests, flow: `test_delete_requires_confirm`, `test_delete_confirm_deletes_exact_previewed_set`, `test_delete_cancel_on_non_confirm`, `test_delete_owner_only`, `test_delete_by_session_id`, `test_delete_confirmation_bound_to_preview_set`, `test_llm_cannot_trigger_delete_without_user_turn`, `test_delete_no_matches`, `test_delete_preview_includes_backup_notice`
-- [ ] Named tests, taint and intent: `test_delete_refused_after_view_same_turn`, `test_delete_requires_intent_in_user_message`, `test_session_delete_excludes_viewed_reports`
-- [ ] Named tests, token: `test_confirm_delete_never_deletes`, `test_confirm_delete_rerun_keeps_token`, `test_delete_token_derived_not_stored`, `test_delete_token_never_in_traces`, `test_checkpoint_holds_token_hash_only`, `test_proof_mismatch_cancels`, `test_confirm_only_on_next_turn`
-- [ ] Named tests, structure: `test_confirm_prompt_rendered_by_code`, `test_delete_not_alone_in_step`, `test_execute_delete_requires_confirmed_record`, `test_previewed_audit_idempotent_on_replay`, `test_second_delete_while_pending_rejected`, `test_cancelled_delete_reply_gets_fresh_context`
-- [ ] Named tests, size: `test_large_delete_requires_typed_count` (more than 20 matches needs the typed count), `test_large_delete_preview_truncated_but_bound`
-- [ ] A token is single use: a replayed proof is cancelled and audited (parametrized in `test_proof_mismatch_cancels`)
-- [ ] `K_delete` is generated at start and never written to disk, a checkpoint or a trace (covered by `test_secrets_never_in_traces_logs_or_errors`)
-- [ ] [std]
+- [x] Named tests, flow: `test_delete_requires_confirm`, `test_delete_confirm_deletes_exact_previewed_set`, `test_delete_cancel_on_non_confirm`, `test_delete_owner_only`, `test_delete_by_session_id`, `test_delete_confirmation_bound_to_preview_set`, `test_llm_cannot_trigger_delete_without_user_turn`, `test_delete_no_matches`, `test_delete_preview_includes_backup_notice`
+- [x] Named tests, taint and intent: `test_delete_refused_after_view_same_turn`, `test_delete_requires_intent_in_user_message`, `test_session_delete_excludes_viewed_reports`
+- [x] Named tests, token: `test_confirm_delete_never_deletes`, `test_confirm_delete_rerun_keeps_token`, `test_delete_token_derived_not_stored`, `test_delete_token_never_in_traces`, `test_checkpoint_holds_token_hash_only`, `test_proof_mismatch_cancels`, `test_confirm_only_on_next_turn`
+- [x] Named tests, structure: `test_confirm_prompt_rendered_by_code`, `test_delete_not_alone_in_step`, `test_execute_delete_requires_confirmed_record`, `test_previewed_audit_idempotent_on_replay`, `test_second_delete_while_pending_rejected`, `test_cancelled_delete_reply_gets_fresh_context`
+- [x] Named tests, size: `test_large_delete_requires_typed_count` (more than 20 matches needs the typed count), `test_large_delete_preview_truncated_but_bound`
+- [x] A token is single use: a replayed proof is cancelled and audited (parametrized in `test_proof_mismatch_cancels`)
+- [x] `K_delete` is generated at start and never written to disk, a checkpoint or a trace (covered by `test_secrets_never_in_traces_logs_or_errors`)
+- [x] [std]
 **Effort**: XL (3) · **Depends on**: 17, 18, 21 · **Risk**: high. **Rollback (M-4):** the delete tool and `/delete` stay unregistered (the feature is off, fail closed), and the owner is told (🔴). The audit-first rule is never relaxed.
 
 ## Iteration 22b: Delete expiry paths 🔴
