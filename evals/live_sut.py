@@ -192,8 +192,10 @@ class LiveSut:
         setup = live_seed.setup_turns(case)
         runtime = self._entry(profile).runtime  # one runtime per base profile
         box["runtime"] = runtime
-        # A fresh id per run: the checkpointer never resumes an earlier run of this case.
-        sid = f"{ctx.session_id}-{uuid.uuid4().hex[:6]}"
+        # A fresh id per run, so the checkpointer never resumes an earlier run of this case. Same
+        # shape as a CLI session (session.new_session: uuid4().hex), which the audit store
+        # requires; the case id stays on the record and the Langfuse dataset run item.
+        sid = uuid.uuid4().hex
         tracer = getattr(runtime, "tracer", None)
         with live_seed.seeded(runtime, case, profile, session_id=sid,
                               data_dir=self.data_dir) as seed:  # fmt: skip

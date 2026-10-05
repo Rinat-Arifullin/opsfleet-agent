@@ -18,7 +18,8 @@ Files:
   such a case as `na` without calling the SUT, an offline run ignores it; the request estimate
   leaves it out
 - `evals/langfuse_dataset.py`: `live_skip` carried in the item metadata and back
-- golden cases: `live.skip` on `report_search`, `discuss_saved_report`, `report_save_confirm`;
+- golden cases: `live.skip` on `report_search`, `discuss_saved_report` (`report_save_confirm`
+  was skipped too, until D-168);
   `roadmap_actions_unsupported` seeds its report with `owner: self` and runs under every profile
 - new tests `tests/unit/test_live_seed.py`; `tests/unit/test_live_sut.py` updated (the refused
   seeds are now `preferences` and unknown keys)
@@ -47,7 +48,7 @@ live:
 | `roadmap_actions_unsupported` | runs live, every profile | the seeded report belongs to the running profile (`owner: self`) |
 | `report_search` | `live: skip` | OD-4, OD-5 |
 | `discuss_saved_report` | `live: skip` | OD-2, OD-5 |
-| `report_save_confirm` | `live: skip` | OD-9 |
+| `report_save_confirm` | runs live (D-168) | OD-9 |
 
 ## Decisions
 1. **OD-1 One user id per case.** Every case runs as `<profile>.ev<tag>` (a fresh 8-hex tag,
@@ -90,6 +91,10 @@ live:
    because the save and draft flow is being reworked in parallel; when that lands, replace
    `R-` with a check that holds live (for example `saved`) and drop the skip. Whether the
    earlier `run=False` came from the expectation or from the save flow itself is not known.
+   **Resolved (D-168, owner 2026-10-05):** a live save shows the id as `R-<hex>`
+   (`reports.library.display_id`), so the `R-` check holds live; the skip is dropped and the
+   report cases expect the graph's real outcomes (`report_pending` for a shown draft,
+   `report_saved` after the save).
 10. **OD-10 Profile opt-outs.** `roadmap_actions_unsupported` now runs under all profiles
     (its fake answer names no brand, and the seed belongs to whichever profile runs).
     `report_search` and `discuss_saved_report` keep `profiles: [analyst_a]`: they are
@@ -104,3 +109,8 @@ live:
     graph path that audits with the session id (a delete, for example) would fail closed; that
     predates this change and no case in the five depends on it. Switching the live session id
     to uuid hex would fix it at the cost of readable Langfuse sessions.
+    **Resolved (D-169, owner 2026-10-05: one shape):** the live SUT's session id is now
+    `uuid4().hex`, the same as a CLI session, so every live graph path audits. The case id
+    stays readable on the eval result row and the Langfuse dataset run item. Offline ids
+    (`evals/run.py` `session_id_for`) keep the deterministic `ev-` form: the offline SUT
+    never writes the audit store.

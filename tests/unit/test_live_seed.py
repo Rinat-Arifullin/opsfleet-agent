@@ -18,7 +18,7 @@ from opsfleet_agent.graph.degraded import DegradedGraph
 from opsfleet_agent.persona import builtin_persona, parse_persona
 from opsfleet_agent.reports.schema import missing_sections
 from opsfleet_agent.session import Profile
-from opsfleet_agent.store.audit import AuditLog
+from opsfleet_agent.store.audit import SESSION_ID_RE, AuditLog
 from opsfleet_agent.store.db import open_store
 from opsfleet_agent.store.reports import ReportStore
 
@@ -260,7 +260,7 @@ def test_live_sut_seeds_runs_setup_turns_and_scores_only_case_turns(tmp_path):
     assert res.text == "answer to q2"
     assert res.llm_calls == {L.UNATTRIBUTED: 2}  # the setup turn is not scored
     assert len(sut.last_trace_ids) == 2
-    assert Path(res.trace_path).name.startswith("ev-1-")
+    assert SESSION_ID_RE.fullmatch(Path(res.trace_path).stem)  # audit-shaped session id (D-169)
     assert {c["user_id"] for c in rt.langfuse.calls} == {"analyst_a"}  # base id in Langfuse
     assert (tmp_path / "data" / "seed").is_dir()
     sut.close()

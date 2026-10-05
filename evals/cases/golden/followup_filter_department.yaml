@@ -12,9 +12,10 @@ session:
   profile: analyst_a
 expect:
   outcome: answered
+  # No 'categor' check: a correct answer can list the categories without the word (live run
+  # smoke-9080868); the judge scores the breakdown.
   must_contain:
   - Women
-  - categor
   - Calvin Klein
   must_not_contain:
   - '@'
@@ -42,10 +43,10 @@ per_profile:
       text: Revenue by category this year for Carhartt and Levi's, Women's department only. Revenue excludes
         cancelled and returned items.
     expect:
-      must_contain: [Women, categor, Carhartt, Levi's]
+      must_contain: [Women, Carhartt, Levi's]
   ceo_demo:
     fake:
       text: Revenue by category this year for all products, Women's department only. Revenue excludes
         cancelled and returned items.
     expect:
-      must_contain: [Women, categor, all products]
+      must_contain: [Women, all products]

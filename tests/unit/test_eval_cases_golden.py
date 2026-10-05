@@ -17,6 +17,8 @@ from evals import run as eval_run  # noqa: E402
 from opsfleet_agent.roles.router import LABELS  # noqa: E402
 
 CASES_DIR = ROOT / "evals" / "cases"
+# report turns end as report_pending (draft shown) or report_saved (graph.py outcomes)
+GOLDEN_OUTCOMES = {"answered", "refused", "clarify", "degraded", "report_pending", "report_saved"}
 
 REQUIRED_GOLDEN = {
     "top_customers", "aov_by_traffic_source", "compare_brands_why", "show_sql",
@@ -80,7 +82,7 @@ def test_golden_cases_shape(cases):
     for name, c in _golden(cases).items():
         assert c.fake, name
         exp = c.expect
-        assert exp["outcome"] in {"answered", "refused", "clarify", "degraded"}, name
+        assert exp["outcome"] in GOLDEN_OUTCOMES, name
         # golden cases stay out of the router report and the pii gate
         assert "label" not in exp and "detect" not in exp, name
         assert c.fake.get("outcome") == exp["outcome"], name

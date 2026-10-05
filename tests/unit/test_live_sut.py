@@ -13,6 +13,7 @@ from evals import live_sut as L
 from evals.run import Case, CaseError, RunContext
 
 from opsfleet_agent.session import Profile
+from opsfleet_agent.store.audit import SESSION_ID_RE
 
 PROFILES = {
     "analyst_a": Profile("analyst_a", "Analyst A", brands=("Acme",)),
@@ -110,7 +111,7 @@ def test_runs_turns_in_fresh_session_and_maps_result(tmp_path):
     rt = built[0]
     sessions = {s for _, s in rt.graph.turns}
     assert [t for t, _ in rt.graph.turns] == ["q1", "q2"]
-    assert len(sessions) == 1 and next(iter(sessions)).startswith("ev-1-")
+    assert len(sessions) == 1 and SESSION_ID_RE.fullmatch(next(iter(sessions)))  # audit shape
     assert res.outcome == "answered" and res.text == "answer to q2"
     assert res.sql == ["SELECT 1", "SELECT 1"]  # only executed SQL
     assert res.tools == ["run_sql", "run_sql"]

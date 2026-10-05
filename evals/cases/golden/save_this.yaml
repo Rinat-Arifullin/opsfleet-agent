@@ -10,7 +10,7 @@ tags:
 session:
   profile: analyst_a
 expect:
-  outcome: answered
+  outcome: report_saved
   must_contain:
   - saved
   - R-
@@ -24,7 +24,7 @@ estimate:
     report_verifier: 1
   bq: 1
 fake:
-  outcome: answered
+  outcome: report_saved
   text: Saved. Report ID R-DEMO-0003, title Top 3 categories last month, with the data used and the data
     window.
   llm_calls:
