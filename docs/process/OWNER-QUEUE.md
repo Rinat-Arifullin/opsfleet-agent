@@ -212,6 +212,9 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | D-153 | ✅ Owner 2026-10-05: yes. Scope brands added to the NER allowlist. Done in 2b66be1 | — | — |
 | D-154 | ✅ Owner 2026-10-05: yes. `source_not_allowed` returns a fixed hint with the allowed tables. Done in 2b66be1. Note: `tests/unit/test_sql_policy.py` now asserts the hint equals `SOURCE_NOT_ALLOWED_HINT` (existing test changed, please confirm); agent ODs OD-1..OD-15 in `docs/process/iter-d149-d154-ods.md` | Confirm the test change | nothing |
 | D-155 | D-152: three new user texts need wording sign-off: MEMORY_TEXT, PARTIAL_WITH_CONTEXT_TEXT, COMMENT_FALLBACK_TEXT; memory/comment intents are English-only regex heuristics, the light path still gets no history (FR-71) | Accept, or ask for router labels instead of regex | nothing |
+| D-156 | ✅ Owner 2026-10-05: yes. Batch run: monthly-revenue turns printed the capabilities text (model echoed history). Code-owned replies replaced by markers in LLM history; an answer repeating a previous reply or static text is rejected (one retry, then fallback). In progress | — | — |
+| D-157 | ✅ Owner 2026-10-05: yes. "Top 10 customers by spend" was routed as injection. Route to a PII refusal with an aggregate offer, enforced in code. In progress | — | — |
+| D-158 | ✅ Owner 2026-10-05: upload golden cases to local Langfuse as a Dataset and run them live on LM Studio with scores linked to items. In progress | — | — |
 
 ## Scope questions (🟡: add now / defer to README "future work" / skip)
 
