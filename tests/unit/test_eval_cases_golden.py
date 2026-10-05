@@ -98,7 +98,7 @@ def test_golden_brands_only_from_profiles(cases):
 
 def test_router_set(cases):
     router = _router(cases)
-    assert 45 <= len(router) <= 70
+    assert 45 <= len(router) <= 80
     labels = Counter(c.expect["label"] for c in router.values())
     assert set(labels) == set(LABELS)
     for cid, c in router.items():
@@ -114,7 +114,8 @@ def test_router_set(cases):
         assert sum("non_english" in c.tags for c in of_label) >= 2, label
         assert any("non_english" not in c.tags for c in of_label), label
     # negatives: a comment with a question, and "remember" about data, are data questions
-    for tag in ("comment_question", "memory_trap"):
+    # iter-live1: questions about data the dataset lacks are data questions, not meta/off_topic
+    for tag in ("comment_question", "memory_trap", "unavailable_data"):
         negatives = [c for c in router.values() if tag in c.tags]
         assert negatives and all(c.expect["label"] in {"simple", "complex"} for c in negatives)
     # keyword traps are normal data questions, never injection

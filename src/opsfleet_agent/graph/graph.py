@@ -89,10 +89,12 @@ from opsfleet_agent.graph.intents import (
     CUSTOMER_BANDS_NOTICE,
     CUSTOMER_BANDS_RULE,
     CUSTOMER_BANDS_SECTION,
+    UNAVAILABLE_DATA_TEXTS,
     asks_for_customer_pii,
     is_customer_ranking_request,
     is_sql_request,
     mentions_customer_id,
+    unavailable_data_topic,
 )
 from opsfleet_agent.graph.llm import Limiters, LLMSuccess, LLMWrapper
 from opsfleet_agent.graph.memory import SessionMemory
@@ -125,7 +127,7 @@ from opsfleet_agent.roles.analyst import (
     run_analyst,
     serialise_envelope,
 )
-from opsfleet_agent.roles.light_path import run_light_path
+from opsfleet_agent.roles.light_path import CAPABILITIES_TEXT, run_light_path
 from opsfleet_agent.roles.report_writer import REPORT_ROLE_SUBCAPS, WRITER_ROLE, produce_report
 from opsfleet_agent.roles.router import (
     LIGHT_ROLE_SUBCAPS,
@@ -183,6 +185,9 @@ PARTIAL_WITH_CONTEXT_TEXT: Final = (
 # D-157: router labels a customer-ranking request may get by mistake (the PII wording in the
 # router prompt); such a request is relabelled in code.
 CUSTOMER_OVERRIDE_LABELS: Final = frozenset({"injection", "off_topic"})
+# iter-live1: an English question about data the dataset does not hold is answered by code even
+# when the router refused it as off topic; an injection or non-English refusal stands.
+UNAVAILABLE_OVERRIDE_LABELS: Final = frozenset({"off_topic"})
 ECHO_ERROR_CLASS: Final = "echo"  # D-156: the analyst repeated an earlier reply twice
 CUSTOMER_ID_ERROR_CLASS: Final = "customer_id"  # D-159: a ranking answer named customer IDs twice
 CUSTOMER_ID_REJECTED: Final = "customer_id_in_answer"
@@ -716,6 +721,14 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
             # reply that describes the data used in business words (no analyst, no query).
             update.update(label="meta", route="light")
             _record(ctx, "router", "intent", label="meta", route="light", sql_request=True)
+        elif (
+            rd.route != "refuse" or (rd.is_english and rd.label in UNAVAILABLE_OVERRIDE_LABELS)
+        ) and (topic := unavailable_data_topic(decision.scrubbed)) is not None:
+            # iter-live1: inventory, warehouses, ad spend, web visits are not in the dataset.
+            # Code answers on the light path (what is not available + proxies), no SQL.
+            update.update(label="meta", route="light")
+            _record(ctx, "router", "intent", label="meta", route="light",
+                    unavailable_data=topic, router_label=rd.label)  # fmt: skip
         elif rd.label in CUSTOMER_OVERRIDE_LABELS and is_customer_ranking_request(
             decision.scrubbed
         ):
@@ -741,7 +754,7 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
 
     def light(state: TurnState) -> dict[str, Any]:
         model, fb = model_ids_from_settings(settings, "light_path")
-        static_reply = None
+        static_reply = static_fallback = None
         if is_sql_request(state["message"]):  # D-151a: describe the in-scope prior queries
             scope = ctx.sql_session.scope
             sqls = [
@@ -749,11 +762,14 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
                 if isinstance(e.get("sql"), str) and covers(scope, e.get("scope"))
             ][-MAX_DESCRIBED_QUERIES:]  # fmt: skip
             static_reply = sql_request_reply(sqls)
+        elif (topic := unavailable_data_topic(state["message"])) is not None:
+            static_reply = UNAVAILABLE_DATA_TEXTS[topic]  # iter-live1: not in the dataset
+            static_fallback = CAPABILITIES_TEXT
         res = run_light_path(
             UserTurn(state["message"]), state["label"], profile=ctx.profile, persona=ctx.persona,
             llm=ctx.llm, model=model, invoke=sv.router_invoke, fallback_model=fb,
             tool_calls=tuple(ctx.tool_names), detector=_turn_detector(ctx), tracer=ctx.tracer,
-            static_reply=static_reply,
+            static_reply=static_reply, static_fallback=static_fallback,
         )  # fmt: skip
         ctx.guard_codes |= set(res.guard_codes)
         outcome = "blocked" if res.source == "blocked" else "answered"
@@ -1239,8 +1255,7 @@ def _has_answer_history(state: TurnState) -> bool:
     """True when the session history holds an assistant message (cheap pre-check; the
     scope filter and the D-156 marker check run in load_context)."""
     return any(
-        isinstance(m, Mapping) and m.get("role") == "assistant"
-        for m in state.get("history") or []
+        isinstance(m, Mapping) and m.get("role") == "assistant" for m in state.get("history") or []
     )
 
 
@@ -1521,16 +1536,18 @@ def _build(ctx: TurnContext, checkpointer: Any) -> Any:
     )
     g.add_conditional_edges(
         "delete_preview",
-        lambda s: DELETE_CONFIRM_NODE
-        if not _errored(s) and ctx.can_confirm and _pending_step(s) == "preview"
-        else "finalize",
+        lambda s: (
+            DELETE_CONFIRM_NODE
+            if not _errored(s) and ctx.can_confirm and _pending_step(s) == "preview"
+            else "finalize"
+        ),
         [DELETE_CONFIRM_NODE, "finalize"],
     )
     g.add_conditional_edges(
         DELETE_CONFIRM_NODE,
-        lambda s: "execute_delete"
-        if not _errored(s) and _pending_step(s) == "confirmed"
-        else "finalize",
+        lambda s: (
+            "execute_delete" if not _errored(s) and _pending_step(s) == "confirmed" else "finalize"
+        ),
         ["execute_delete", "finalize"],
     )
     g.add_edge("execute_delete", "finalize")

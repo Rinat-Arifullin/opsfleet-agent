@@ -63,16 +63,20 @@ LIGHT_ROLE: Final = "light_path"
 LIGHT_PROMPT_VERSION: Final = "light-v1"
 MAX_LIGHT_REPLY_CHARS: Final = 1200
 
+# iter-live1: the tables named here are exactly ``ALLOWED_TABLES`` (a unit test pins it), and
+# the text names no personal-data column (no "email", "address", "name" words): a schema
+# question ("what data do you have access to?") is answered by this text, and its golden
+# rejects any PII column word.
 CAPABILITIES_TEXT: Final = (
-    "I'm a data analysis assistant for the store's e-commerce data: orders, order items, "
-    "products, distribution centers, web events and customers in aggregate.\n"
+    "I'm a data analysis assistant for the store's e-commerce data. I can use four tables: "
+    "orders, order items, products and users (customers, in aggregate only).\n"
     "I can:\n"
     "- answer questions such as revenue by category, top products or return rates;\n"
     "- compare periods, segments and trends;\n"
     "- write a report and save it to your library when you confirm;\n"
     "- list, open, search and delete your saved reports.\n"
-    "I don't share personal data such as customer names, emails or addresses, and I work "
-    "in English only."
+    "I don't have inventory, warehouse, marketing spend or website visit data, I never share "
+    "personal details about individual customers, and I work in English only."
 )
 GREETING_TEMPLATE: Final = (
     "Hello! I can help you analyse the store's e-commerce data, for example revenue, "
@@ -135,6 +139,7 @@ def run_light_path(
     detector: PiiDetector | None = None,
     tracer: Any = None,
     static_reply: str | None = None,
+    static_fallback: str | None = None,
 ) -> LightResult:
     """Answer a light-label turn (``smalltalk``, ``meta``, ``memory``, ``comment``).
 
@@ -142,7 +147,9 @@ def run_light_path(
     output guard blocks the answer if any is present.
 
     ``static_reply`` (D-151a) is a code-owned answer built by the caller, e.g. the reply to
-    "show me the SQL": it is used instead of the model and of the capabilities text."""
+    "show me the SQL": it is used instead of the model and of the capabilities text.
+    ``static_fallback`` is the code-owned text used if the guard does not pass
+    ``static_reply`` (default: the D-151a "SQL is not shown" text)."""
     if label not in LIGHT_LABELS:
         raise ValueError("run_light_path only handles the light labels")
     calls_before = llm.budget.calls
@@ -169,7 +176,7 @@ def run_light_path(
     )
     codes = frozenset(verdict.codes())
     if verdict.allowed and not verdict.text.strip():  # e.g. "<b></b>": nothing left to show
-        text, source = _template(label, profile, static), "template"
+        text, source = _template(label, profile, static, static_fallback), "template"
     elif verdict.allowed:
         body = verdict.text
         if source == "model":  # D-151: model-written text only, after the guard allowed it
@@ -183,7 +190,7 @@ def run_light_path(
     elif UNEXPECTED_ACTION in codes:  # the turn did something it must not: fail closed
         text, source = verdict.text, "blocked"
     else:  # e.g. the model echoed instructions: a code-written reply is always safe
-        text, source = _template(label, profile, static), "template"
+        text, source = _template(label, profile, static, static_fallback), "template"
 
     result = LightResult(text, label, source, llm.budget.calls - calls_before, codes)
     if tracer is not None:
@@ -205,9 +212,11 @@ def run_light_path(
     return result
 
 
-def _template(label: str, profile: Profile, static: str | None = None) -> str:
+def _template(
+    label: str, profile: Profile, static: str | None = None, fallback: str | None = None
+) -> str:
     if static is not None:  # D-151a: the guard did not pass the reply: the fixed short text
-        return SQL_NOT_SHOWN_TEXT
+        return fallback if isinstance(fallback, str) and fallback.strip() else SQL_NOT_SHOWN_TEXT
     if label in LABEL_TEXTS:
         return LABEL_TEXTS[label]
     if label == "meta":

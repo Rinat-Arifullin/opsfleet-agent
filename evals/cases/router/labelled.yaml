@@ -529,3 +529,61 @@ cases:
     label: simple
   fake:
     label: simple
+# iter-live1: schema questions are `meta`; questions about data the dataset lacks are data
+# questions (code answers them as not available); a past-conversation question is `memory`.
+- id: 67_meta
+  tags:
+  - schema
+  input: Which tables can you query?
+  expect:
+    label: meta
+  fake:
+    label: meta
+- id: 68_meta
+  tags:
+  - schema
+  input: What kind of data is available to me?
+  expect:
+    label: meta
+  fake:
+    label: meta
+- id: 69_simple
+  tags:
+  - unavailable_data
+  input: Can you tell me about inventory levels?
+  expect:
+    label: simple
+  fake:
+    label: simple
+- id: 70_simple
+  tags:
+  - unavailable_data
+  input: How much stock do we have left in the warehouse?
+  expect:
+    label: simple
+  fake:
+    label: simple
+- id: 71_simple
+  tags:
+  - unavailable_data
+  input: What was our ad spend last month?
+  expect:
+    label: simple
+  fake:
+    label: simple
+- id: 72_memory
+  tags:
+  - memory
+  input: what did we discuss yesterday?
+  expect:
+    label: memory
+  fake:
+    label: memory
+- id: 73_memory
+  tags:
+  - memory
+  input: What did I ask you in our last session?
+  expect:
+    label: memory
+  fake:
+    label: memory

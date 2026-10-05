@@ -52,7 +52,7 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 ROUTER_ROLE: Final = "router"
-ROUTER_PROMPT_VERSION: Final = "router-v2"
+ROUTER_PROMPT_VERSION: Final = "router-v3"
 ROUTER_PROMPT_PATH: Final = Path(__file__).resolve().parents[3] / "prompts" / "router.md"
 
 LABELS: Final = (
