@@ -820,8 +820,8 @@ These iterations run in the reverse of the drop order: the most protected item (
 - `tests/unit/test_langfuse_sink.py`
 - `pyproject.toml`, `uv.lock`, `requirements.txt`: serialized, after 31
 **Done criteria**:
-- [ ] The sink receives no field that the JSONL sink would drop (reuses the `test_trace_redaction` fixture)
-- [ ] [std]
+- [x] The sink receives no field that the JSONL sink would drop (reuses the `test_trace_redaction` fixture)
+- [x] [std]
 **Effort**: M (1) · **Depends on**: 4, 25, 31 (lock order) · **Risk**: low
 
 ## Iteration 41: Persona smoke check and rollback (drop 9)
