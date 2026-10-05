@@ -557,6 +557,24 @@ def test_force_answer_error_skips_grounding(make_env, monkeypatch) -> None:
     assert not [s for s in env.spans if s[1] == "grounding"]
 
 
+def test_force_answer_without_a_query_shows_the_template(make_env) -> None:
+    # No SQL ran: the model has no data, so it is not asked (it wrote "I'll get those figures")
+    analyst = Scripted(ModelTurn(""))
+    env = make_env(Router("complex"), analyst)
+    out = env.ask("How many orders were completed last month?")
+    assert out.text.startswith(gr.UNAVAILABLE_TEXT) and "Partial:" not in out.text
+    assert not [c for c in analyst.calls if c[2] == 0]  # no force_answer LLM call
+
+
+def test_force_answer_without_a_query_keeps_the_previous_answer(make_env) -> None:
+    analyst = Scripted(sql_call(SIMPLE), ModelTurn("3 complete orders."), ModelTurn(""))
+    env = make_env(Router("complex"), analyst)
+    env.ask("How many complete orders are there?")
+    out = env.ask("And by category?")
+    assert out.text.startswith(gr.PARTIAL_WITH_CONTEXT_TEXT)
+    assert not [c for c in analyst.calls if c[2] == 0]
+
+
 # --- L7: owner-only data directory and checkpoint files ---
 
 

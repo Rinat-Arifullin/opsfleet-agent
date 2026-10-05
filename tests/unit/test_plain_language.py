@@ -156,7 +156,8 @@ def test_light_prompt_contains_rule(make_env) -> None:
 
 
 def test_force_answer_prompt_contains_rule(make_env) -> None:
-    env = make_env(Router("complex"), Scripted(ModelTurn("")))  # empty answer -> force answer
+    # empty answer after a query -> force answer (with no query the template is shown)
+    env = make_env(Router("complex"), Scripted(sql_call(SIMPLE), ModelTurn("")))
     env.ask("Why did revenue fall?")
     force = [c for c in env.analyst.calls if c[2] == 0]
     assert force, "force answer did not run"

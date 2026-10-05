@@ -1390,7 +1390,11 @@ def _force_text(
         template = f"{UNAVAILABLE_TEXT}\n\nQueries run:\n{summary}"
     else:
         template = PARTIAL_WITH_CONTEXT_TEXT if previous else UNAVAILABLE_TEXT
-    reason = "comment" if comment else state.get("error_class") or "role_failed"
+    if not comment and not ledger:
+        # No query ran this turn: the model has nothing to report and writes a promise
+        # ("I'll get those figures") that grounding cannot catch, so the template is shown.
+        return template
+    reason ="comment" if comment else state.get("error_class") or "role_failed"
     fa = ctx.budget.force_answer(None, reason)
     if fa.template_only:
         return template

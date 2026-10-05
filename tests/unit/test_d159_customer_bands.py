@@ -23,6 +23,7 @@ from opsfleet_agent.guards.small_cell import DEFAULT_K
 from opsfleet_agent.guards.sql_policy import Rule, check_aggregate_only, check_sql
 from opsfleet_agent.roles.analyst import ModelTurn
 from opsfleet_agent.tools.run_sql import RunSqlTurn
+from tests.unit.test_d156_echo import Echoing
 from tests.unit.test_graph import Router, Scripted, sql_call
 from tests.unit.test_graph import detector as detector  # noqa: F401  (fixture)
 from tests.unit.test_graph import make_env as make_env  # noqa: F401  (fixture)
@@ -188,12 +189,7 @@ def test_answer_with_ids_twice_is_never_shown(make_env) -> None:  # noqa: F811
 
 
 def test_force_answer_with_ids_falls_back_to_the_template(make_env, monkeypatch) -> None:  # noqa: F811
-    def analyst(model, messages, specs, timeout):
-        from opsfleet_agent.graph.llm import LLMResponse
-
-        return LLMResponse(ModelTurn(WITH_IDS), 5, 5)
-
-    env = make_env(Router("simple"), analyst)
+    env = make_env(Router("simple"), Echoing(sql_call(SIMPLE), ModelTurn(WITH_IDS), force=WITH_IDS))
     out = env.ask(TOP10)
     assert "10234" not in out.text and not mentions_customer_id(out.text)
     assert [s["verdict"] for s in _guard_spans(env)] == ["retry", "block", "block"]

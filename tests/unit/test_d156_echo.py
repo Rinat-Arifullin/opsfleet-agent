@@ -187,14 +187,14 @@ def test_echo_is_retried_once_then_the_retry_answer_is_used(make_env) -> None:  
 
 
 def test_echo_twice_falls_back_and_never_shows_the_text(make_env) -> None:  # noqa: F811
-    analyst = Echoing(ModelTurn(CAPABILITIES_TEXT), force=CAPABILITIES_TEXT)
+    analyst = Echoing(sql_call(SIMPLE), ModelTurn(CAPABILITIES_TEXT), force=CAPABILITIES_TEXT)
     env = make_env(SeqRouter("simple"), analyst)
     out = env.ask("How did orders go?")
     assert CAPS_WORDS not in out.text and out.text.strip()
     verdicts = [s["verdict"] for s in _echo_spans(env)]
     assert verdicts[:2] == ["retry", "block"] and verdicts.count("retry") == 1
     assert "block" in verdicts[2:]  # the force answer echoed too: template, not the text
-    assert len([c for c in analyst.calls if c[2]]) == 2  # bounded: first run plus one retry
+    assert len([c for c in analyst.calls if c[2]]) == 3  # bounded: SQL, first answer, one retry
 
 
 def test_turn2_capabilities_then_turn3_echo_regression(make_env) -> None:  # noqa: F811
