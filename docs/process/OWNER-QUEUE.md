@@ -215,6 +215,10 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | D-156 | ✅ Owner 2026-10-05: yes. Batch run: monthly-revenue turns printed the capabilities text (model echoed history). Code-owned replies replaced by markers in LLM history; an answer repeating a previous reply or static text is rejected (one retry, then fallback). Done in 03a83c2 (ODs in `iter-d156-d157-ods.md`) | — | — |
 | D-157 | ✅ Owner 2026-10-05: yes. Done in 03a83c2: a plain customer-ranking question labelled injection/off_topic is relabelled `simple` (no injection hint words); answered by customer ID with CUSTOMER_ID_NOTICE; name/email/address variants get the PII refusal | CUSTOMER_ID_NOTICE ✅ accepted 2026-10-05. OD-14 ✅ 2026-10-05: spend bands and customer counts only, no individual customers or IDs (D-159, in progress) | nothing |
 | D-158 | ✅ Owner 2026-10-05. Done in 05c34b1: `evals/langfuse_dataset.py upload|run`, live SUT `evals/live_sut.py` (own data dir `data/eval-live`). ODs in `iter40b-ods.md`; OD-4: 4 golden cases need seeds the live harness doesn't apply yet | Accept ODs | nothing |
+| D-161 | ✅ Owner 2026-10-05: D-159 OD-2, the CUSTOMER_BANDS_NOTICE text is accepted as is. | — | nothing |
+| D-162 | ✅ Owner 2026-10-05: D-159 OD-5, `aggregate_only` stays on for follow-ups after a bands answer ("show their IDs" is refused in code too). In progress | — | nothing |
+| D-163 | ✅ Owner 2026-10-05: D-159 OD-3, the minimum of 5 customers per spend band is enforced in code, not only in the prompt. In progress | — | nothing |
+| D-164 | ✅ Owner 2026-10-05: D-155 OD-1/OD-2, no fallback on a router outage and no FR-17 carve-out for non-English memory/comment turns; current behaviour stays. D-160: old pre-matrix Langfuse dataset items are not archived. | — | nothing |
 
 ## Scope questions (🟡: add now / defer to README "future work" / skip)
 
