@@ -735,6 +735,11 @@ _DELETE_RE: Final = re.compile(r"\bDELETE\b", re.IGNORECASE)
 _PROTECTED_TABLES: Final = frozenset({"audit_event", "meta", "schema_migrations"})
 # FK actions that change rows in another table when a parent row is deleted.
 _CASCADING_ACTIONS: Final = frozenset({"CASCADE", "SET NULL", "SET DEFAULT"})
+# Iteration 37: an FTS5 index dependent must be a regular (not contentless or
+# external-content) FTS5 table; its shadow tables count as touched for the trigger check.
+_FTS5_RE: Final = re.compile(r"^CREATE\s+VIRTUAL\s+TABLE\b.*\bUSING\s+FTS5\s*\(", re.I | re.S)
+_FTS_CONTENT_RE: Final = re.compile(r"\bcontent(_rowid)?\s*=|\bcontentless", re.I)
+_FTS_SHADOWS: Final = ("_data", "_idx", "_content", "_docsize", "_config")
 
 
 def _sql_name(what: str, value: object) -> str:
@@ -764,6 +769,11 @@ class DeletableKind:
     owner column is required; a kind with no owner must say ``unowned=True`` explicitly.
     Static checks run here; the live schema is verified at registration (with ``conn``) and
     again inside every delete transaction (:func:`_verify_kind`).
+
+    ``fts_dependents`` (iteration 37): regular FTS5 tables holding an index row per target in
+    ``(table, column)``. Their rows are deleted in the same transaction, after the exact
+    change-counter check (FTS5 shadow-table writes are not row-for-row), then verified gone,
+    and the index is ``optimize``d before COMMIT so no token of a deleted row survives.
     """
 
     name: str
@@ -772,9 +782,11 @@ class DeletableKind:
     owner_column: str | None = None
     dependents: tuple[tuple[str, str], ...] = ()
     unowned: bool = False
+    fts_dependents: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "dependents", _static_checks(self))
+        object.__setattr__(self, "fts_dependents", _static_fts_checks(self))
 
 
 def _static_checks(kind: DeletableKind) -> tuple[tuple[str, str], ...]:
@@ -814,6 +826,43 @@ def _static_checks(kind: DeletableKind) -> tuple[tuple[str, str], ...]:
             raise AuditError("duplicate dependent")
         seen.add(pair)
     return deps  # type: ignore[return-value]
+
+
+def _static_fts_checks(kind: DeletableKind) -> tuple[tuple[str, str], ...]:
+    """The FTS index dependents: (table, column) pairs, bounded, unique, never the kind's own
+    table or one of its plain dependents."""
+    try:
+        deps = tuple(tuple(d) for d in kind.fts_dependents)
+    except TypeError as err:
+        raise AuditError("fts_dependents must be (table, column) pairs") from err
+    if len(deps) > MAX_DEPENDENTS:
+        raise AuditError("too many fts dependents")
+    taken = {str(kind.table).lower(), *(str(t).lower() for t, *_ in kind.dependents)}
+    seen: set[str] = set()
+    for dep in deps:
+        if len(dep) != 2:
+            raise AuditError("fts_dependents must be (table, column) pairs")
+        fts_table = _deletable_table("fts dependent table", dep[0]).lower()
+        _sql_name("fts dependent column", dep[1])
+        if fts_table in taken or fts_table in seen:
+            raise AuditError("an fts dependent must be a distinct table")
+        seen.add(fts_table)
+    return deps  # type: ignore[return-value]
+
+
+def _fts_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    """Verify a regular FTS5 table in ``main``; return its lower-case column names."""
+    row = conn.execute(
+        "SELECT sql FROM main.sqlite_master WHERE type = 'table' AND lower(name) = lower(?)",
+        (table,),
+    ).fetchone()
+    if row is None or not isinstance(row[0], str):
+        raise AuditError("fts dependent table does not exist")
+    if _FTS5_RE.search(row[0].strip()) is None:
+        raise AuditError("fts dependent is not an FTS5 table")
+    if _FTS_CONTENT_RE.search(row[0]):
+        raise AuditError("fts dependent must be a regular FTS5 table")
+    return {str(r[1]).lower() for r in conn.execute(f"PRAGMA main.table_info({_q(table)})")}
 
 
 # Empty in production until iterations 22a/23 register reports and the library.
@@ -926,7 +975,11 @@ def _verify_kind(conn: sqlite3.Connection, kind: DeletableKind) -> None:
         dependents = _static_checks(kind)
     except AuditError as err:
         raise AuditError("registered deletable kind was modified") from err
-    if dependents != kind.dependents:
+    try:
+        fts_dependents = _static_fts_checks(kind)
+    except AuditError as err:
+        raise AuditError("registered deletable kind was modified") from err
+    if dependents != kind.dependents or fts_dependents != kind.fts_dependents:
         raise AuditError("registered deletable kind was modified")
     main_cols = _table_columns(conn, kind.table)
     _text_column(main_cols, kind.key_column)
@@ -936,8 +989,13 @@ def _verify_kind(conn: sqlite3.Connection, kind: DeletableKind) -> None:
         raise AuditError("delete key column is not unique")
     for dep_table, dep_col in kind.dependents:
         _text_column(_table_columns(conn, dep_table), dep_col)
+    for fts_table, fts_col in kind.fts_dependents:
+        if fts_col.lower() not in _fts_columns(conn, fts_table):
+            raise AuditError("fts dependent column does not exist")
 
     touched = {kind.table.lower(), *(t.lower() for t, _ in kind.dependents)}
+    for fts_table, _col in kind.fts_dependents:
+        touched |= {fts_table.lower(), *(fts_table.lower() + s for s in _FTS_SHADOWS)}
     # L2: no trigger that could run on these deletes (fail closed: any mention of DELETE).
     for schema in ("main.sqlite_master", "sqlite_temp_master"):
         for tbl, sql in conn.execute(f"SELECT tbl_name, sql FROM {schema} WHERE type = 'trigger'"):
@@ -1061,6 +1119,18 @@ def audited_delete(
                 raise DeleteMismatchError(
                     "delete changed rows outside the declared kind; rolled back"
                 )
+            # Iteration 37: FTS index rows go in the same transaction, after the exact counter
+            # check (shadow-table writes are not row-for-row), are verified gone, and the index
+            # is optimized so the deleted tokens leave no residue in the shadow tables.
+            for fts_table, fts_col in spec.fts_dependents:
+                fts = f"main.{_q(fts_table)}"
+                conn.execute(f"DELETE FROM {fts} WHERE {_q(fts_col)} IN ({marks})", targets)
+                left = conn.execute(
+                    f"SELECT COUNT(*) FROM {fts} WHERE {_q(fts_col)} IN ({marks})", targets
+                ).fetchone()[0]
+                if left:
+                    raise DeleteMismatchError("full-text index rows remained; rolled back")
+                conn.execute(f"INSERT INTO {fts}({_q(fts_table)}) VALUES('optimize')")
             row = conn.execute(
                 "SELECT event_type FROM main.audit_event WHERE event_id = ?", (event.event_id,)
             ).fetchone()

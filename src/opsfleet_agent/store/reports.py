@@ -15,6 +15,9 @@ Rules enforced here, in code:
 
 No delete method: deletion is iteration 22a's audited flow (audit record first). The only
 update is :meth:`ReportStore.rename` (iteration 33), owner-checked and guarded.
+
+Iteration 37 (AC-21.13): the FTS5 index (``reports.fts``) is written in the same transaction
+as the insert and the rename; :meth:`ReportStore.ranked_search` is owner-filtered in SQL.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from typing import Any, Final
 
 from opsfleet_agent.graph.context import KIND_REPORT, StoreItem, fence_untrusted
 from opsfleet_agent.obs import tracer as tr
+from opsfleet_agent.reports import fts
 from opsfleet_agent.reports.schema import missing_sections
 from opsfleet_agent.store.db import StoreError, write_tx
 from opsfleet_agent.store.reports_schema import REPORTS_MIGRATION
@@ -69,13 +73,18 @@ _COLS: Final = (
     "sql_used, scope_snapshot, data_window, tags, model_used, persona_version, draft_hash, "
     "idempotency_key, created_at"
 )
+_S_COLS: Final = ", ".join("s." + c.strip() for c in _COLS.split(","))
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    """Idempotent (the same DDL as migration 3, for a connection not opened by open_store)."""
+    """Idempotent (the same DDL as migrations 3 and 5, for a connection not opened by
+    open_store). The FTS index is created (and backfilled) only when this SQLite supports it."""
     with write_tx(conn):
         for stmt in REPORTS_MIGRATION:
             conn.execute(stmt)
+        if fts.fts5_supported() and not fts.has_index(conn):
+            for stmt in fts.FTS_MIGRATION:
+                conn.execute(stmt)
 
 
 def _req(name: str, value: Any, max_len: int = 200) -> str:
@@ -194,7 +203,10 @@ class ReportStore:
             ).fetchone()
             if row is None or row[1] != owner:  # a key owned by someone else: never handed out
                 raise ReportError("idempotency key conflict")
-        return _row(row), created
+            rec = _row(row)
+            if created and fts.has_index(self.conn):  # same transaction: index and row agree
+                fts.index_report(self.conn, rec.report_id, rec.title, rec.body_markdown, rec.tags)
+        return rec, created
 
     def get(self, report_id: str, owner_user_id: str) -> SavedReport | None:
         """The owner's report (another user's id returns None, never the row)."""
@@ -229,11 +241,30 @@ class ReportStore:
             )
             if cur.rowcount != 1:
                 return None
+            if fts.has_index(self.conn):  # iteration 37: re-index the title in the same tx
+                fts.reindex_title(self.conn, str(report_id), new_title)
             row = self.conn.execute(
                 f"SELECT {_COLS} FROM saved_report WHERE report_id=? AND owner_user_id=?",
                 (str(report_id), str(owner_user_id)),
             ).fetchone()
         return _row(row) if row else None
+
+    def ranked_search(self, owner_user_id: str, match: str) -> list[SavedReport] | None:
+        """Iteration 37 (AC-21.13): the owner's reports matching the FTS5 expression ``match``
+        (built by :func:`reports.fts.build_match`, never raw user text), best bm25 first, over
+        the owner's newest ``MAX_LIST`` reports (the same row source as the substring search).
+        The owner filter is in SQL: another user's row is never returned. None when there is
+        no index or SQLite refuses the query (the caller falls back to the substring search)."""
+        if not fts.has_index(self.conn):
+            return None
+        owner = str(owner_user_id)
+        try:
+            rows = self.conn.execute(
+                fts.ranked_sql(_S_COLS), (str(match), owner, owner, MAX_LIST)
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return None
+        return [_row(r) for r in rows[:MAX_LIST]]
 
     def get_fenced(self, report_id: str, owner_user_id: str) -> str | None:
         """The body as fenced untrusted data, for a prompt (SEC-13). PII-scrubbed and capped."""

@@ -43,6 +43,7 @@ from opsfleet_agent.delete.token import (
     verify_proof,
 )
 from opsfleet_agent.obs.tracer import register_secret
+from opsfleet_agent.reports import fts
 from opsfleet_agent.reports.matcher import (
     MatchError,
     delete_candidates,
@@ -703,10 +704,16 @@ def setup_delete(conn: Any, audit: Any, store: Any, *, clock: Callable[[], float
     if conn is None or audit is None or store is None:
         return None
     try:
+        # Iteration 37: when the FTS index exists, its rows are deleted (and the index
+        # optimized) in the same audited transaction; a report must never survive as tokens.
+        fts_deps = ((fts.FTS_TABLE, fts.FTS_KEY),) if fts.has_index(conn) else ()
         A.register_deletable(
-            A.DeletableKind(KIND, "saved_report", "report_id", owner_column="owner_user_id"),
+            A.DeletableKind(
+                KIND, "saved_report", "report_id", owner_column="owner_user_id",
+                fts_dependents=fts_deps,
+            ),
             conn=conn,
-        )
+        )  # fmt: skip
         return DeleteService(audit, store, clock=clock, key=key)
     except Exception as exc:  # noqa: BLE001
         logger.error("delete feature disabled: %s", type(exc).__name__)

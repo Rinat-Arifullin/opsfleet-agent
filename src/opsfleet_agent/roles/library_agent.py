@@ -50,6 +50,7 @@ from opsfleet_agent.graph.memory import render_preferences, set_preference
 from opsfleet_agent.guards.plain_language import PLAIN_LANGUAGE_RULE, PLAIN_LANGUAGE_SECTION
 from opsfleet_agent.persona import PERSONA_LABEL, SAFETY_PREAMBLE, Persona, assemble_prompt
 from opsfleet_agent.reports.library import (
+    SEARCH_MODES,
     LibraryError,
     display_id,
     list_reports,
@@ -138,6 +139,11 @@ LIBRARY_TOOL_SPECS: Final[dict[str, ToolSpec]] = {
                 "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags"},
                 "date_from": _str("Created on or after, YYYY-MM-DD"),
                 "date_to": _str("Created on or before, YYYY-MM-DD"),
+                "mode": {
+                    "type": "string",
+                    "enum": list(SEARCH_MODES),
+                    "description": "substring (default) or ranked: best full-text match first",
+                },
             },
         },
     },
@@ -308,6 +314,7 @@ def make_library_executors(
     scope_snapshot: Mapping[str, Any] | None = None,
     detector: Any = None,
     export_dir: Path | None = None,
+    tracer: Any = None,
 ) -> dict[str, Callable[[dict[str, Any]], dict[str, Any]]]:
     """The library tools for one turn. ``owner``, ``scope``, the session and the turn come from
     code; model arguments only select reports and values. ``request_delete`` is None when the
@@ -333,14 +340,25 @@ def make_library_executors(
             tags = (tags,)
         if not isinstance(tags, list | tuple):
             return _err(INVALID_ARGS, "tags must be a list of words.", "Send a list.")
+        mode = _opt_str(args, "mode") or "substring"
+        if mode not in SEARCH_MODES:
+            return _err(INVALID_ARGS, "mode must be substring or ranked.", "Use one of them.")
         try:
             res = search_reports(
                 store, owner, scope, text=_opt_str(args, "text"),
                 tags=[str(t) for t in tags], date_from=_opt_str(args, "date_from"),
-                date_to=_opt_str(args, "date_to"), limit=MAX_LIST_RESULTS,
+                date_to=_opt_str(args, "date_to"), limit=MAX_LIST_RESULTS, mode=mode,
             )  # fmt: skip
         except (LibraryError, MatchError) as exc:
             return _err(INVALID_ARGS, str(exc), "Fix the filters once, then try again.")
+        if tracer is not None:  # iteration 37: which search path ran; never the query text
+            try:
+                tracer.record(
+                    "tool", "search_reports", tool="search_reports", outcome="ok",
+                    search_path=res.path, rows=len(res.entries),
+                )  # fmt: skip
+            except Exception:  # noqa: BLE001, S110 - tracing never breaks the tool
+                pass
         return _entries(res)
 
     def view_tool(args: dict[str, Any]) -> dict[str, Any]:

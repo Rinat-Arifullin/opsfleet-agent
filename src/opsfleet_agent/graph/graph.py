@@ -1104,7 +1104,7 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
             pending=state.get("pending_action") or None,
             request_delete=request_delete if sv.delete is not None and ctx.can_confirm else None,
             preferences=sv.preferences, scope_snapshot=snapshot_of(ctx.sql_session.scope),
-            detector=_turn_detector(ctx), export_dir=sv.export_dir,
+            detector=_turn_detector(ctx), export_dir=sv.export_dir, tracer=ctx.tracer,
         )  # fmt: skip
         deps = AnalystDeps(
             llm=ctx.llm, invoke=sv.analyst_invoke, executors=executors,

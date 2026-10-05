@@ -89,7 +89,10 @@ SPAN_FIELDS: dict[str, tuple[str, ...]] = {
         "limiter_wait_ms",
         "tool_calls",
     ),
-    "tool": ("tool", "outcome", "error_code", "args_keys", "rows", "truncated"),
+    "tool": (
+        "tool", "outcome", "error_code", "args_keys", "rows", "truncated",
+        "search_path",  # iteration 37: ranked | substring | substring_fallback
+    ),
     "guard": ("rule_hits", "verdict", "rule", "redaction_count", "grounding_flags"),
     "sql": (
         "purpose",

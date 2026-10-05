@@ -7,8 +7,9 @@ through ``terminal_safe`` before stdout.
 Report commands (all owner-only and scope-checked in ``reports.library``): ``/reports [words]``
 lists the user's own saved reports (titles only; the optional words use the delete matcher),
 ``/open <id | row n | title words>`` shows one, ``/search <words> [tag:x] [from:D] [to:D]``
-substring-searches them
-(iteration 18). ``/rename``, ``/export`` and ``/retry`` (iteration 33, ``commands.report_actions``)
+searches them
+(iteration 18; ranked FTS5 bm25 since iteration 37, substring fallback).
+``/rename``, ``/export`` and ``/retry`` (iteration 33, ``commands.report_actions``)
 rename a report, write it as a Markdown file under ``<data dir>/exports/`` and re-run the
 report phase of this session's last failed report (no SQL).
 ``/delete`` (iteration 22a, ``commands.delete``) is registered at startup only when the delete
@@ -239,24 +240,41 @@ _SEARCH_USAGE: Final = "Usage: /search <words> [tag:<tag>] [from:YYYY-MM-DD] [to
 
 
 def _search(args: str, ctx: CommandContext) -> CommandResult:
-    """Substring search over the user's own in-scope reports. The only state kept is the id
-    listing for "/open <n>"; it is never a delete target (AC-21.11)."""
+    """Ranked full-text search over the user's own in-scope reports (iteration 37, AC-21.13;
+    the substring search when the index is unavailable, recorded in the trace). The only state
+    kept is the id listing for "/open <n>"; it is never a delete target (AC-21.11)."""
     if ctx.report_store is None:
         return CommandResult(STORE_UNAVAILABLE_TEXT)
     from opsfleet_agent.reports import library
 
     try:
         res = library.search_reports(
-            ctx.report_store, ctx.user_id, ctx.scope, **library.parse_search_args(args)
-        )
+            ctx.report_store, ctx.user_id, ctx.scope, mode="ranked",
+            **library.parse_search_args(args),
+        )  # fmt: skip
     except library.LibraryError as exc:
         return CommandResult(f"{_SEARCH_USAGE}\n{exc}.")
     except Exception as exc:
         log.error("report search failed: %s", type(exc).__name__)
         return CommandResult("Could not search your reports right now.")
+    _trace_search(ctx, res)
     ctx.listing[:] = [e.report_id for e in res.entries]
-    header = f"Matching reports (newest first, {library.count_text(res)} in total):"
+    order = "best match first" if res.path == "ranked" else "newest first"
+    header = f"Matching reports ({order}, {library.count_text(res)} in total):"
     return CommandResult(library.render_list(res, header=header, empty=NO_MATCH_TEXT))
+
+
+def _trace_search(ctx: CommandContext, res: Any) -> None:
+    """Which search path ran (ranked, substring or the fallback); never the query text."""
+    if ctx.tracer is None:
+        return
+    try:
+        ctx.tracer.record(
+            "tool", "search_reports", tool="search_reports", outcome="ok",
+            search_path=res.path, rows=len(res.entries), truncated=res.truncated_scan,
+        )  # fmt: skip
+    except Exception as exc:  # noqa: BLE001 - tracing never breaks the command
+        log.error("search trace failed: %s", type(exc).__name__)
 
 
 def _rename(args: str, ctx: CommandContext) -> CommandResult:
@@ -316,7 +334,9 @@ def _table() -> dict[str, Command]:
         ),
         Command("/reports", "/reports [words]", "List your saved reports.", _reports),
         Command("/open", "/open <id|n|title>", "Open a saved report.", _open),
-        Command("/search", "/search <words> [tag:x]", "Search saved reports.", _search),
+        Command(
+            "/search", "/search <words> [tag:x]", "Search saved reports, best match first.", _search
+        ),  # fmt: skip
         Command(
             "/rename", '/rename <id|n|"title"> <new title>', "Rename a saved report.", _rename
         ),  # fmt: skip

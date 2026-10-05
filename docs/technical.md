@@ -269,6 +269,7 @@ The prototype uses SQLite. `store/db.py:48` opens it in WAL mode with `secure_de
 | | `audit_event` | `AuditLog` (v2) | append-only (triggers block UPDATE and DELETE); audit-first |
 | | `saved_report` | `ReportStore.save` (v3) | idempotent, guarded and scrubbed, author-only |
 | | `user_quota` | `QuotaStore` (v4) | per-user LLM call quotas (D-138) |
+| | `report_fts` (FTS5) | `ReportStore.save`/`rename`, `audited_delete` (v5) | ranked `/search` (iteration 37); kept in sync by code, no triggers; `secure-delete` plus `optimize` on delete (D-199, D-200) |
 | | `feedback` | `store/feedback.py` | `/feedback`; table created by `ensure_schema`, outside `MIGRATIONS` |
 | | `aggregate_fingerprint` | `store/fingerprints.py` | HMAC digests, `RETENTION_DAYS=30`, per user; created by `ensure_schema` |
 | `checkpoints.db` | LangGraph checkpoints | `build_checkpointer` | AES-encrypted serde; thread id = session id |
@@ -385,7 +386,7 @@ Full rows are in `docs/process/OWNER-QUEUE.md` and the ADRs are in `docs/decisio
 | Roles | Router, Quick/Deep analyst, writer, verifier (inside `_build_report`), light path, Library agent (iteration 46) | `summary` role in `models.yaml` unused; the Library agent's `save_report` tool (D-198) |
 | Commands | `/help`, `/exit`, `/feedback`, `/trace`, `/audit`, `/persona` (read-only), `/reports`, `/open`, `/search`, `/delete` | `/export` (stub), rename, `retry report` (the `RETRY_REPORT` cap exists but is unused), `/erase` (`erase_actor` raises `NotImplementedError`) |
 | Admin | `access_set`, `apply_persona`, `rollback_persona` as audit-first APIs | REPL wiring for them |
-| Search | Title and body word match, `tag:`, `from:`, `to:` | FTS and semantic search (FR-74), embeddings column, tag search inside the body |
+| Search | Ranked FTS5 bm25 over title, body and tags for `/search` (iteration 37), substring fallback; the library tool's word match; `tag:`, `from:`, `to:` | Semantic search and RRF (FR-74, iteration 38), embeddings column |
 | Stores | Migrations v1–v4, feedback, fingerprints | Sessions and preferences stores (memory lives in checkpoint state); `checkpoint_truncate` has no caller |
 | Evals | Golden, router, adversarial injection and `pii_typed`, profile matrix, judge with calibration, Langfuse dataset | Many HLD adversarial and resilience categories have no case files; no golden case uses `numbers` or `reference_sql`; no `run_experiment`; judge is Gemini only |
 | CI | ruff, pytest (strict golden), offline eval, requirements sync | gitleaks, live eval job, `workflow_dispatch` |
@@ -405,6 +406,7 @@ Full rows are in `docs/process/OWNER-QUEUE.md` and the ADRs are in `docs/decisio
    - Some entities listed there are not tables (sessions, preferences).
    - `saved_report` has no embedding column.
    - `user_quota` and `aggregate_fingerprint` have different columns from the HLD.
+7. **FTS index sync (§6.3.2).** The HLD says the FTS table is "maintained by triggers". The code writes it in the same transaction from `ReportStore.save`/`rename` and from `audited_delete` (`fts_dependents`), because `audited_delete` refuses any DELETE trigger on a table it touches (D-199).
 
 ## 11. Open items
 

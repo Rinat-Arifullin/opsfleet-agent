@@ -27,6 +27,7 @@ from typing import Any, Final
 from opsfleet_agent.graph.context import KIND_REPORT, _one_line, fence_untrusted
 from opsfleet_agent.guards.plain_language import strip_sql
 from opsfleet_agent.guards.scope import ProductScope
+from opsfleet_agent.reports import fts
 from opsfleet_agent.reports.matcher import (
     MatchError,
     in_scope,
@@ -40,6 +41,7 @@ from opsfleet_agent.store.reports import MAX_BODY_CHARS, MAX_LIST, SavedReport
 __all__ = [
     "DRIFT_LABEL",
     "MAX_RESULTS",
+    "SEARCH_MODES",
     "NOT_FOUND_TEXT",
     "NO_ROW_TEXT",
     "LibraryError",
@@ -59,6 +61,7 @@ __all__ = [
 ]
 
 MAX_RESULTS: Final = 20
+SEARCH_MODES: Final = ("substring", "ranked")
 MAX_TAGS: Final = 5
 MAX_ID_CHARS: Final = 64
 TITLE_CHARS: Final = 120
@@ -104,6 +107,9 @@ class ListResult:
     entries: tuple[ListEntry, ...]  # at most the requested limit
     total: int  # matches among the scanned reports (the owner's own only)
     truncated_scan: bool  # the owner has more reports than were scanned
+    # iteration 37: "ranked" (FTS5 bm25), "substring", or "substring_fallback" (ranked was
+    # asked for but the index is missing or refused the query)
+    path: str = "substring"
 
 
 @dataclass(frozen=True)
@@ -190,10 +196,18 @@ def search_reports(
     date_from: str | None = None,
     date_to: str | None = None,
     limit: int = MAX_RESULTS,
+    mode: str = "substring",
 ) -> ListResult:
     """AC-21.10: all given filters must match (case-insensitive substring over title and body,
     exact tag, creation date within the inclusive range), newest first, at most 20 and a total.
-    Drifted reports are never searched. Raises :class:`LibraryError` for an unusable request."""
+    Drifted reports are never searched. Raises :class:`LibraryError` for an unusable request.
+
+    Iteration 37 (AC-21.13): ``mode="ranked"`` with text uses the FTS5 index (every word must
+    match, stemmed, over title, body and tags), best bm25 first, over the same owner rows; the
+    scope, tag and date filters apply before the limit. Without an index it falls back to the
+    substring search (``path="substring_fallback"``)."""
+    if mode not in SEARCH_MODES:
+        raise LibraryError("unknown search mode")
     try:
         needle = normalize_query(text) if text is not None else None
     except MatchError as exc:
@@ -207,18 +221,30 @@ def search_reports(
         raise LibraryError("the from: date is after the to: date")
     if needle is None and not want_tags and date_from is None and date_to is None:
         raise LibraryError("give some search text, a tag or a date range")
-    rows, truncated = owner_rows(store, owner)
+    path, ranked = "substring", None
+    if mode == "ranked" and needle is not None:
+        try:
+            match = fts.build_match(needle)
+        except fts.FtsQueryError as exc:
+            raise LibraryError(str(exc)) from None
+        search = getattr(store, "ranked_search", None)
+        ranked = search(owner, match) if callable(search) else None
+        path = "ranked" if ranked is not None else "substring_fallback"
+    if ranked is not None:
+        rows, truncated = ranked, store.count(owner) > MAX_LIST
+    else:
+        rows, truncated = owner_rows(store, owner)
     hits = [
         r
         for r in rows
         if in_scope(r, scope)
-        and (needle is None or matches_text(r, needle))
+        and (ranked is not None or needle is None or matches_text(r, needle))
         and want_tags <= {t.casefold() for t in r.tags}
         and (date_from is None or r.created_at[:10] >= date_from)
         and (date_to is None or r.created_at[:10] <= date_to)
     ]
     limit = max(1, min(int(limit), MAX_RESULTS))
-    return ListResult(tuple(_entry(r, scope) for r in hits[:limit]), len(hits), truncated)
+    return ListResult(tuple(_entry(r, scope) for r in hits[:limit]), len(hits), truncated, path)
 
 
 def view_report(store, owner: str, scope: ProductScope | None, report_id: str) -> ViewResult:

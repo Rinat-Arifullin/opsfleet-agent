@@ -905,9 +905,9 @@ These iterations run in the reverse of the drop order: the most protected item (
 - `src/opsfleet_agent/reports/fts.py`
 - `tests/unit/test_fts.py`
 **Done criteria**:
-- [ ] Named tests: `test_search_ranked_fts_bm25`, `test_search_fts_query_syntax_quoted`
-- [ ] The FTS table is added to the parametrized residue test of 23, with FTS `optimize` inside the delete transaction
-- [ ] [std]
+- [x] Named tests: `test_search_ranked_fts_bm25`, `test_search_fts_query_syntax_quoted`
+- [x] The FTS table is added to the parametrized residue test of 23, with FTS `optimize` inside the delete transaction (23's `test_residue.py` does not exist yet, so the parametrized residue test lives in `tests/unit/test_fts.py`; see iter37-ods.md D-205)
+- [x] [std]
 **Effort**: M (1) · **Depends on**: 18, 23, 33 (sequential, same store) · **Risk**: medium
 
 ## Iteration 38: Semantic search with RRF (drop 2)
