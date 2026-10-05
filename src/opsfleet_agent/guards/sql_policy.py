@@ -139,8 +139,10 @@ __all__ = [
     "PII_COLUMNS",
     "PROJECT",
     "QI_COLUMNS",
+    "SOURCE_NOT_ALLOWED_HINT",
     "PolicyDecision",
     "Rule",
+    "allowed_sources_text",
     "check_sql",
     "regenerate_sql",
 ]
@@ -231,6 +233,25 @@ _COARSE_TS_UNITS: Final = frozenset({"MONTH", "QUARTER", "YEAR"})
 _EMPTY: Final[frozenset[str]] = frozenset()
 
 
+
+
+def allowed_sources_text() -> str:
+    """D-154: the allowed tables with their non-PII columns, sorted (no SQL, no PII names)."""
+    parts = []
+    for table in sorted(ALLOWED_TABLES):
+        cols = sorted(ALLOWED_TABLES[table] - PII_COLUMNS.get(table, _EMPTY))
+        parts.append(f"{table} ({', '.join(cols)})")
+    return "; ".join(parts)
+
+
+#: D-154: the ``source_not_allowed`` hint lists every allowed table and column, so the model
+#: can rewrite the query instead of giving up after a refused table.
+SOURCE_NOT_ALLOWED_HINT: Final = (
+    f"that table or source is not available. Rewrite the query using only these tables of "
+    f"{PROJECT}.{DATASET} and only their listed columns: {allowed_sources_text()}"
+)
+
+
 # --------------------------------------------------------------------------- result
 
 
@@ -286,10 +307,7 @@ _HINTS: Final[MappingProxyType[Rule, str]] = MappingProxyType(
         Rule.CTE_SHADOWS_TABLE: (
             "rename the CTE: it may not reuse a table name or start with two underscores"
         ),
-        Rule.SOURCE_NOT_ALLOWED: (
-            "query only the tables orders, order_items, products and users of "
-            "bigquery-public-data.thelook_ecommerce"
-        ),
+        Rule.SOURCE_NOT_ALLOWED: SOURCE_NOT_ALLOWED_HINT,
         Rule.SELECT_STAR: "name the columns you need",
         Rule.UNRESOLVED_VALUE: (
             "select columns, literals or expressions over them; no table aliases, "

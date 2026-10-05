@@ -33,7 +33,9 @@ from opsfleet_agent.graph.llm import (
 log = logging.getLogger(__name__)
 
 LOCAL_API_KEY = "lm-studio"  # placeholder: LM Studio ignores the key, the SDK requires one
-LOCAL_CHAT_TIMEOUT_S = 60.0  # per attempt; the wrapper also passes a deadline-bound timeout
+# D-149: no time limit on a local chat call (the wrapper also passes timeout=None for the local
+# provider). Ctrl-C still interrupts the call; connection errors still fail fast.
+LOCAL_CHAT_TIMEOUT_S: float | None = None
 LOCAL_EMBED_TIMEOUT_S = 10.0
 LOCAL_QUERY_PREFIX = "search_query: "
 LOCAL_DOCUMENT_PREFIX = "search_document: "

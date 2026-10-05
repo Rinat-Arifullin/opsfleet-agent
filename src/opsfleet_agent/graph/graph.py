@@ -77,16 +77,24 @@ from opsfleet_agent.graph.context import (
     tag_scope,
 )
 from opsfleet_agent.graph.grounding import check_grounding, extract_figures, merge_figures
-from opsfleet_agent.graph.intents import is_comment_followup, is_memory_question
+from opsfleet_agent.graph.intents import (
+    is_comment_followup,
+    is_memory_question,
+    is_sql_request,
+)
 from opsfleet_agent.graph.llm import Limiters, LLMSuccess, LLMWrapper
 from opsfleet_agent.graph.memory import SessionMemory
+from opsfleet_agent.graph.providers import is_local
 from opsfleet_agent.guards.input import check_input
 from opsfleet_agent.guards.output import REFUSAL_TEXT, ROLE_TOOLS, check_output
 from opsfleet_agent.guards.plain_language import (
     PLAIN_LANGUAGE_RULE,
     PLAIN_LANGUAGE_SECTION,
     SCHEMA_TERMS_REWRITTEN,
+    SQL_STRIPPED,
     humanize_identifiers,
+    sql_request_reply,
+    strip_sql,
 )
 from opsfleet_agent.guards.scope import ProductScope
 from opsfleet_agent.obs import progress
@@ -143,6 +151,7 @@ AES_KEY_ENV: Final = "LANGGRAPH_AES_KEY"
 HISTORY_TURNS: Final = 12  # last 12 turns verbatim (HLD §4.1 step 1)
 MAX_HISTORY_MESSAGES: Final = 2 * HISTORY_TURNS
 MAX_HISTORY_CHARS: Final = 4000
+MAX_DESCRIBED_QUERIES: Final = 6  # D-151a: prior queries the "show me the SQL" reply describes
 MAX_PRIOR_LEDGER: Final = 20  # prior-turn ledger entries kept in state (context.MAX_PRIOR_LEDGER)
 DEFAULT_WINDOW_START: Final = date(2019, 1, 1)
 ERROR_TEXT: Final = "Something went wrong while handling that. Please try again."
@@ -439,7 +448,10 @@ def _new_context(
     services: GraphServices, raw_text: str, session: Session, sql_session: RunSqlSession, tid: str
 ) -> TurnContext:
     s = services.settings
-    budget = TurnBudget(TurnKind.QA, clock=services.clock, role_subcaps=dict(_QA_ROLE_SUBCAPS))
+    budget = TurnBudget(
+        TurnKind.QA, clock=services.clock, role_subcaps=dict(_QA_ROLE_SUBCAPS),
+        time_bounded=not is_local(s),  # D-149: no wall-clock limits for the local provider
+    )  # fmt: skip
     rpm = {m: lim.rpm for m, lim in s.limits.items()}
     limiters = Limiters(rpm, s.limiter_fraction, clock=services.clock, sleep=services.sleep)
     extra = {"jitter": services.jitter} if services.jitter is not None else {}
@@ -590,7 +602,10 @@ def _promote_report(ctx: TurnContext) -> None:
     old = ctx.budget
     if old.kind is TurnKind.REPORT:
         return
-    new = TurnBudget(TurnKind.REPORT, clock=old._clock, role_subcaps=dict(_REPORT_ROLE_SUBCAPS))
+    new = TurnBudget(
+        TurnKind.REPORT, clock=old._clock, role_subcaps=dict(_REPORT_ROLE_SUBCAPS),
+        time_bounded=old.time_bounded,
+    )  # fmt: skip
     new.restore({**old.snapshot(), "kind": TurnKind.REPORT.value})
     new._start = old._start
     new.usage = old.usage
@@ -640,12 +655,25 @@ def _delete_spans(ctx: TurnContext, st: Any, pid: object) -> None:
                 message=delete_flow.UNSAFE_TEXT)  # fmt: skip
 
 
+def _turn_detector(ctx: TurnContext) -> Any:
+    """D-153: the PII detector for this turn, with the session's scope brands allowlisted
+    (an all-products scope uses the known brands). A brand in scope is never masked as a
+    person; a duck-typed detector without ``with_brands`` (tests) is used as is."""
+    base = ctx.services.detector
+    extend = getattr(base, "with_brands", None)
+    if base is None or extend is None:
+        return base
+    scope = ctx.sql_session.scope
+    brands = ctx.services.known_brands if scope.all_products else scope.brands
+    return extend(tuple(brands or ()))
+
+
 def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, Any]]]:
     sv = ctx.services
     settings = sv.settings
 
     def input_guard(state: TurnState) -> dict[str, Any]:
-        decision = check_input(ctx.raw_text, detector=sv.detector)
+        decision = check_input(ctx.raw_text, detector=_turn_detector(ctx))
         if not decision.allowed or decision.scrubbed is None:
             _record(ctx, "guard", "input", verdict="refuse", rule=decision.rule)
             text = decision.refusal or REFUSAL_TEXT
@@ -669,16 +697,30 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
             # the light path whatever the router said (no SQL, no analyst budget).
             update.update(label="meta", route="light")
             _record(ctx, "router", "intent", label="meta", route="light")
+        elif rd.route != "refuse" and is_sql_request(decision.scrubbed):
+            # D-151a: "show me the SQL" never shows SQL; the light path gives the code-owned
+            # reply that describes the data used in business words (no analyst, no query).
+            update.update(label="meta", route="light")
+            _record(ctx, "router", "intent", label="meta", route="light", sql_request=True)
         if rd.route == "refuse":
             update.update(final_text=rd.refusal_text or REFUSAL_TEXT, outcome="refused")
         return update
 
     def light(state: TurnState) -> dict[str, Any]:
         model, fb = model_ids_from_settings(settings, "light_path")
+        static_reply = None
+        if is_sql_request(state["message"]):  # D-151a: describe the in-scope prior queries
+            scope = ctx.sql_session.scope
+            sqls = [
+                e["sql"] for e in state.get("prior_ledger") or []
+                if isinstance(e.get("sql"), str) and covers(scope, e.get("scope"))
+            ][-MAX_DESCRIBED_QUERIES:]  # fmt: skip
+            static_reply = sql_request_reply(sqls)
         res = run_light_path(
             UserTurn(state["message"]), state["label"], profile=ctx.profile, persona=ctx.persona,
             llm=ctx.llm, model=model, invoke=sv.router_invoke, fallback_model=fb,
-            tool_calls=tuple(ctx.tool_names), detector=sv.detector, tracer=ctx.tracer,
+            tool_calls=tuple(ctx.tool_names), detector=_turn_detector(ctx), tracer=ctx.tracer,
+            static_reply=static_reply,
         )  # fmt: skip
         ctx.guard_codes |= set(res.guard_codes)
         outcome = "blocked" if res.source == "blocked" else "answered"
@@ -976,7 +1018,7 @@ def _report_guard(ctx: TurnContext, text: str):
     return check_output(
         text, role=WRITER_ROLE, label="report", tool_calls=(),
         protected_snippets=analyst_protected_snippets(ctx.persona),
-        detector=ctx.services.detector,
+        detector=_turn_detector(ctx),
     )  # fmt: skip
 
 
@@ -1197,7 +1239,7 @@ def _guard(ctx: TurnContext, state: TurnState, draft: str):
         draft, role=role, label=eff_label,
         tool_calls=_checked_tools(ctx, role),
         protected_snippets=analyst_protected_snippets(ctx.persona),
-        detector=ctx.services.detector,
+        detector=_turn_detector(ctx),
     )  # fmt: skip
 
 
@@ -1222,9 +1264,14 @@ def _finalize(ctx: TurnContext, state: TurnState) -> dict[str, Any]:
             # D-151: plain-language rewrite of the allowed answer (analyst or force answer).
             # It runs after the guard, so the guard judged the model's own words, and it only
             # swaps identifiers for business words: no digit, URL or PII can be introduced.
-            text = humanize_identifiers(verdict.text)
+            # D-151a: SQL is removed first, so the rewrite never turns it into prose.
+            text = strip_sql(verdict.text)
             if text != verdict.text:
+                codes.add(SQL_STRIPPED)
+            humanized = humanize_identifiers(text)
+            if humanized != text:
                 codes.add(SCHEMA_TERMS_REWRITTEN)
+            text = humanized
         ctx.guard_codes |= codes
         update["outcome"] = "answered" if verdict.allowed else "blocked"
         _record(ctx, "guard", "output", verdict="allow" if verdict.allowed else "block",
@@ -1236,6 +1283,11 @@ def _finalize(ctx: TurnContext, state: TurnState) -> dict[str, Any]:
             llm_calls_total=ctx.budget.calls, sql_queries_total=ctx.budget.sql_queries,
             **ctx.persona.trace_fields,
         )  # fmt: skip
+    # D-151a: no route shows SQL (light, clarify, report and resumed text included).
+    stripped = strip_sql(text)
+    if stripped != text:
+        ctx.guard_codes.add(SQL_STRIPPED)
+        text = stripped
     update["final_text"] = text
     update["outcome"] = outcome
     if state.get("route") != "clarify" and state.get("memory"):
@@ -1246,7 +1298,7 @@ def _finalize(ctx: TurnContext, state: TurnState) -> dict[str, Any]:
     if state.get("message") and state.get("route") != "refuse":
         snap = snapshot_of(ctx.sql_session.scope)
         # iteration 17: a report turn keeps the draft (not "Saved ...") as the assistant answer
-        answer = (state.get("report") or {}).get("markdown") or text
+        answer = strip_sql((state.get("report") or {}).get("markdown") or text)
         update["history"] = [
             {"role": "user", "text": state["message"], "scope": snap},
             {"role": "assistant", "text": answer[:MAX_HISTORY_CHARS], "scope": snap},

@@ -189,7 +189,7 @@ def _make_router_invoke(settings: Settings) -> Any:  # pragma: no cover - needs 
 
     cache: dict[str, Any] = {}
 
-    def invoke(model: str, messages: Sequence[Any], timeout: float) -> LLMResponse:
+    def invoke(model: str, messages: Sequence[Any], timeout: float | None) -> LLMResponse:
         if model not in cache:
             cache[model] = chat_model_for(settings, model)  # D-143: Gemini or local provider
         lc = [
@@ -270,7 +270,11 @@ def build_runtime(
     trace_dir = data_dir / "traces"
     tracer = Tracer(trace_dir, session.session_id)
     # Iteration 40: optional Langfuse (off unless LANGFUSE_* are set; load_settings loaded .env).
-    langfuse = build_sink(detector=default_detector())
+    # D-153: the trace mask and the graph's base detector also allowlist the session's scope
+    # brands and the known (seed) brands, so a brand is never sent to Langfuse as a person.
+    detector = default_detector().with_brands((*session.profile.brands, *known_brands))
+    set_default_detector(detector)
+    langfuse = build_sink(detector=detector)
     if langfuse is not None:
         tracer.extra_sink = langfuse.on_span
 
@@ -291,7 +295,7 @@ def build_runtime(
     services = GraphServices(
         settings=settings,
         persona=personas.refresh,
-        detector=default_detector(),
+        detector=detector,
         router_invoke=_observed("llm.chat", health.wrap(_make_router_invoke(settings))),
         analyst_invoke=_observed("llm.tools", health.wrap(make_gemini_invoke(settings))),
         run_sql=tool,

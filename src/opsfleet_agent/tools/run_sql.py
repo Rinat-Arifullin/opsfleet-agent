@@ -125,7 +125,7 @@ from opsfleet_agent.guards.small_cell import (
     SmallCellRewrite,
     apply_small_cell,
 )
-from opsfleet_agent.guards.sql_policy import MAX_SQL_CHARS
+from opsfleet_agent.guards.sql_policy import MAX_SQL_CHARS, Rule
 
 __all__ = [
     "MAX_PURPOSE_CHARS",
@@ -198,6 +198,11 @@ _MESSAGES: Final[dict[str, tuple[str, str]]] = {
     ),
 }
 _DIFF_UNAVAILABLE_MESSAGE: Final = "The privacy check is unavailable right now."
+#: D-154: a refused table or source is fixable; the hint lists the allowed tables and columns.
+SOURCE_NOT_ALLOWED_MESSAGE: Final = (
+    "The query used a table or source that is not available. Rewrite it with the allowed "
+    "tables and columns in the hint and run it again."
+)
 
 EMPTY_HINT_FIRST: Final = (
     "The query returned no rows. Check the filters: the date window against the data "
@@ -456,6 +461,8 @@ def _from_refusal(refusal: ScopeRefusal) -> _Failure:
             code=code, rule=refusal.rule, message=_DIFF_UNAVAILABLE_MESSAGE, hint=refusal.hint
         )
     message = _MESSAGES.get(code, _MESSAGES[SQL_POLICY])[0]
+    if refusal.reason_code == Rule.SOURCE_NOT_ALLOWED.value:
+        message = SOURCE_NOT_ALLOWED_MESSAGE  # D-154: rewrite, do not give up
     return _Failure(
         code=code,
         rule=refusal.rule,

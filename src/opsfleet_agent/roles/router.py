@@ -135,7 +135,7 @@ class ChatMessage:
 
 
 # (model, messages, attempt timeout seconds) -> LLMResponse. 14a binds this to the chat model.
-Invoke = Callable[[str, Sequence[ChatMessage], float], LLMResponse]
+Invoke = Callable[[str, Sequence[ChatMessage], float | None], LLMResponse]
 
 
 # ---------------------------------------------------------------------------

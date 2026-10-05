@@ -77,7 +77,8 @@ class LLMResponse:
     tokens_out: int = 0
 
 
-Attempt = Callable[[float], LLMResponse]  # arg: attempt timeout in seconds
+# arg: attempt timeout in seconds; None = no per-attempt timeout (D-149, local provider only)
+Attempt = Callable[[float | None], LLMResponse]
 
 
 @dataclass(frozen=True)
@@ -252,7 +253,8 @@ class LLMWrapper:
         usable = self._usable_s(role)  # re-check: the limiter wait may have eaten the deadline
         if usable < MIN_ATTEMPT_TIMEOUT_S:
             return BudgetExhausted(ExhaustedReason.DEADLINE, role)
-        timeout = min(MAX_ATTEMPT_TIMEOUT_S, usable)
+        # D-149: an unbounded budget (local provider) passes no per-attempt timeout at all.
+        timeout = min(MAX_ATTEMPT_TIMEOUT_S, usable) if self.budget.time_bounded else None
         self.budget.consume_attempt(role, is_retry=is_retry)
         t0 = self._clock()
         try:

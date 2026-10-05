@@ -34,7 +34,10 @@ from opsfleet_agent.guards.plain_language import (
     PLAIN_LANGUAGE_RULE,
     PLAIN_LANGUAGE_SECTION,
     SCHEMA_TERMS_REWRITTEN,
+    SQL_NOT_SHOWN_TEXT,
+    SQL_STRIPPED,
     humanize_identifiers,
+    strip_sql,
 )
 from opsfleet_agent.persona import PERSONA_LABEL, SAFETY_PREAMBLE, Persona, assemble_prompt
 from opsfleet_agent.roles.router import LIGHT_LABELS, ChatMessage, Invoke, UserTurn
@@ -124,17 +127,24 @@ def run_light_path(
     tool_calls: Sequence[str] = (),
     detector: PiiDetector | None = None,
     tracer: Any = None,
+    static_reply: str | None = None,
 ) -> LightResult:
     """Answer a ``smalltalk`` or ``meta`` turn. ``tool_calls`` are the tool names recorded in
-    this turn so far (expected empty); the output guard blocks the answer if any is present."""
+    this turn so far (expected empty); the output guard blocks the answer if any is present.
+
+    ``static_reply`` (D-151a) is a code-owned answer built by the caller, e.g. the reply to
+    "show me the SQL": it is used instead of the model and of the capabilities text."""
     if label not in LIGHT_LABELS:
         raise ValueError("run_light_path only handles smalltalk and meta")
     calls_before = llm.budget.calls
     # The scope line is appended after the guard: it is code-built from the trusted profile,
     # and the NER would mask brand names that look like people without the catalogue allowlist.
     memory = is_memory_question(message.text)  # D-152: code-owned answer, either light label
-    suffix = f"\n\n{_scope_text(profile)}" if label == "meta" and not memory else ""
-    if memory:
+    static = static_reply if isinstance(static_reply, str) and static_reply.strip() else None
+    suffix = f"\n\n{_scope_text(profile)}" if label == "meta" and not (memory or static) else ""
+    if static is not None:
+        draft, source = static, "static"
+    elif memory:
         draft, source = MEMORY_TEXT, "static"
     elif label == "meta":
         draft, source = CAPABILITIES_TEXT, "static"
@@ -151,18 +161,21 @@ def run_light_path(
     )
     codes = frozenset(verdict.codes())
     if verdict.allowed and not verdict.text.strip():  # e.g. "<b></b>": nothing left to show
-        text, source = _template(label, profile, memory), "template"
+        text, source = _template(label, profile, memory, static), "template"
     elif verdict.allowed:
         body = verdict.text
         if source == "model":  # D-151: model-written text only, after the guard allowed it
-            body = humanize_identifiers(body)
-            if body != verdict.text:
+            no_sql = strip_sql(body)  # D-151a: a model reply never shows SQL
+            if no_sql != body:
+                codes = codes | {SQL_STRIPPED}
+            body = humanize_identifiers(no_sql)
+            if body != no_sql:
                 codes = codes | {SCHEMA_TERMS_REWRITTEN}
         text = body + suffix
     elif UNEXPECTED_ACTION in codes:  # the turn did something it must not: fail closed
         text, source = verdict.text, "blocked"
     else:  # e.g. the model echoed instructions: a code-written reply is always safe
-        text, source = _template(label, profile, memory), "template"
+        text, source = _template(label, profile, memory, static), "template"
 
     result = LightResult(text, label, source, llm.budget.calls - calls_before, codes)
     if tracer is not None:
@@ -184,7 +197,9 @@ def run_light_path(
     return result
 
 
-def _template(label: str, profile: Profile, memory: bool = False) -> str:
+def _template(label: str, profile: Profile, memory: bool = False, static: str | None = None) -> str:
+    if static is not None:  # D-151a: the guard did not pass the reply: the fixed short text
+        return SQL_NOT_SHOWN_TEXT
     if memory:
         return MEMORY_TEXT
     if label == "meta":

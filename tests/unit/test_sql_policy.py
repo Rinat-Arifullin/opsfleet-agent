@@ -6,6 +6,7 @@ import pytest
 
 from opsfleet_agent.guards.sql_policy import (
     MAX_SQL_CHARS,
+    SOURCE_NOT_ALLOWED_HINT,
     PolicyDecision,
     Rule,
     check_sql,
@@ -303,7 +304,15 @@ _LEAK_CASES = [
 def test_reason_never_contains_sql(sql: str) -> None:
     decision = check_sql(sql)
     assert not decision.allowed
-    text = f"{decision.reason_code} {decision.hint} {decision.error_code} {decision.rule}"
+    hint = decision.hint
+    if decision.rule == Rule.SOURCE_NOT_ALLOWED:
+        # D-154: this hint is a fixed list of the allowed tables and columns (it may name a
+        # real column such as brand); it never depends on the query.
+        assert hint == SOURCE_NOT_ALLOWED_HINT
+        for fragment in ("secret", "zz_", "987654321", "example.invalid", "xyz", "email"):
+            assert fragment not in hint.lower()
+        hint = ""
+    text = f"{decision.reason_code} {hint} {decision.error_code} {decision.rule}"
     for fragment in (
         "secret",
         "zz_",

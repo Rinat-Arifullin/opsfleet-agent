@@ -18,7 +18,9 @@ from opsfleet_agent.guards.plain_language import (
     PLAIN_LANGUAGE_SECTION,
     REPORT_PLAIN_LANGUAGE_RULE,
     SCHEMA_TERMS_REWRITTEN,
+    SQL_REMOVED_NOTE,
     humanize_identifiers,
+    strip_sql,
 )
 from opsfleet_agent.guards.sql_policy import ALLOWED_TABLES
 from opsfleet_agent.persona import builtin_persona
@@ -112,15 +114,16 @@ def test_numbers_are_never_changed() -> None:
         assert _digits(humanize_identifiers(text)) == _digits(text)
 
 
-def test_sql_the_user_asked_for_is_kept() -> None:
-    """AC-02.2: "show me the SQL" still shows it, in a code block or as a SQL paragraph."""
+def test_sql_is_removed_not_kept() -> None:
+    """D-151a (overrides AC-02.2): SQL is stripped from answers, never shown."""
     fenced = "Here is the query:\n\n```sql\nSELECT SUM(sale_price) FROM order_items\n```\n"
-    assert humanize_identifiers(fenced) == fenced
+    assert humanize_identifiers(fenced) == fenced  # code blocks are left to strip_sql
+    assert "SELECT" not in strip_sql(fenced) and strip_sql(fenced).startswith("Here is the query")
     bare = "I used sale_price.\n\nSELECT order_id, sale_price\nFROM order_items\nLIMIT 10"
-    out = humanize_identifiers(bare)
-    assert out.startswith("I used sale price.") and out.endswith(bare.split("\n\n", 1)[1])
+    out = humanize_identifiers(strip_sql(bare))
+    assert out.startswith("I used sale price.") and "SELECT" not in out and "FROM" not in out
     unclosed = "```\nSELECT created_at FROM orders"
-    assert humanize_identifiers(unclosed) == unclosed
+    assert strip_sql(unclosed) == SQL_REMOVED_NOTE
 
 
 def test_rejects_non_str() -> None:

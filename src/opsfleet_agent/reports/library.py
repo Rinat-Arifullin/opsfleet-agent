@@ -25,6 +25,7 @@ from datetime import date
 from typing import Any, Final
 
 from opsfleet_agent.graph.context import KIND_REPORT, _one_line, fence_untrusted
+from opsfleet_agent.guards.plain_language import strip_sql
 from opsfleet_agent.guards.scope import ProductScope
 from opsfleet_agent.reports.matcher import (
     MatchError,
@@ -219,8 +220,9 @@ def view_report(store, owner: str, scope: ProductScope | None, report_id: str) -
         f"{_line(rec.title)}\n"
         f"created {rec.created_at[:10]}, data window {_line(rec.data_window, 80)}"
     )
+    # D-151a: SQL is never shown, also in reports saved before the "Data used" section
     body = fence_untrusted(
-        KIND_REPORT, rec.body_markdown, item_id=rec.report_id, max_chars=MAX_BODY_CHARS
+        KIND_REPORT, strip_sql(rec.body_markdown), item_id=rec.report_id, max_chars=MAX_BODY_CHARS
     )
     return ViewResult("ok", f"{head}\n{body}")
 

@@ -247,7 +247,9 @@ def _table() -> dict[str, Command]:
             "Rate the last answer.",
             _feedback,
         ),
-        Command("/trace", "/trace [turn_id]", "Show the trace of a turn.", _trace),
+        Command(  # D-151a: developer/support tool (AC-16.2); may show sanitized SQL
+            "/trace", "/trace [turn_id]", "Developer: show the debug trace of a turn.", _trace
+        ),
         Command("/audit", "/audit [--session|--user]", "Show your audit events.", _audit),
         Command("/persona", "/persona", "Show the active persona version.", _persona),
         Command("/reports", "/reports [words]", "List your saved reports.", _reports),

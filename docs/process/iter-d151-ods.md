@@ -24,11 +24,12 @@ project's non-negotiables, the rule is enforced in code, not only in a prompt:
 2. **Deterministic rewrite.** `humanize_identifiers(text)` replaces any identifiers the model
    still wrote with business words, after the output guard has allowed the answer.
 
-**Exception (AC-02.2).** When the user explicitly asks "show me the SQL you used", the agent
-still shows it (golden case `show_sql`, which requires SELECT and FROM). The prompt rule allows
-SQL only in that case and only in a fenced code block. The rewrite leaves fenced blocks, and
-any paragraph containing `SELECT ... FROM`, unchanged. This is a deliberate deviation from "no
-code in chat": dropping it would break an accepted requirement.
+**Exception (AC-02.2) — removed by owner decision D-151a, 2026-10-05.** This iteration first
+kept an exception: an explicit "show me the SQL you used" still showed the SQL in a fenced
+block. D-151a removes it. The agent never shows SQL, even when asked; it says it doesn't show
+queries and describes the data used in business terms. `strip_sql` removes SQL from every final
+answer, and the rewrite no longer leaves `SELECT ... FROM` paragraphs unchanged. See
+[iter-d149-d154-ods.md](iter-d149-d154-ods.md).
 
 ## Design
 
@@ -110,7 +111,7 @@ part of it ("dates are in UTC"), and per-sentence leak matching would then block
   and traced.
 
 Offline evals replay recorded model text, so they are not affected. The `show_sql` golden case
-keeps its SQL through the exception above.
+now expects the plain-language reply and no SQL (D-151a).
 
 ## Risks
 

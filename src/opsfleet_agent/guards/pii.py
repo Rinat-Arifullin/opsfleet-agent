@@ -117,6 +117,7 @@ unscrubbed text back (fail closed).
 
 from __future__ import annotations
 
+import copy
 import logging
 import re
 import threading
@@ -154,6 +155,8 @@ SPACY_LABEL_MAP: dict[str, str] = {
     "FAC": "LOCATION",
 }
 MAX_ALLOWLIST_TERMS = 50_000
+#: D-153: derived (scope-brand) detectors kept per base detector.
+MAX_DERIVED_DETECTORS = 32
 MAX_TERM_CHARS = 200
 
 __all__ = [
@@ -172,6 +175,7 @@ __all__ = [
     "build_allowlist",
     "default_detector",
     "ensure_model_available",
+    "extend_allowlist",
     "scrub_output",
     "set_default_detector",
 ]
@@ -318,6 +322,11 @@ def build_allowlist(
 
 
 EMPTY_ALLOWLIST = build_allowlist()
+
+
+def extend_allowlist(base: BrandAllowlist, brands: Iterable[str]) -> BrandAllowlist:
+    """D-153: ``base`` plus ``brands`` (same folding and limits as ``build_allowlist``)."""
+    return build_allowlist(brands=(*base.terms, *brands))
 
 
 # --- model singleton ----------------------------------------------------------------
@@ -752,6 +761,39 @@ class PiiDetector:
         defaults = getattr(model, "Defaults", None)
         self._stop_words = frozenset(getattr(defaults, "stop_words", ()) or ())
         self._lexicon = _lexicon(model)
+        self._derived: dict[frozenset[str], PiiDetector] = {}
+        self._derived_lock = threading.Lock()
+
+    def with_brands(self, brands: Iterable[str]) -> PiiDetector:
+        """D-153: a detector whose allowlist also holds ``brands`` (the session's scope
+        brands). Brands are matched exactly, case-insensitively and as a whole phrase, like
+        every allowlist term; terms never combine, so a person name that only shares a word
+        with a brand ("Marlowe Klein" next to "Calvin Klein") is still masked. Shares the
+        loaded model; returns ``self`` when nothing is new. Bounded cache of derived
+        detectors (``MAX_DERIVED_DETECTORS``)."""
+        if isinstance(brands, str):
+            raise TypeError("brands must be an iterable of brand names, not a string")
+        if "_derived" not in vars(self):
+            # A wrapper subclass that never ran PiiDetector.__init__ (it delegates mask and
+            # detect elsewhere) has no allowlist of its own to extend: use it as is.
+            return self
+        new = frozenset(
+            b for b in brands if isinstance(b, str) and b.strip() and not self.allowlist.is_term(b)
+        )
+        if not new:
+            return self
+        with self._derived_lock:
+            hit = self._derived.get(new)
+            if hit is not None:
+                return hit
+        derived = copy.copy(self)  # shares the analyzer and its lock (one model, one lock)
+        derived.allowlist = extend_allowlist(self.allowlist, sorted(new))
+        derived._derived = {}
+        derived._derived_lock = threading.Lock()
+        with self._derived_lock:
+            if len(self._derived) >= MAX_DERIVED_DETECTORS:
+                self._derived.clear()
+            return self._derived.setdefault(new, derived)
 
     def _spacy_results(self, text: str) -> list[tuple[int, int, bool]]:
         """spaCy PERSON spans as (start, end, from_recased) over the text, a flattened

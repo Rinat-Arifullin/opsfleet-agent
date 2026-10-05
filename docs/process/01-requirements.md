@@ -293,11 +293,13 @@ As an executive, I want to compare two brands, products or categories and unders
   - It names at least 2 data-backed drivers (e.g. price point, return rate, demographic mix, seasonality).
   - It explicitly marks any driver that is *not* backed by the data as a hypothesis.
   - Verified by: eval `golden/compare_brands_why` (asserts ≥2 queries executed and that both brands appear in the results).
-- **AC-02.2**
+- **AC-02.2 (changed by owner decision D-151a, 2026-10-05)**
   - Given the answer above
   - When the user asks "show me the SQL you used"
-  - Then the agent shows the executed SQL statements.
-  - Verified by: eval `golden/show_sql` + demo.
+  - Then the agent does not show SQL. It says in plain language that it doesn't show database queries, and it describes the data the recent answers are based on in business terms (for example "order item records and product records, using item sale price and product category").
+  - No answer shows SQL, even when asked: code strips SQL from every final answer (`strip_sql`). Traces and the JSONL log keep the sanitized SQL; `/trace` is a developer command.
+  - Previous text (superseded): "Then the agent shows the executed SQL statements."
+  - Verified by: eval `golden/show_sql` + `tests/unit/test_d151a_no_sql.py` + demo.
 
 - **AC-02.3 (grounding check; rev. 4.3)**
   - Given a draft answer or report
@@ -796,7 +798,7 @@ As an executive, I want to create, find, open and remove my reports, and every r
     - **Insights**, numbered, each citing at least one figure from an executed query;
     - **Action items** (≥ 3). Each one has a verb-first action, the number of the insight it is linked to, a metric to watch, a suggested owner function (e.g. Merchandising, Marketing) and a timeframe;
     - **Limitations & hypotheses**;
-    - the executed SQL, stored in `sql_used` and shown on request.
+    - **Data used**: the data behind the report in business terms. The executed SQL is stored in `sql_used` for audit and follow-ups but never shown (D-151a, 2026-10-05).
   - The persona can change the tone, but it cannot remove a required section [A-27].
   - Verified by: unit `test_report_schema_required_sections` + eval `golden/q1_report` (an LLM-judge rubric checks that action items are concrete and linked to insights).
 - **AC-21.2 (save this)**
@@ -1142,7 +1144,7 @@ Every prototype FR links to a story.
 |---|---|---|---|
 | FR-20 | Natural language → dynamic SQL over the 4 allowed tables, executed through a policy and scope enforcing executor. | Prototype (M) | C1, US-01–US-05, US-09, US-10 |
 | FR-21 | Multi-step analysis (several queries per turn) within the per-turn caps, stopping with a partial answer at a cap. | Prototype (M) | US-05, AC-22.4 |
-| FR-22 | Grounding: every figure comes from an executed query, "show me the SQL" works, and unbacked drivers are labelled hypotheses. | Prototype (M) | US-02, AC-02.3. (rev. 4.3) Covered in the HLD by §6.1 and §4.2; the HLD should cite FR-22 |
+| FR-22 | Grounding: every figure comes from an executed query, "show me the SQL" gets a plain-language description of the data used (D-151a: SQL is never shown), and unbacked drivers are labelled hypotheses. | Prototype (M) | US-02, AC-02.3. (rev. 4.3) Covered in the HLD by §6.1 and §4.2; the HLD should cite FR-22 |
 | FR-23 | Schema and "what can I ask" answers hide PII columns. Unavailable data (inventory) is explained, and a proxy is offered. | Prototype (M) | US-04, A-10 |
 | FR-24 | Results over 200 rows are summarised or truncated, and the answer says so. | Prototype (M) | AC-23.5 |
 | FR-25 | Turn wall-clock deadline (120 s Q&A, 180 s report) with a graceful partial answer. | Prototype (M) | AC-22.5 |

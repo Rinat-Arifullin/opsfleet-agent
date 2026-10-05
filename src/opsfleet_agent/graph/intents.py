@@ -4,12 +4,16 @@
   messages ("do you see previous messages in our session?"). The router labels these ``meta``
   (sometimes ``smalltalk`` or an analytic label), and the capabilities text does not answer
   them, so the light path returns the code-owned :data:`MEMORY_TEXT` instead.
+* :func:`is_sql_request` - the user asks to see the SQL ("show me the SQL you used"). D-151a:
+  SQL is never shown, so the light path answers with a code-owned reply that describes the
+  data used in business words (:func:`opsfleet_agent.guards.plain_language.sql_request_reply`).
 * :func:`is_comment_followup` - a statement or opinion about the previous answer ("so it is
   worth promoting"), not a new data request. It gets one brief reply from the previous answer's
   context instead of a full analyst loop (which spends the turn budget looking for data).
 
-Both are pure, bounded regex checks on the scan fold the input guard uses (no model call).
-They only narrow what happens next; the guards, budget and grounding still apply.
+They are pure, bounded regex checks on the scan fold the input guard uses (no model call).
+All three are English-only. They only narrow what happens next; the guards, budget and
+grounding still apply.
 """
 
 from __future__ import annotations
@@ -20,7 +24,13 @@ from typing import Final
 from opsfleet_agent.graph.context import HISTORY_TURNS
 from opsfleet_agent.guards.input import _fold
 
-__all__ = ["MAX_INTENT_CHARS", "MEMORY_TEXT", "is_comment_followup", "is_memory_question"]
+__all__ = [
+    "MAX_INTENT_CHARS",
+    "MEMORY_TEXT",
+    "is_comment_followup",
+    "is_memory_question",
+    "is_sql_request",
+]
 
 MAX_INTENT_CHARS: Final = 300  # longer messages are never treated as these intents
 
@@ -63,6 +73,45 @@ def is_memory_question(text: str) -> bool:
         return False
     folded = " ".join(_fold(text).split())
     return bool(_MEMORY_RE.search(folded)) and not _DATA_RE.search(folded)
+
+
+# --- D-151a: "show me the SQL" ---------------------------------------------------------------
+_SQL: Final = (
+    r"(?:the\s+|your\s+|that\s+|this\s+|those\s+|these\s+|its\s+|an?\s+)?"
+    r"(?:exact\s+|actual\s+|underlying\s+|raw\s+|full\s+|generated\s+|bigquery\s+|same\s+)?"
+    r"(?:sql(?:\s+(?:query|queries|code|statements?|text))?|quer(?:y|ies)|query\s+text)"
+    r"(?!\s*(?:results?|output|rows?)\b)"
+)
+# Refers back to SQL that already ran: always a SQL request, whatever data words it holds.
+_SQL_BACKREF_RE: Final = re.compile(
+    r"\b(?:"
+    r"what\s+(?:sql|quer(?:y|ies))\s+(?:did|do|was|were|is|are|have|has|had)\b"
+    rf"|{_SQL}\s+(?:that\s+|which\s+)?(?:you\s+|was\s+|were\s+)(?:used|use|ran|run|executed|"
+    r"wrote|written|generated|made|behind)\b"
+    rf"|{_SQL}\s+(?:behind|for|of)\s+(?:that|this|the\s+(?:last|previous|above))\b"
+    r"|how\s+did\s+you\s+(?:query|write\s+the\s+(?:sql|query))\b"
+    r")"
+)
+# A generic request to see or write SQL; a data question that mentions SQL goes to the analyst
+# (the output check still strips any SQL from its answer).
+_SQL_REQUEST_RE: Final = re.compile(
+    r"(?:^|\b)(?:"
+    r"(?:show|give|send|print|display|share|paste|reveal|post|output|provide|write|dump|list)"
+    rf"\s+(?:me\s+|us\s+)?{_SQL}\b"
+    rf"|(?:see|view|get|have(?!\s+an?\s)|read|check|look\s+at)\s+{_SQL}\b"
+    r"|^(?:the\s+)?sql(?:\s+(?:please|pls))?\W*$"
+    r")"
+)
+
+
+def is_sql_request(text: str) -> bool:
+    """True when ``text`` asks to see (or write) the SQL / database query (D-151a)."""
+    if not isinstance(text, str) or len(text) > MAX_INTENT_CHARS:
+        return False
+    folded = " ".join(_fold(text).split())
+    if _SQL_BACKREF_RE.search(folded):
+        return True
+    return bool(_SQL_REQUEST_RE.search(folded)) and not _DATA_RE.search(folded)
 
 
 # A question or a request: never a comment.

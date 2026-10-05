@@ -4,7 +4,7 @@ The writer turns the turn's analysis (the deep analyst's grounded answer) and it
 into a :class:`reports.schema.ReportDraft`. It calls no tools: one JSON object per call
 (``specs=[]``). The code owns everything a persona could weaken: the section list and the
 Markdown (``render_markdown``), the scope label and data window (``with_context``), the
-"SQL used" section (taken from the ledger, never from the model) and the checks.
+"Data used" section (described from the ledger SQL, never from the model; D-151a) and the checks.
 
 Bounded loop (every call goes through the budgeted ``LLMWrapper``):
 

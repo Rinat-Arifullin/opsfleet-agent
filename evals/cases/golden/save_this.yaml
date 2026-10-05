@@ -25,7 +25,7 @@ estimate:
   bq: 1
 fake:
   outcome: answered
-  text: Saved. Report ID R-DEMO-0003, title Top 3 categories last month, with the SQL used and the data
+  text: Saved. Report ID R-DEMO-0003, title Top 3 categories last month, with the data used and the data
     window.
   llm_calls:
     gemini-3.1-flash-lite: 5

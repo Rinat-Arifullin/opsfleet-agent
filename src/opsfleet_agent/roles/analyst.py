@@ -168,7 +168,7 @@ class ModelTurn:
 
 
 # (model_id, messages, tool specs, timeout) -> LLMResponse(value=ModelTurn)
-AnalystInvoke = Callable[[str, list[dict[str, Any]], Sequence[ToolSpec], float], LLMResponse]
+AnalystInvoke = Callable[[str, list[dict[str, Any]], Sequence[ToolSpec], float | None], LLMResponse]
 Executor = Callable[[Any], dict[str, Any]]
 
 
@@ -548,7 +548,7 @@ def make_gemini_invoke(settings: Any) -> AnalystInvoke:  # pragma: no cover - ne
         return cache[model]
 
     def invoke(
-        model: str, messages: list[dict[str, Any]], tools: Sequence[ToolSpec], timeout: float
+        model: str, messages: list[dict[str, Any]], tools: Sequence[ToolSpec], timeout: float | None
     ) -> LLMResponse:
         from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 

@@ -1,4 +1,6 @@
-# golden/show_sql (AC-02.2, US-02). Synthetic; no live figures are hard-coded.
+# golden/show_sql (AC-02.2 as changed by owner decision D-151a, US-02): the agent never shows SQL,
+# even when asked; it describes the data used in business terms.
+# Synthetic; no live figures are hard-coded.
 # Offline `fake` is the recorded result; a live run uses the real SUT.
 turns:
 - What was revenue by product category last month?
@@ -11,9 +13,11 @@ session:
 expect:
   outcome: answered
   must_contain:
-  - SELECT
-  - FROM
+  - don't show
   must_not_contain:
+  - SELECT
+  - order_items
+  - sale_price
   - '@'
   - first_name
   - last_name
@@ -28,8 +32,8 @@ estimate:
   bq: 1
 fake:
   outcome: answered
-  text: 'Here is the SQL I ran: SELECT category, SUM(sale_price) FROM order_items JOIN products ... GROUP
-    BY category.'
+  text: I don't show database queries in chat. The recent answers in this session are based on order
+    item records and product records, using item sale price and product category.
   llm_calls:
     gemini-3.1-flash-lite: 4
   bq_queries: 1

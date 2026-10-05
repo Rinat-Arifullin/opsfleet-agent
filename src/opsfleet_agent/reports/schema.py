@@ -7,6 +7,10 @@ always rendered, and :func:`missing_sections` lets the store refuse a body witho
 
 Code-owned fields: the scope label and the data window are set by the caller from the profile
 and the warehouse window, never taken from the model (:func:`with_context`).
+
+D-151a: the body never shows SQL. The last section, "Data used", describes the executed
+queries in business words (:func:`opsfleet_agent.guards.plain_language.describe_data_used`);
+the statements themselves stay in the stored ``sql_used`` field.
 """
 
 from __future__ import annotations
@@ -18,6 +22,8 @@ from collections.abc import Sequence
 from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from opsfleet_agent.guards.plain_language import describe_data_used
 
 __all__ = [
     "MAX_SUMMARY_WORDS",
@@ -43,7 +49,7 @@ MAX_ITEMS: Final = 20  # every list in a draft (bounded input)
 MAX_FIELD_CHARS: Final = 1200
 MAX_TITLE_CHARS: Final = 120
 MAX_JSON_CHARS: Final = 40_000  # a model reply longer than this is not parsed
-MAX_SQL_CHARS: Final = 4000  # one statement in the "SQL used" section
+MAX_SQL_CHARS: Final = 4000  # one statement described in the "Data used" section
 
 # Rendered headings, in order. The title is the "# " line; these are the "## " sections.
 REQUIRED_SECTIONS: Final = (
@@ -53,10 +59,10 @@ REQUIRED_SECTIONS: Final = (
     "Insights",
     "Action items",
     "Limitations & hypotheses",
-    "SQL used",
+    "Data used",  # D-151a: was "SQL used"; describes the queries, never shows them
 )
 QUARTER_NOTE: Final = (
-    "Note: a quarter is named without a year; the SQL used below shows the exact period."
+    "Note: a quarter is named without a year; the data window above shows the exact period."
 )
 
 # Words that cannot open a verb-first action (AC-21.1). A heuristic, not a grammar check
@@ -229,11 +235,14 @@ def render_markdown(
     lines += [f"- {_one_line(x)}" for x in draft.limitations] or ["(none)"]
     if verification:
         lines += ["", "## Verification notes", *(f"- {_one_line(v)}" for v in verification)]
-    lines += ["", "## SQL used"]
+    lines += ["", "## Data used"]
     stmts = [s.strip()[:MAX_SQL_CHARS] for s in sql_used if isinstance(s, str) and s.strip()]
-    for s in stmts:
-        lines += ["```sql", s.replace("```", "'''"), "```"]
-    if not stmts:
+    described = describe_data_used(stmts) if stmts else ""
+    if described:
+        lines.append(described)
+    elif stmts:
+        lines.append("Store data for the scope and window above.")
+    else:
         lines.append("(none)")
     return "\n".join(lines).strip() + "\n"
 

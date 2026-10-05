@@ -2,6 +2,11 @@
 
 Numbers are the approved ones of plan iteration 3 (HLD section 4.1). Exceeding a bound
 returns a typed BudgetExhausted; nothing here raises into the agent loop.
+
+D-149 (owner decision): a budget built with ``time_bounded=False`` (the dev-only local
+provider) has no wall-clock deadline: ``deadline_s`` is ``math.inf``, so ``remaining_s`` is
+infinite and ``deadline_hit`` is never true. Every count bound (calls, role sub-caps, retries,
+SQL queries) is unchanged.
 """
 
 from __future__ import annotations
@@ -155,9 +160,13 @@ class TurnBudget:
         max_turn_retries: int = MAX_TURN_RETRIES,
         role_subcaps: dict[str, int] | None = None,
         sink: UsageSink | None = None,
+        time_bounded: bool = True,
     ) -> None:
         self.kind = kind
         self.caps = TURN_CAPS[kind]
+        # D-149: the one switch for "no time limits" (local provider). Counts stay bounded.
+        self.time_bounded = time_bounded
+        self.deadline_s = self.caps.deadline_s if time_bounded else math.inf
         self._clock = clock
         self._start = clock()
         self._role_subcap = role_subcap
@@ -175,7 +184,9 @@ class TurnBudget:
         return self._clock() - self._start
 
     def remaining_s(self) -> float:
-        return self.caps.deadline_s - self.elapsed()
+        if not self.time_bounded:
+            return math.inf  # never inf - inf (NaN) after a fail-closed restore
+        return self.deadline_s - self.elapsed()
 
     def deadline_hit(self) -> bool:
         return self.remaining_s() <= 0
@@ -273,7 +284,8 @@ class TurnBudget:
         if not valid:
             self.calls, self.sql_queries = caps.llm_calls, caps.sql_queries
             self.retries, self.escalated = self._max_turn_retries, True
-            self._start = self._clock() - caps.deadline_s
+            if self.time_bounded:  # unbounded: the exhausted counts above already stop the turn
+                self._start = self._clock() - caps.deadline_s
             return False
         self.calls = max(self.calls, calls)
         self.sql_queries = max(self.sql_queries, sql)
