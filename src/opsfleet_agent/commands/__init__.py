@@ -4,9 +4,11 @@ Commands are CLI-only: none of them is a tool, so no model role can reach them. 
 ``/audit`` lives only here (SEC-17). Every handler returns plain text; the CLI passes it
 through ``terminal_safe`` before stdout.
 
-Report commands: ``/reports`` (iteration 17) lists the user's own saved reports, titles
-only; ``/open``, ``/search``, ``/export`` belong to iterations 18/22a and are stubs that say so
-until they land (OD-5 in docs/process/iter19-ods.md).
+Report commands (all owner-only and scope-checked in ``reports.library``): ``/reports [words]``
+lists the user's own saved reports (titles only; the optional words use the delete matcher),
+``/open <id | row n | title words>`` shows one, ``/search <words> [tag:x] [from:D] [to:D]``
+substring-searches them
+(iteration 18). ``/export`` belongs to 22a and stays a stub (OD-5 in iter19-ods.md).
 """
 
 from __future__ import annotations
@@ -44,10 +46,15 @@ class CommandContext:
     tracer: Any = None
     persona_version: Callable[[], str] | None = None
     report_store: Any = None  # iteration 17: store.reports.ReportStore (owner-scoped reads)
+    scope: Any = None  # iteration 18: the CURRENT guards.scope.ProductScope; None fails closed
+    # Ids of the last /reports, /search or ambiguous /open listing, for "/open <n>". The CLI
+    # passes the SAME list object every turn. Only /open reads it; no delete path takes it.
+    listing: list[str] = field(default_factory=list)
 
 
 REPORTS_LIST_LIMIT: Final = 20
 NO_REPORTS_TEXT: Final = "You have no saved reports yet."
+NO_MATCH_TEXT: Final = "No saved reports match."
 
 
 @dataclass(frozen=True)
@@ -136,20 +143,69 @@ def _persona(_args: str, ctx: CommandContext) -> CommandResult:
     return CommandResult(f"Active persona: {version} (read-only here).")
 
 
-def _reports(_args: str, ctx: CommandContext) -> CommandResult:
-    """The user's OWN saved reports, newest first: id, date and title only (no body)."""
+def _reports(args: str, ctx: CommandContext) -> CommandResult:
+    """The user's OWN saved reports, newest first. With words, the delete matcher filters them
+    (AC-21.4). A report from a scope the user no longer has shows masked (AC-21.5)."""
     if ctx.report_store is None:
         return CommandResult(STORE_UNAVAILABLE_TEXT)
+    from opsfleet_agent.reports import library
+    from opsfleet_agent.reports.matcher import MatchError
+
     try:
-        rows = ctx.report_store.list(ctx.user_id, REPORTS_LIST_LIMIT)
+        res = library.list_reports(
+            ctx.report_store, ctx.user_id, ctx.scope, args.strip() or None, REPORTS_LIST_LIMIT
+        )
+    except MatchError as exc:
+        return CommandResult(f"Usage: /reports [words]. {exc}")
     except Exception as exc:  # a store failure never crashes the REPL
         log.error("reports list failed: %s", type(exc).__name__)
         return CommandResult("Could not read your reports right now.")
-    if not rows:
-        return CommandResult(NO_REPORTS_TEXT)
-    lines = [f"Your saved reports (newest first, up to {REPORTS_LIST_LIMIT}):"]
-    lines += [f"  {r.report_id}  {r.created_at[:10]}  {r.title}" for r in rows]
-    return CommandResult("\n".join(lines))
+    ctx.listing[:] = [e.report_id for e in res.entries]
+    empty = NO_MATCH_TEXT if args.strip() else NO_REPORTS_TEXT
+    header = f"Your saved reports (newest first, up to {REPORTS_LIST_LIMIT}):"
+    return CommandResult(library.render_list(res, header=header, empty=empty))
+
+
+def _open(args: str, ctx: CommandContext) -> CommandResult:
+    """By id, by a row number of the last list, or by title words (one hit opens it)."""
+    if ctx.report_store is None:
+        return CommandResult(STORE_UNAVAILABLE_TEXT)
+    if not args.strip():
+        return CommandResult("Usage: /open <report_id | row number | title words>")
+    from opsfleet_agent.reports import library
+
+    try:
+        res = library.open_report(ctx.report_store, ctx.user_id, ctx.scope, args, ctx.listing)
+    except Exception as exc:
+        log.error("report open failed: %s", type(exc).__name__)
+        return CommandResult("Could not open that report right now.")
+    if res.status == "ambiguous":
+        ctx.listing[:] = list(res.listing)
+    return CommandResult(res.text)
+
+
+_SEARCH_USAGE: Final = "Usage: /search <words> [tag:<tag>] [from:YYYY-MM-DD] [to:YYYY-MM-DD]"
+
+
+def _search(args: str, ctx: CommandContext) -> CommandResult:
+    """Substring search over the user's own in-scope reports. The only state kept is the id
+    listing for "/open <n>"; it is never a delete target (AC-21.11)."""
+    if ctx.report_store is None:
+        return CommandResult(STORE_UNAVAILABLE_TEXT)
+    from opsfleet_agent.reports import library
+
+    try:
+        res = library.search_reports(
+            ctx.report_store, ctx.user_id, ctx.scope, **library.parse_search_args(args)
+        )
+    except library.LibraryError as exc:
+        return CommandResult(f"{_SEARCH_USAGE}\n{exc}.")
+    except Exception as exc:
+        log.error("report search failed: %s", type(exc).__name__)
+        return CommandResult("Could not search your reports right now.")
+    ctx.listing[:] = [e.report_id for e in res.entries]
+    header = f"Matching reports (newest first, {library.count_text(res)} in total):"
+    return CommandResult(library.render_list(res, header=header, empty=NO_MATCH_TEXT))
 
 
 def _stub(name: str) -> Callable[[str, CommandContext], CommandResult]:
@@ -172,11 +228,11 @@ def _table() -> dict[str, Command]:
         Command("/trace", "/trace [turn_id]", "Show the trace of a turn.", _trace),
         Command("/audit", "/audit [--session|--user]", "Show your audit events.", _audit),
         Command("/persona", "/persona", "Show the active persona version.", _persona),
-        Command("/reports", "/reports", "List your saved reports.", _reports),
+        Command("/reports", "/reports [words]", "List your saved reports.", _reports),
+        Command("/open", "/open <id|n|title>", "Open a saved report.", _open),
+        Command("/search", "/search <words> [tag:x]", "Search saved reports.", _search),
     ]
     for name, usage, text in (
-        ("/open", "/open <report_id>", "Open a saved report."),
-        ("/search", "/search <words>", "Search saved reports."),
         ("/export", "/export <report_id>", "Export a saved report."),
     ):
         cmds.append(Command(name, usage, text, _stub(name), stub=True))

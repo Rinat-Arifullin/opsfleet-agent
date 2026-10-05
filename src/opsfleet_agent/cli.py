@@ -30,7 +30,7 @@ import threading
 import unicodedata
 import uuid
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
@@ -59,7 +59,7 @@ from opsfleet_agent.guards.pii import (
     ensure_model_available,
     set_default_detector,
 )
-from opsfleet_agent.guards.scope import ProductScope
+from opsfleet_agent.guards.scope import ProductScope, ScopeError
 from opsfleet_agent.obs.tracer import install_log_filter, register_secret
 from opsfleet_agent.session import (
     Profile,
@@ -297,6 +297,7 @@ class _Repl:
     runtime: Runtime
     session: Session
     last_turn_id: str | None = None
+    listing: list[str] = field(default_factory=list)  # last /reports or /search ids, for /open n
 
     def _ctx(self) -> commands.CommandContext:
         rt = self.runtime
@@ -310,11 +311,21 @@ class _Repl:
             tracer=rt.tracer,
             persona_version=rt.persona_version,
             report_store=rt.report_store,
+            scope=self._scope(),
+            listing=self.listing,
         )
+
+    def _scope(self) -> ProductScope | None:
+        """The current scope for report commands; an invalid profile fails closed (None)."""
+        try:
+            return ProductScope.from_profile(self.session.profile)
+        except ScopeError:
+            return None
 
     def new_session(self) -> None:
         self.session = start_session(self.session.profile)
         self.last_turn_id = None
+        self.listing.clear()
         if self.runtime.tracer is not None:
             self.runtime.tracer.session_id = self.session.session_id
 
