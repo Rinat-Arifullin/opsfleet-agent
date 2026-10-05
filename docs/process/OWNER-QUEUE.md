@@ -53,6 +53,7 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | D-138 | Accepted: quotas move to `config/models.yaml` | apply the config diff |
 | D-139 | Accepted: apply the `user_quota` migration | apply the migration diff |
 | Iterations 33–42 (drops) | Keep in the plan for now; decide by time left | — |
+| D-143 (new, owner-raised) | **Accepted**: dev-only local LLM provider (LM Studio, OpenAI-compatible) to save free-tier quota; Gemini stays the default and the deliverable | iteration 24b (parallel to 22a) |
 | Every row whose "Blocks" is "nothing" | Defaults accepted | — |
 
 ## Decisions needed from you
