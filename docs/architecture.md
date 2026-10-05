@@ -215,22 +215,25 @@ The README (Step 5) turns this into copy-paste commands. This section fixes what
 - `GOOGLE_CLOUD_PROJECT` comes from the environment or `.env`.
 - Model IDs live in one config file, `config/models.yaml` (§3).
 
-**Repository layout (R3-M22).** One agreed home for each part, fixed before the first PR:
+**Repository layout (R3-M22).** The table below matches the built prototype. The module-level map, with file:line anchors and tests, is in [`docs/technical.md`](technical.md) §1.
 
 | Path | Holds |
 |---|---|
-| `src/opsfleet_agent/__main__.py`, `cli.py` | Entry point, CLI loop, commands (`/help`, `/exit`, `/feedback`, `/reports`, `/open`, `/search`, `/export`, `retry report`), Ctrl-C handling (FR-06), the per-process delete key `K_delete` (generated at start, memory only) |
-| `src/opsfleet_agent/config.py` | Settings from env and `config/`, startup check (§1.3) |
-| `src/opsfleet_agent/graph/` | Parent graph (code supervisor), `TurnBudget`, interrupts, checkpointer wiring |
-| `src/opsfleet_agent/roles/` | Five role subgraphs and the light reply (§4.0.2) |
-| `src/opsfleet_agent/tools/` | Tool executors and their Pydantic schemas (§4.2) |
-| `src/opsfleet_agent/guards/` | Input guard, typed-PII detector (§5.4), SQL policy, scope rewrite, small-cell rule, differencing guard (§5.5), scrubber, output guard |
-| `src/opsfleet_agent/bq/` | `Warehouse` adapter: dry-run, caps, labels |
-| `src/opsfleet_agent/store/` | SQLite stores: reports, audit, sessions, preferences, feedback, quotas, aggregate fingerprints |
-| `src/opsfleet_agent/obs/` | JSONL tracer, masking, Langfuse adapter, metrics summary |
+| `src/opsfleet_agent/__main__.py`, `cli.py`, `cli_progress.py` | Entry point, startup sequence, REPL, Ctrl-C handling (FR-06), spinner |
+| `src/opsfleet_agent/config.py`, `session.py`, `persona.py` | Settings from env and `config/`, startup check (§1.3); demo profiles and session; persona parsing and prompt assembly |
+| `src/opsfleet_agent/commands/` | Slash commands (`/help`, `/exit`, `/feedback`, `/trace`, `/audit`, `/persona`, `/reports`, `/open`, `/search`, `/delete`); audit-first admin APIs (access, persona) |
+| `src/opsfleet_agent/graph/` | Parent graph (code supervisor), `TurnBudget`, LLM wrapper and providers, context and session memory, grounding, degraded mode, resume |
+| `src/opsfleet_agent/roles/` | Router, Quick/Deep analyst, report writer, verifier, light path (§4.0.2) |
+| `src/opsfleet_agent/tools/` | `run_sql` (the only path to BigQuery), schema tool, registry (§4.2) |
+| `src/opsfleet_agent/guards/` | Input guard, typed-PII detector (§5.4), SQL policy, scope rewrite, small-cell rule, differencing guard (§5.5), output guard, plain-language and echo checks |
+| `src/opsfleet_agent/bq/` | `WarehouseClient` protocol and `BigQueryRunner`: dry run, caps, labels; error classes, memo, schema cache |
+| `src/opsfleet_agent/reports/`, `delete/` | Report schema, matcher, library listing; two-phase delete (HMAC token, flow) |
+| `src/opsfleet_agent/store/` | SQLite stores: audit, reports, feedback, quotas, aggregate fingerprints (session memory lives in checkpoint state) |
+| `src/opsfleet_agent/golden/` | Golden Bucket seed index |
+| `src/opsfleet_agent/obs/` | JSONL tracer, masking, Langfuse sink, metrics summary |
 | `prompts/` | Versioned role prompts and shared layers (§4.3) |
-| `config/models.yaml`, `config/profiles.yaml` | Model ids per role, judge provider and model, embedding model; demo profiles |
-| `evals/cases/*.yaml`, `evals/run.py` | Eval cases by category (§6.6) and the runner |
+| `config/models.yaml`, `config/profiles.yaml`, `config/golden_seed.yaml` | Model ids per role, limits and quotas; demo profiles; golden seed |
+| `evals/cases/{golden,router,adversarial,_fixtures}/`, `evals/run.py`, `evals/live_sut.py` | Eval cases by category (§6.6), the runner and the live system under test |
 | `evals/calibration/` | Judge calibration set: 30 owner-labelled synthetic cases with recorded judge outputs, scored offline (§6.6) |
 | `tests/unit/`, `tests/live/` | Offline unit tests; `@pytest.mark.live` tests |
 | `infra/langfuse/` | Optional self-hosted Langfuse Docker Compose |
@@ -1954,6 +1957,8 @@ The SQL policy is parameterised by the connector's dialect (sqlglot supports man
 ## 13. Open questions and ADRs
 
 ### 13.1 ADRs (full text in `docs/decisions.md`)
+
+Where the built prototype differs from these ADRs (ADR-003 retry ladder, ADR-009 Library agent not built), see [`docs/technical.md`](technical.md) §8 and §10.
 
 | ADR | Decision |
 |---|---|
