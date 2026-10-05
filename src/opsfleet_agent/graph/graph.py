@@ -20,7 +20,8 @@ Contract:
   no exception text); ``AgentGraph.run_turn`` wraps ``invoke`` the same way;
 * the supervisor never dispatches a role twice per turn (quick -> deep once, via
   ``TurnBudget.try_escalate``); every LLM call goes through the budgeted ``LLMWrapper``;
-* ``library`` runs on the deep analyst for now (seam: 15/22a add the library and delete nodes);
+* iteration 46: ``library`` runs the ``library_agent`` node (no SQL tools; a delete it asks for
+  only starts ``delete_preview`` -> ``confirm_delete``; a failure is a templated message);
 * iteration 17: a ``report`` turn that ran SQL continues after grounding with
   ``report_writer`` (writer -> verifier -> output guard) and ``confirm_save``, which pauses on
   ``interrupt()``. The user's next message answers it (``AgentGraph.run_turn``): save stores the
@@ -128,6 +129,14 @@ from opsfleet_agent.roles.analyst import (
     run_analyst,
     serialise_envelope,
 )
+from opsfleet_agent.roles.library_agent import (
+    LIBRARY_ROLE,
+    LIBRARY_UNAVAILABLE_TEXT,
+    build_library_prompt,
+    library_protected_snippets,
+    make_library_executors,
+    run_library_agent,
+)
 from opsfleet_agent.roles.light_path import run_light_path
 from opsfleet_agent.roles.report_writer import REPORT_ROLE_SUBCAPS, WRITER_ROLE, produce_report
 from opsfleet_agent.roles.router import (
@@ -203,7 +212,9 @@ _COMMENT_RULES: Final = (
     "could run on the data. Do not state any number that is not in the previous answer or "
     "the user's message. Do not call tools."
 )
-_QA_ROLE_SUBCAPS: Final = {**LIGHT_ROLE_SUBCAPS, QUICK: 6, DEEP: 6, FORCE_ANSWER_ROLE: 1}
+_QA_ROLE_SUBCAPS: Final = {
+    **LIGHT_ROLE_SUBCAPS, QUICK: 6, DEEP: 6, FORCE_ANSWER_ROLE: 1, LIBRARY_ROLE: 6,
+}  # fmt: skip
 # iteration 17: a report turn runs under the REPORT caps (14 calls, 180 s) + writer/verifier subcaps
 _REPORT_ROLE_SUBCAPS: Final = {**_QA_ROLE_SUBCAPS, **REPORT_ROLE_SUBCAPS}
 CONFIRM_NODE: Final = "confirm_save"
@@ -442,6 +453,10 @@ class GraphServices:
     # iteration 39: store.preferences.SQLitePreferenceStore, the per-user source of truth for
     # preferences and notes (read every turn). None = session memory only.
     preferences: Any = None
+    # iteration 46 (D-196): the audit log the library agent's rename/export write to (None:
+    # the delete service's log), and the export folder (None: the default exports folder)
+    audit: Any = None
+    export_dir: Path | None = None
 
     def window(self) -> tuple[date, date]:
         if self.data_window is not None:
@@ -1072,6 +1087,44 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
             return {"final_text": REVISING_TEXT, "outcome": "report_cancelled"}
         return {"final_text": CANCELLED_TEXT, "outcome": "report_cancelled"}
 
+    # --- iteration 46: library agent (saved reports and preferences; no SQL tools) ----------
+
+    def library(state: TurnState) -> dict[str, Any]:
+        a = _assembled(state)
+        message = state["message"]  # the scrubbed text: never the raw input
+
+        def request_delete(req: delete_flow.DeleteRequest) -> None:
+            ctx.delete_request = req  # D-197: only previews; the user's next turn confirms
+
+        audit = sv.audit if sv.audit is not None else getattr(sv.delete, "audit", None)
+        executors = make_library_executors(
+            store=sv.reports, audit=audit, owner=ctx.profile.user_id,
+            scope=ctx.sql_session.scope, session_id=ctx.session_id, turn_id=ctx.turn_id,
+            user_message=message, tools_used=lambda: list(ctx.tool_names),
+            pending=state.get("pending_action") or None,
+            request_delete=request_delete if sv.delete is not None and ctx.can_confirm else None,
+            preferences=sv.preferences, scope_snapshot=snapshot_of(ctx.sql_session.scope),
+            detector=_turn_detector(ctx), export_dir=sv.export_dir,
+        )  # fmt: skip
+        deps = AnalystDeps(
+            llm=ctx.llm, invoke=sv.analyst_invoke, executors=executors,
+            models={LIBRARY_ROLE: model_ids_from_settings(settings, LIBRARY_ROLE)},
+            tracer=ctx.tracer, on_tool_name=lambda name: _tool_requested(ctx, name),
+        )  # fmt: skip
+        system = build_library_prompt(
+            scope_label=ctx.profile.scope_label, persona=ctx.persona,
+            context_section=a.prompt_section(), preferences=render_preferences(a.memory),
+        )  # fmt: skip
+        messages = [{"role": "system", "content": system}, *a.history,
+                    {"role": "user", "content": a.message}]  # fmt: skip
+        res = run_library_agent(deps, messages)
+        if ctx.delete_request is not None:  # delete_preview shows the preview and pauses
+            return {"status": "ok", "draft": "", "role": LIBRARY_ROLE}
+        if res.status != "ok" or not res.output:  # D-198: a template, never an analyst
+            return {"route": "library", "final_text": LIBRARY_UNAVAILABLE_TEXT,
+                    "outcome": "error", "role": LIBRARY_ROLE}  # fmt: skip
+        return {"status": "ok", "draft": res.output, "error_class": "", "role": LIBRARY_ROLE}
+
     # --- iteration 22a: two-phase delete (preview -> interrupt -> confirm -> execute) -------
 
     def delete_preview(state: TurnState) -> dict[str, Any]:
@@ -1134,6 +1187,7 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
         "report_writer": report_writer,  # iteration 17
         RETRY_NODE: retry_writer,  # iteration 33
         CONFIRM_NODE: confirm_save,  # iteration 17
+        "library": library,  # iteration 46
         "delete_preview": delete_preview,  # iteration 22a
         DELETE_CONFIRM_NODE: confirm_delete,
         DELETE_EXECUTE_NODE: execute_delete,
@@ -1534,11 +1588,15 @@ def _checked_tools(ctx: TurnContext, role: str) -> tuple[str, ...]:
 def _guard(ctx: TurnContext, state: TurnState, draft: str):
     role = state.get("role") or FORCE_ANSWER_ROLE
     label = state.get("label", "")
-    eff_label = "complex" if label in ("report", "library") else label  # TODO 14b/15/17
+    eff_label = "complex" if label == "report" else label  # report: the analyst answers
+    snippets = (
+        library_protected_snippets(ctx.persona) if role == LIBRARY_ROLE
+        else analyst_protected_snippets(ctx.persona)
+    )  # fmt: skip
     return check_output(
         draft, role=role, label=eff_label,
         tool_calls=_checked_tools(ctx, role),
-        protected_snippets=analyst_protected_snippets(ctx.persona),
+        protected_snippets=snippets,
         detector=_turn_detector(ctx),
     )  # fmt: skip
 
@@ -1548,7 +1606,7 @@ def _assumptions(ctx: TurnContext, state: TurnState, text: str) -> str:
 
     Only for answers built on data (a query ran this turn, or follow-up context from an
     earlier one); never for a comment reply or a code-owned template."""
-    if state.get("status") == "comment" or state.get("label") == "comment":
+    if state.get("status") == "comment" or state.get("label") in ("comment", "library"):
         return ""
     if not (ctx.sql_turn.ledger or state.get("prior_ledger")) or fixed_kind(text):
         return ""
@@ -1560,10 +1618,14 @@ def _assumptions(ctx: TurnContext, state: TurnState, text: str) -> str:
     )  # fmt: skip
 
 
+# routes whose final_text is code-owned and shown as is (iteration 46: the library failure)
+_TEXT_ROUTES: Final = ("refuse", "light", "clarify", "report", "delete", "retry", "library")
+
+
 def _finalize(ctx: TurnContext, state: TurnState) -> dict[str, Any]:
     label = state.get("label", "")
     update: dict[str, Any] = {}
-    if state.get("route") in ("refuse", "light", "clarify", "report", "delete", "retry"):
+    if state.get("route") in _TEXT_ROUTES:
         text = state.get("final_text", "")
         if not text:  # e.g. a resumed state without the light/refusal/clarify text: fail closed
             text, update["outcome"] = ERROR_TEXT, "error"
@@ -1741,14 +1803,23 @@ def _after_guard(state: TurnState) -> str:
 
 
 def _after_context(state: TurnState) -> str:
-    # TODO(14b/15/17): report -> writer/verifier/confirm_save, library -> library agent.
     if _errored(state) or state.get("route") == "clarify":
         return "finalize"
     if state.get("route") == "light":  # pending clarification not resolved (R2-M1), or a
         return "light"  # `comment` with no previous answer in the scope-covered history
     if state.get("status") == "comment":  # D-152: one brief reply, no analyst loop
         return "force_answer"
+    if state.get("label") == "library":  # iteration 46: no analyst, no SQL
+        return "library"
     return "quick" if state.get("label") == "simple" else "deep"
+
+
+def _after_library(state: TurnState, ctx: TurnContext) -> str:
+    # D-197: the agent asked for a delete -> the same preview + confirm_delete interrupt as a
+    # parsed request; the user's next message is the only thing that can confirm it
+    if not _errored(state) and state.get("route") != "library" and ctx.delete_request is not None:
+        return "delete_preview"
+    return "finalize"
 
 
 def _after_quick(state: TurnState) -> str:
@@ -1815,7 +1886,11 @@ def _build(ctx: TurnContext, checkpointer: Any) -> Any:
     g.add_edge("execute_delete", "finalize")
     g.add_conditional_edges("input_guard", _after_guard, ["finalize", "light", "load_context"])
     g.add_conditional_edges(
-        "load_context", _after_context, ["quick", "deep", "light", "force_answer", "finalize"]
+        "load_context", _after_context,
+        ["quick", "deep", "light", "force_answer", "library", "finalize"],
+    )  # fmt: skip
+    g.add_conditional_edges(
+        "library", lambda s: _after_library(s, ctx), ["delete_preview", "finalize"]
     )
     g.add_conditional_edges("quick", _after_quick, ["deep", "force_answer", "finalize"])
     g.add_conditional_edges("deep", _after_role, ["force_answer", "finalize"])
@@ -1929,6 +2004,8 @@ class AgentGraph:
                 delete_req = delete_flow.parse_delete_request(raw_text)
             if delete_req is not None:
                 return self._start_delete(ctx, graph, delete_req, session, tid)
+            # iteration 46: a library turn may start a delete preview (confirm = this + 1)
+            ctx.delete_turn = self._turn_seq.get(session.session_id, 0)
             start = {
                 **_TURN_RESET,
                 "turn_id": tid,

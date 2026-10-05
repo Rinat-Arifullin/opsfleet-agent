@@ -31,6 +31,7 @@ REQUIRED_GOLDEN = {
 }
 OPTIONAL_GOLDEN = {
     "persona_tone_change", "preference_table_vs_bullets", "retry_report_without_ledger",
+    "library_agent",
 }
 # Live-1 set 2: more topics, so live runs do not repeat the same questions
 SET2_GOLDEN = {

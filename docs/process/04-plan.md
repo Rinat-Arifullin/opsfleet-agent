@@ -936,6 +936,21 @@ These iterations run in the reverse of the drop order: the most protected item (
 - [x] [std]
 **Effort**: M (1) · **Depends on**: 15, 19 · **Risk**: low
 
+## Iteration 46: Library agent role and node (ADR-009)
+**Goal**: `library` turns go to a Library agent on flash-lite with the report and preference tools only. No SQL tool can be bound; a delete only produces the preview and the user confirms; failure gives a template, never the analyst.
+**Model**: T2 sonnet
+**ACs covered**: AC-21.10 (natural-language library turns), HLD §4.0 / §4.2 Library agent row
+**Files**:
+- `src/opsfleet_agent/roles/library_agent.py`
+- `prompts/library_agent.md`
+- `src/opsfleet_agent/graph/graph.py`, `src/opsfleet_agent/cli.py`, `src/opsfleet_agent/cli_progress.py`
+- `tests/unit/test_library_agent.py`, `tests/unit/test_graph.py`
+- `evals/cases/golden/library_agent.yaml`
+**Done criteria**:
+- [x] Named tests: `test_run_sql_is_not_bindable_by_library_agent`, `test_delete_tool_only_previews_and_user_confirms`, `test_set_preference_uses_the_prefs_store_and_validation`, `test_llm_failure_gives_template_never_analyst`, `test_report_routes_to_deep_and_library_to_library_agent`
+- [x] [std]
+**Effort**: M (1) · **Depends on**: 22a, 33, 39 · **Risk**: medium (delete path, 🔴 area: owner review pending)
+
 ### Thu 2026-10-08: final run, README, clean machine; Step 6 from 12:00
 
 ## Iteration 45: Final live eval run and results capture

@@ -820,7 +820,7 @@ design.
 |---|---|---|
 | User preferences (R4.1): set by the user, applied to formatting, kept across sessions | Validation code exists (`graph/memory.py`); no role calls `set_preference` yet, and there is no preferences store | architecture.md §6.4 |
 | Feedback triage CLI (R4.2): root-cause classes, `promote` to a Golden candidate, `add-eval` | Feedback rows carry a triage state; the CLI is not built, so triage is done by reading `/trace` and editing `config/golden_seed.yaml` or the eval cases by hand | architecture.md §6.4 |
-| Library agent (separate LLM role for the report library) | Not built; library commands are plain code and the analyst handles library questions | [architecture.md §4.0](docs/architecture.md) |
+| Library agent (separate LLM role for the report library) | Built: natural-language library questions go to the Library agent (list, search, view, rename, export, delete preview, preferences; no SQL). It cannot save a report; saving goes through Save / Revise / Cancel | [architecture.md §4.0](docs/architecture.md) |
 | Semantic and full-text report search | Not built; `/search` is a word match plus `tag:`/`from:`/`to:` | architecture.md §6.3.2 |
 | `retry report` (rewrite from the stored evidence, no SQL) | Not built | architecture.md §2.3 |
 | `/export`, report rename | `/export` is a stub | architecture.md §6.3.1 |

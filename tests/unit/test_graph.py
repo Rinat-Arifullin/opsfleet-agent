@@ -199,15 +199,21 @@ def test_light_path_runs_without_analyst(make_env) -> None:
     assert len([s for s in env.spans if s[0] == "turn"]) == 1  # light path records its own
 
 
-def test_report_and_library_route_to_deep(make_env) -> None:
-    for label in ("report", "library"):
-        env = make_env(Router(label), Scripted(ModelTurn("Done: nothing to report.")))
-        out = env.ask("make me something")
-        deep_model, _ = model_ids_from_settings(env.settings, DEEP)
-        quick_model, _ = model_ids_from_settings(env.settings, QUICK)
-        assert deep_model != quick_model  # the assertion below can tell the roles apart
-        assert out.outcome == "answered"
-        assert {c[0] for c in env.analyst.calls if c[2]} == {deep_model}
+def test_report_routes_to_deep_and_library_to_library_agent(make_env) -> None:
+    env = make_env(Router("report"), Scripted(ModelTurn("Done: nothing to report.")))
+    out = env.ask("make me something")
+    deep_model, _ = model_ids_from_settings(env.settings, DEEP)
+    quick_model, _ = model_ids_from_settings(env.settings, QUICK)
+    assert deep_model != quick_model  # the assertion below can tell the roles apart
+    assert out.outcome == "answered"
+    assert {c[0] for c in env.analyst.calls if c[2]} == {deep_model}
+    # iteration 46: a library turn goes to the library agent, never to the Deep analyst
+    env = make_env(Router("library"), Scripted(ModelTurn("You have no saved reports.")))
+    out = env.ask("what reports have I saved?")
+    library_model, _ = model_ids_from_settings(env.settings, "library_agent")
+    assert out.outcome == "answered" and out.text == "You have no saved reports."
+    assert {c[0] for c in env.analyst.calls} == {library_model}
+    assert {c[2] for c in env.analyst.calls} == {7}  # the seven library tools, no SQL tool
 
 
 def test_escalation_quick_to_deep_once(make_env) -> None:

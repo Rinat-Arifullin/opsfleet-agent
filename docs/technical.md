@@ -60,8 +60,9 @@ Contents:
 | `roles/light_path.py` | Smalltalk and meta replies: no tools, no data, one call. A reply that contains a figure is replaced by a template | `run_light_path` :129 |
 | `roles/report_writer.py` | Report draft: at most 3 writer calls and 2 verifier calls, plus a code fallback draft | `produce_report` :211, `fallback_draft` :163 |
 | `roles/verifier.py` | A code precheck, then an LLM verification of the draft against tool results | `precheck` :66, `verify_report` :108 |
+| `roles/library_agent.py` | Library agent (iteration 46) for `library` turns, on flash-lite: list, search, view, rename, export, delete preview and set_preference. No SQL or schema tool is in its tool set (checked at import), `delete_reports` only produces the preview that the user confirms on the next turn, and a failure gives a template, never the analyst | `LIBRARY_TOOL_SPECS` :122, `make_library_executors` :295, `build_library_graph` :450, `run_library_agent` :529 |
 
-There are 4 LLM roles plus the light path. The HLD's fifth role, the Library agent, was not built (§9).
+There are 5 LLM roles plus the light path, as in ADR-009.
 
 ### 1.4 Guards
 
@@ -96,7 +97,7 @@ There are 4 LLM roles plus the light path. The HLD's fifth role, the Library age
 
 | Path | Holds |
 |---|---|
-| `config/models.yaml` | Model ids per role, limits, `small_cell_k: 5`, quotas, local-provider settings. It also lists `library_agent` and `summary` roles, which no code uses |
+| `config/models.yaml` | Model ids per role, limits, `small_cell_k: 5`, quotas, local-provider settings. It also lists a `summary` role, which no code uses |
 | `config/profiles.yaml` | Demo profiles: `analyst_a` (one brand), `analyst_b` (two brands), `ceo_demo` (`all`) |
 | `config/golden_seed.yaml` | Golden Bucket seed |
 | `prompts/` | `analyst.md`, `router.md`, `report_writer.md`, `persona.md` (versioned in-file: analyst-v4, router-v3, report-writer-v1) |
@@ -338,7 +339,7 @@ Full rows are in `docs/process/OWNER-QUEUE.md` and the ADRs are in `docs/decisio
 | D-155 | 10 router labels (`memory` and `comment` added) | English regex for these intents misfired; the router already sees the message |
 | D-164 | A router outage fails open to `complex`, and there is no offline fallback | The full path is guarded in code, so failing open is safe; failing closed would block every turn |
 | D-56 | The router sees only the previous user message; after a router retry the light reply is the template | Smaller injection surface, and the light-path call budget is kept |
-| D-79 | `report` turns went to the deep analyst until the writer node existed (17); `library` still does | The library agent was not built |
+| D-79 | `report` turns went to the deep analyst until the writer node existed (17); `library` turns did until iteration 46 (D-195..D-198), and now go to the Library agent | The library agent was not built until then |
 
 ### Reports
 | Decision | What | Why |
@@ -374,14 +375,14 @@ Full rows are in `docs/process/OWNER-QUEUE.md` and the ADRs are in `docs/decisio
 
 ### ADR drift (to fix in `docs/decisions.md`)
 - **ADR-003**: primary → 2 retries (1 s, 2 s plus jitter; D-6) → fallback once, at most 6 retries per turn; after a primary fails, the rest of the turn uses its fallback (D-173) (`BACKOFFS_S` in `graph/llm.py`, `MAX_TURN_RETRIES` in `graph/budget.py`).
-- **ADR-009** lists five roles. The Library agent was not built.
+- **ADR-009** lists five roles. All five are built; the Library agent came last (iteration 46). It has no `save_report` tool: saving goes only through `confirm_save` (D-198).
 - **ADR-010** now has 10 labels; the text was updated for D-155.
 
 ## 9. Implemented vs designed but not built
 
 | Area | Built | Designed, not built |
 |---|---|---|
-| Roles | Router, Quick/Deep analyst, writer, verifier (inside `_build_report`), light path | Library agent (ADR-009); `summary` role in `models.yaml` unused |
+| Roles | Router, Quick/Deep analyst, writer, verifier (inside `_build_report`), light path, Library agent (iteration 46) | `summary` role in `models.yaml` unused; the Library agent's `save_report` tool (D-198) |
 | Commands | `/help`, `/exit`, `/feedback`, `/trace`, `/audit`, `/persona` (read-only), `/reports`, `/open`, `/search`, `/delete` | `/export` (stub), rename, `retry report` (the `RETRY_REPORT` cap exists but is unused), `/erase` (`erase_actor` raises `NotImplementedError`) |
 | Admin | `access_set`, `apply_persona`, `rollback_persona` as audit-first APIs | REPL wiring for them |
 | Search | Title and body word match, `tag:`, `from:`, `to:` | FTS and semantic search (FR-74), embeddings column, tag search inside the body |

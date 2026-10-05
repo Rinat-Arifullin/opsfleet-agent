@@ -1958,7 +1958,7 @@ The SQL policy is parameterised by the connector's dialect (sqlglot supports man
 
 ### 13.1 ADRs (full text in `docs/decisions.md`)
 
-Where the built prototype differs from these ADRs (ADR-009 Library agent not built), see [`docs/technical.md`](technical.md) §8 and §10.
+Where the built prototype differs from these ADRs (for example, the ADR-009 Library agent has no `save_report` tool), see [`docs/technical.md`](technical.md) §8 and §10.
 
 | ADR | Decision |
 |---|---|

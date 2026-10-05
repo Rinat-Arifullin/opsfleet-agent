@@ -320,6 +320,7 @@ def build_runtime(
         golden_index=golden,
         delete=wire_delete(conn, audit_log, reports),  # 22a: None keeps /delete unregistered
         preferences=preferences,
+        audit=audit_log,  # iteration 46: library-agent rename/export audit rows
     )
     return Runtime(
         graph=DegradedGraph(AgentGraph(services, checkpointer), quota, health),
