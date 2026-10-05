@@ -92,6 +92,38 @@ def test_retry_then_fallback():
     assert primary.calls == 3 and fb.calls == 1
 
 
+def test_failed_primary_is_skipped_for_the_rest_of_the_turn():
+    ft, budget, w = make(role_subcap=10)
+    primary, fb = Model(ft, always=True), Model(ft)
+    assert w.call("deep_analyst", "m1", primary, "m2", fb).used_fallback
+    ft.sleeps.clear()
+    out = w.call("deep_analyst", "m1", primary, "m2", fb)
+    assert isinstance(out, LLMSuccess) and out.used_fallback and out.attempts == 1
+    assert primary.calls == 3 and fb.calls == 2 and ft.sleeps == []
+    assert budget.calls == 5  # 3 primary + 2 fallback, not 3 + 1 + 3 + 1
+    other = Model(ft)
+    assert not w.call("router", "m3", other, "m2", fb).used_fallback  # other primaries untouched
+
+
+def test_skipped_primary_without_fallback_is_still_tried():
+    ft, _, w = make(role_subcap=10)
+    primary = Model(ft, fail_times=3)
+    w.call("deep_analyst", "m1", primary, "m2", Model(ft))
+    out = w.call("verifier", "m1", primary, None, None)
+    assert isinstance(out, LLMSuccess) and out.model == "m1" and primary.calls == 4
+
+
+def test_primary_is_not_skipped_after_success_or_rate_limit():
+    ft, _, w = make(rpm={"m1": 1})
+    w.call("r", "m1", Model(ft, latency=0.0), None, None)  # empties m1 bucket
+    fb = Model(ft)
+    assert w.call("r", "m1", Model(ft), "m2", fb).used_fallback  # limiter, not the provider
+    ft.t += 80.0  # m1 bucket refills (0.8 rpm), deadline not yet reached
+    p = Model(ft)
+    out = w.call("r", "m1", p, "m2", fb)
+    assert isinstance(out, LLMSuccess) and not out.used_fallback and p.calls == 1
+
+
 def test_retry_succeeds_without_fallback():
     ft, _, w = make()
     primary, fb = Model(ft, fail_times=2), Model(ft)

@@ -3,6 +3,8 @@
 Provider-agnostic: callers pass one callable per model (primary, fallback). Each callable makes
 exactly one provider request and receives the attempt timeout in seconds. The ladder is
 primary -> up to 2 retries (backoff 1 s, 2 s plus jitter; D-6) -> fallback once -> ForceAnswer.
+Once a primary model has used up its retries on provider errors, later calls in the same turn
+go straight to their fallback: the wrapper lives for one turn, so this resets on the next one.
 Every attempt draws from the TurnBudget (turn cap, role sub-cap, 6 retries per turn, deadline).
 Clock, sleep and jitter are injectable so tests never sleep.
 """
@@ -175,6 +177,7 @@ class LLMWrapper:
         self._clock = clock
         self._sleep = sleep
         self._jitter = jitter
+        self._degraded: set[str] = set()  # primaries that failed this turn: skipped from now on
 
     def _usable_s(self, role: str) -> float:
         reserve = 0.0 if role == FORCE_ANSWER_ROLE else FORCE_RESERVE_S
@@ -195,7 +198,10 @@ class LLMWrapper:
             return blocked
         attempts = 0
         last_block: BudgetExhausted | None = None
-        for n in range(MAX_CALL_RETRIES + 1):
+        has_fallback = fallback is not None and fallback_model is not None
+        skip_primary = has_fallback and primary_model in self._degraded
+        primary_failed = False
+        for n in range(0 if skip_primary else MAX_CALL_RETRIES + 1):
             if n > 0:
                 backoff = BACKOFFS_S[n - 1]
                 blocked = self.budget.check_retry(role)
@@ -215,6 +221,9 @@ class LLMWrapper:
             attempts += 1
             if isinstance(res, (LLMSuccess, LLMFailure)):
                 return _with_attempts(res, attempts)
+            primary_failed = True
+        if primary_failed and has_fallback:
+            self._degraded.add(primary_model)
         # Retries are used up (or not allowed): the fallback gets exactly one attempt.
         if fallback is not None and fallback_model is not None:
             blocked = self.budget.check_attempt(role)

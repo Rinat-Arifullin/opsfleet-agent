@@ -609,7 +609,7 @@ Escalation Quick → Deep happens once per turn when the Quick analyst returns `
 
 | Level | What retries | Bound | After the bound |
 |---|---|---|---|
-| Call | `call_llm` on 429, 5xx or timeout (§4.4) | Primary → **2 retries** (1 s, 2 s; D-6) → fallback model **once** → role fails with `error_class`; at most 6 retries per turn | `force_answer` (analysts) or the role's failure outcome (§4.0.5) |
+| Call | `call_llm` on 429, 5xx or timeout (§4.4) | Primary → **2 retries** (1 s, 2 s; D-6) → fallback model **once** → role fails with `error_class`; at most 6 retries per turn; once a primary has failed, the rest of the turn calls its fallback directly (D-173) | `force_answer` (analysts) or the role's failure outcome (§4.0.5) |
 | Agent | SQL self-correction; report repair; verifier rewrite | 2 corrections per query; 1 repair; 1 rewrite | `GIVE_UP`; `report_failed`; draft shown with "Verification notes" |
 | Flow | Quick → Deep hand-off | at most once; no re-dispatch to the same role | Deep's own outcome |
 

@@ -329,6 +329,7 @@ Full rows are in `docs/process/OWNER-QUEUE.md` and the ADRs are in `docs/decisio
 | D-163 | Each band must hold at least 5 customers, enforced in code | The same k as the small-cell rule |
 | D-170 | Aggregate-only mode lasts the whole session | — |
 | D-172 | Bands under 5 customers are merged into one row, then with the smallest band of 5 or more if still too small (fixed label `other bands`, counts and sums added, shares and averages empty). Bands that may share customers (`UNION`, a source that is not one row per customer) or are labelled by a raw value are hidden instead; window columns that could reveal them are emptied; `QUALIFY` and row-gating subqueries are refused | Summing counts of overlapping bands could overcount, a raw label would list each customer's value, and an order-dependent partner would let a re-sorted query be subtracted from the first, so the merge is canonical and only for provably disjoint, fixed-name bands |
+| D-173 | Once a primary model has used up its retries on provider errors (429, 5xx, timeout), later calls in the same turn that have a fallback go straight to it, once, with no retries (`LLMWrapper._degraded`); a limiter timeout or a budget stop does not count, and the next turn starts on the primary again | Going back to a primary that just failed spent three attempts per round on the same error and ran the analyst out of its sub-cap before the last query; every attempt still counts against the budget |
 
 ### Routing and roles
 | Decision | What | Why |
@@ -371,7 +372,7 @@ Full rows are in `docs/process/OWNER-QUEUE.md` and the ADRs are in `docs/decisio
 | D-169 | The live SUT uses the same session-id shape as the CLI | Otherwise live paths skipped the audit |
 
 ### ADR drift (to fix in `docs/decisions.md`)
-- **ADR-003**: primary → 2 retries (1 s, 2 s plus jitter; D-6) → fallback once, at most 6 retries per turn (`BACKOFFS_S` in `graph/llm.py`, `MAX_TURN_RETRIES` in `graph/budget.py`).
+- **ADR-003**: primary → 2 retries (1 s, 2 s plus jitter; D-6) → fallback once, at most 6 retries per turn; after a primary fails, the rest of the turn uses its fallback (D-173) (`BACKOFFS_S` in `graph/llm.py`, `MAX_TURN_RETRIES` in `graph/budget.py`).
 - **ADR-009** lists five roles. The Library agent was not built.
 - **ADR-010** now has 10 labels; the text was updated for D-155.
 
