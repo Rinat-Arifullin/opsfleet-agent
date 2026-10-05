@@ -48,11 +48,13 @@ __all__ = [
     "OpenResult",
     "ViewResult",
     "count_text",
+    "display_id",
     "list_reports",
     "open_report",
     "parse_search_args",
     "render_list",
     "search_reports",
+    "strip_display_prefix",
     "view_report",
 ]
 
@@ -68,6 +70,19 @@ DRIFT_VIEW_TEXT: Final = (
 )
 _DATE_RE: Final = re.compile(r"\d{4}-\d{2}-\d{2}", re.ASCII)
 _ROW_RE: Final = re.compile(r"\d{1,2}", re.ASCII)
+# live1: a saved report is announced as "R-<id>"; the stored id stays the bare hex
+DISPLAY_PREFIX: Final = "R-"
+_DISPLAY_RE: Final = re.compile(r"^[Rr]-(?=[0-9a-f]{32}$)", re.ASCII)
+
+
+def display_id(report_id: str) -> str:
+    """The id as shown when a report is saved ("R-" + the stored hex id)."""
+    return f"{DISPLAY_PREFIX}{report_id}"
+
+
+def strip_display_prefix(ref: str) -> str:
+    """A shown id ("R-<hex>") back to the stored id; anything else unchanged."""
+    return _DISPLAY_RE.sub("", ref)
 
 
 class LibraryError(ValueError):
@@ -209,7 +224,7 @@ def search_reports(
 def view_report(store, owner: str, scope: ProductScope | None, report_id: str) -> ViewResult:
     """AC-21.3 / AC-21.5: the owner's own in-scope report, fenced, with its date and data
     window. Another user's id, a missing id and a malformed id all give :data:`NOT_FOUND_TEXT`."""
-    rid = str(report_id).strip()
+    rid = strip_display_prefix(str(report_id).strip())
     rec = store.get(rid, owner) if rid and len(rid) <= MAX_ID_CHARS else None
     if rec is None:
         return ViewResult("not_found", NOT_FOUND_TEXT)
@@ -283,7 +298,7 @@ def open_report(
     """AC-21.3 / AC-21.11: open by id, by a bare row number of the last listing, or by a phrase
     (the matcher over the owner's in-scope reports). Owner and scope are re-checked here on
     every path; a number only picks an id from the listing, it never bypasses ``view_report``."""
-    ref = " ".join(str(ref).split())
+    ref = strip_display_prefix(" ".join(str(ref).split()))
     if _ROW_RE.fullmatch(ref):
         n = int(ref)
         if not 1 <= n <= len(listing):

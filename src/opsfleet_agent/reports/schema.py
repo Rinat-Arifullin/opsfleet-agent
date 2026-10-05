@@ -124,9 +124,130 @@ def parse_draft(text: Any) -> ReportDraft | None:
         return None
     try:
         data = json.loads(body[start : end + 1])
-        return ReportDraft.model_validate(data) if isinstance(data, dict) else None
-    except (ValueError, ValidationError):
+        return ReportDraft.model_validate(_coerce(data)) if isinstance(data, dict) else None
+    except (ValueError, ValidationError, TypeError):
         return None
+
+
+# --- live1: tolerant shapes (small local models) ---------------------------------------------
+# A model reply is coerced into the schema shape before validation. Only the SHAPE is
+# repaired (a string where a list was asked, a dict of metrics, insights without numbers);
+# no content is invented except neutral placeholders for missing action-item details. The
+# title and the summary stay required: a reply without them is still no draft.
+
+_NOT_STATED: Final = "(not stated)"
+_FIGURE: Final = re.compile(r"\$?\d[\d,]*(?:\.\d+)?%?")
+_METRIC_KEYS: Final = (("name", "metric", "label", "key"), ("value", "amount", "figure", "result"))
+_ACTION_KEYS: Final = {
+    "action": ("action", "text", "item", "recommendation", "description"),
+    "metric_to_watch": ("metric_to_watch", "metric", "kpi"),
+    "owner_function": ("owner_function", "owner", "team", "function"),
+    "timeframe": ("timeframe", "time_frame", "when", "deadline", "timeline"),
+}
+
+
+def _cut(value: Any, limit: int) -> str:
+    return " ".join(str(value).split())[:limit]
+
+
+def _as_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [line.strip(" -*\t") for line in value.splitlines() if line.strip(" -*\t")]
+    if isinstance(value, dict):
+        return [value]
+    return list(value)[:MAX_ITEMS] if isinstance(value, list | tuple) else [value]
+
+
+def _pick(item: dict[str, Any], keys: Sequence[str]) -> Any:
+    for k in keys:
+        if item.get(k) not in (None, ""):
+            return item[k]
+    return None
+
+
+def _metrics(value: Any) -> list[dict[str, str]]:
+    if isinstance(value, dict) and not ({"name", "value"} <= set(value)):
+        value = [{"name": k, "value": v} for k, v in value.items()]
+    out: list[dict[str, str]] = []
+    for m in _as_list(value)[:MAX_ITEMS]:
+        if isinstance(m, str):
+            name, sep, val = m.partition(":")
+            m = {"name": name, "value": val} if sep else None
+        if isinstance(m, dict):
+            name, val = _pick(m, _METRIC_KEYS[0]), _pick(m, _METRIC_KEYS[1])
+            if name not in (None, "") and val not in (None, ""):
+                out.append({"name": _cut(name, 200), "value": _cut(val, 200)})
+    return out
+
+
+def _ref(value: Any, default: int = 1) -> int:
+    m = re.search(r"\d+", str(value)) if value is not None else None
+    n = int(m.group()) if m else default
+    return n if 1 <= n <= MAX_ITEMS else default
+
+
+def _insights(value: Any) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for k, ins in enumerate(_as_list(value)[:MAX_ITEMS], 1):
+        if isinstance(ins, str):
+            ins = {"text": ins}
+        if not isinstance(ins, dict):
+            continue
+        text = _pick(ins, ("text", "insight", "description", "finding"))
+        if text in (None, ""):
+            continue
+        text = _cut(text, MAX_FIELD_CHARS)
+        figures = ins.get("figures")
+        figures = [_cut(f, 200) for f in _as_list(figures)] if figures else _FIGURE.findall(text)
+        out.append({"n": _ref(ins.get("n"), k), "text": text, "figures": figures[:MAX_ITEMS]})
+    return out
+
+
+def _actions(value: Any) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for a in _as_list(value)[:MAX_ITEMS]:
+        if isinstance(a, str):
+            a = {"action": a}
+        if not isinstance(a, dict):
+            continue
+        item = {k: _pick(a, keys) for k, keys in _ACTION_KEYS.items()}
+        if item["action"] in (None, ""):
+            continue
+        limits = {"action": MAX_FIELD_CHARS, "metric_to_watch": 300}
+        out.append({
+            **{k: _cut(v if v not in (None, "") else _NOT_STATED, limits.get(k, 120))
+               for k, v in item.items()},
+            "insight_ref": _ref(_pick(a, ("insight_ref", "insight", "ref"))),
+        })  # fmt: skip
+    return out
+
+
+def _coerce(data: dict[str, Any]) -> dict[str, Any]:
+    """The reply object in the schema's shape (see the comment above)."""
+    inner = data.get("report")
+    if isinstance(inner, dict) and "title" not in data:
+        data = inner
+    out = dict(data)
+    if isinstance(out.get("summary"), list):
+        out["summary"] = " ".join(str(x) for x in out["summary"])
+    if isinstance(out.get("title"), str):
+        out["title"] = _cut(out["title"], MAX_TITLE_CHARS)
+    for name in ("definitions", "limitations", "tags"):
+        if isinstance(out.get(name), dict):  # {"term": "meaning"}
+            out[name] = [f"{k}: {v}" for k, v in out[name].items()]
+        if name in out:
+            cap = 8 if name == "tags" else MAX_ITEMS
+            out[name] = [_cut(x, MAX_FIELD_CHARS) for x in _as_list(out[name]) if str(x).strip()]
+            out[name] = out[name][:cap]
+    if "key_metrics" in out:
+        out["key_metrics"] = _metrics(out["key_metrics"])
+    if "insights" in out:
+        out["insights"] = _insights(out["insights"])
+    if "action_items" in out:
+        out["action_items"] = _actions(out["action_items"])
+    return out
 
 
 def with_context(draft: ReportDraft, *, scope_label: str, data_window: str) -> ReportDraft:

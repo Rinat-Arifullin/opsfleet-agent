@@ -101,7 +101,7 @@ from opsfleet_agent.graph.providers import is_local
 from opsfleet_agent.guards.echo import ECHO_REJECTED, ECHO_RETRY_RULE, is_echo
 from opsfleet_agent.guards.echo import normalise as normalise_echo
 from opsfleet_agent.guards.input import PII_REQUEST, REFUSALS, check_input
-from opsfleet_agent.guards.output import REFUSAL_TEXT, ROLE_TOOLS, check_output
+from opsfleet_agent.guards.output import REFUSAL_TEXT, ROLE_TOOLS, OutputVerdict, check_output
 from opsfleet_agent.guards.plain_language import (
     PLAIN_LANGUAGE_RULE,
     PLAIN_LANGUAGE_SECTION,
@@ -114,7 +114,8 @@ from opsfleet_agent.guards.plain_language import (
 from opsfleet_agent.guards.scope import ProductScope
 from opsfleet_agent.obs import progress
 from opsfleet_agent.persona import Persona, assemble_prompt
-from opsfleet_agent.reports.schema import missing_sections
+from opsfleet_agent.reports.library import display_id
+from opsfleet_agent.reports.schema import REQUIRED_SECTIONS, missing_sections
 from opsfleet_agent.roles.analyst import (
     DEEP,
     QUICK,
@@ -207,7 +208,12 @@ _REPORT_ROLE_SUBCAPS: Final = {**_QA_ROLE_SUBCAPS, **REPORT_ROLE_SUBCAPS}
 CONFIRM_NODE: Final = "confirm_save"
 DELETE_CONFIRM_NODE: Final = "confirm_delete"  # iteration 22a
 DELETE_EXECUTE_NODE: Final = "execute_delete"  # iteration 22a
-REPORT_PROMPT: Final = "Reply save to store this report, revise <what to change>, or cancel."
+# live1: the options are capitalised as the user sees them (the reply match is case-blind)
+REPORT_PROMPT: Final = "Reply Save to store this report, Revise <what to change>, or Cancel."
+PARTIAL_REPORT_NOTE: Final = (
+    "Partial analysis: some queries for this report could not be completed, so it covers "
+    "only the results that were retrieved."
+)
 SAVE_DISABLED_TEXT: Final = "Saving reports is turned off right now, so this report was not saved."
 SAVE_FAILED_TEXT: Final = "The report could not be saved; nothing was stored. Please ask again."
 CANCELLED_TEXT: Final = "Cancelled: the report draft was not saved."
@@ -215,7 +221,7 @@ NOT_SAVED_TEXT: Final = "The report draft was not saved."
 REVISING_TEXT: Final = "Revising the report draft (the previous draft was not saved)."
 DELETE_WHILE_PENDING_TEXT: Final = (
     "A report draft is waiting for your answer, so nothing can be deleted now. "
-    "Reply save, revise <what to change>, or cancel first."
+    "Reply Save, Revise <what to change>, or Cancel first."
 )
 NOTHING_TO_SAVE_TEXT: Final = "There is no earlier answer in this session to save as a report."
 CANCELLED_NOTHING_TO_SAVE_TEXT: Final = (
@@ -939,14 +945,25 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
     def report_writer(state: TurnState) -> dict[str, Any]:
         # A report needs a grounded analysis that ran SQL; otherwise finalize shows the
         # analysis answer as before (nothing to confirm, nothing saved).
+        # live1: a partial analysis (the analyst gave up after some queries succeeded) still
+        # gets a report draft over what it found, with a code-owned note saying so; a blocked,
+        # comment, customer-ID or echo outcome never does.
         ledger = [dict(e) for e in ctx.sql_turn.ledger]
-        if not ledger or state.get("status") != "ok" or state.get("grounding_blocked"):
+        status = state.get("status")
+        if (
+            not ledger
+            or status not in ("ok", "partial")
+            or state.get("grounding_blocked")
+            or not str(state.get("draft") or "").strip()
+            or state.get("error_class") in (CUSTOMER_ID_ERROR_CLASS, ECHO_ERROR_CLASS)
+        ):
             return {}
         scope = ctx.sql_session.scope
         figures = merge_figures(scoped_figures(state.get("figures"), scope), ctx.new_figures)
         rep = _build_report(
             ctx, question=state.get("context_message") or state.get("message", ""),
             analysis=state.get("draft", ""), ledger=ledger, figures=figures,
+            extra_notes=(PARTIAL_REPORT_NOTE,) if status == "partial" else (),
         )  # fmt: skip
         if rep is None:
             return {}
@@ -1084,13 +1101,73 @@ def _golden_from_refs(ctx: TurnContext, refs: Any) -> list[StoreItem]:
 # --- iteration 17: report helpers ----------------------------------------------------------------
 
 
-def _report_guard(ctx: TurnContext, text: str):
-    """The output guard for a report body (the writer calls no tools: ``tool_calls=()``)."""
+_KNOWN_HEADINGS: Final = frozenset((*REQUIRED_SECTIONS, "Verification notes"))
+_LABEL_PREFIXES: Final = ("Scope: ", "Data window: ")
+_MAX_GUARD_LINES: Final = 400  # a rendered body is far shorter (MAX_ITEMS per section)
+
+
+def _guard_text(ctx: TurnContext, text: str) -> OutputVerdict:
     return check_output(
         text, role=WRITER_ROLE, label="report", tool_calls=(),
         protected_snippets=analyst_protected_snippets(ctx.persona),
         detector=_turn_detector(ctx),
     )  # fmt: skip
+
+
+def _split_owned(line: str) -> tuple[str, str]:
+    """(code-owned prefix, guarded content) of one rendered body line."""
+    if line.startswith("## ") and line[3:].strip() in _KNOWN_HEADINGS:
+        return line, ""
+    if line.startswith("# "):
+        return "# ", line[2:]
+    for prefix in _LABEL_PREFIXES:
+        if line.startswith(prefix):
+            return prefix, line[len(prefix) :]
+    return "", line
+
+
+def _report_guard(ctx: TurnContext, text: str) -> OutputVerdict:
+    """The output guard for a report body (the writer calls no tools: ``tool_calls=()``).
+
+    live1: the structure is code-owned, so only the content is guarded. The heading lines and
+    the "# ", "Scope: " and "Data window: " labels are kept as rendered and never shown to the
+    NER: a live model masked "Data" of "Data window" as a person, the body then lacked a
+    required section and every report was refused. Every content line (title and label
+    values included) still goes through the full guard; a block anywhere blocks the body."""
+    if not isinstance(text, str) or not text.strip():
+        return _guard_text(ctx, text)
+    if text.strip() in _KNOWN_HEADINGS:  # the store re-guards each section name
+        return OutputVerdict(True, text, ())
+    lines = text.split("\n")
+    if len(lines) > _MAX_GUARD_LINES:
+        return _guard_text(ctx, text)
+    parts = [_split_owned(line) for line in lines]
+    if not any(prefix for prefix, _ in parts):
+        return _guard_text(ctx, text)
+    verdict = _guard_text(ctx, "\n".join(content for _, content in parts))
+    if not verdict.allowed:
+        return verdict
+    events = list(verdict.events)
+    guarded = verdict.text.split("\n")
+    if len(guarded) != len(parts):  # the guard changed the line count: guard line by line
+        guarded, events = [], []
+        for _, content in parts:
+            if not content.strip():
+                guarded.append(content)
+                continue
+            v = _guard_text(ctx, content)
+            if not v.allowed:
+                return v
+            guarded.append(" ".join(v.text.split()))
+            events.extend(v.events)
+    out: list[str] = []
+    for (prefix, _), content in zip(parts, guarded, strict=True):
+        if prefix in _LABEL_PREFIXES and not content.strip():
+            content = "(not set)"
+        elif prefix == "# " and not content.strip():
+            content = "Report"
+        out.append(prefix if prefix.startswith("## ") else prefix + content)
+    return OutputVerdict(True, "\n".join(out), tuple(events))
 
 
 def _build_report(
@@ -1100,6 +1177,7 @@ def _build_report(
     analysis: str,
     ledger: list[dict[str, Any]],
     figures: list[dict[str, Any]],
+    extra_notes: tuple[str, ...] = (),
 ) -> dict[str, Any] | None:
     """Writer + verifier (bounded, budgeted), then the output guard on the rendered body.
     None when no draft passes: the caller falls back to the analysis answer; nothing is saved."""
@@ -1109,7 +1187,7 @@ def _build_report(
         scope_label=ctx.profile.scope_label, window=sv.window(), llm=ctx.llm,
         invoke=sv.analyst_invoke,
         models={r: model_ids_from_settings(sv.settings, r) for r in (WRITER_ROLE, VERIFIER_ROLE)},
-        persona=ctx.persona, deadline_hit=ctx.budget.deadline_hit,
+        persona=ctx.persona, deadline_hit=ctx.budget.deadline_hit, extra_notes=extra_notes,
     )  # fmt: skip
     if not res.ok or res.draft is None:
         _record(ctx, "guard", "report", verdict="no_draft")
@@ -1196,7 +1274,7 @@ def _store_report(
         logger.error("report save failed: %s", type(exc).__name__)
         return {"final_text": SAVE_FAILED_TEXT, "outcome": "report_unsaved"}
     verb = "Saved" if created else "Already saved"
-    text = f'{verb} report "{rec.title}" (id {rec.report_id}).'
+    text = f'{verb} report "{rec.title}" (id {display_id(rec.report_id)}).'
     return {"final_text": text, "outcome": "report_saved"}
 
 
@@ -1851,7 +1929,7 @@ class AgentGraph:
         key = hashlib.sha256(f"last:{session.session_id}:{owner}:{answer}".encode()).hexdigest()
         found = sv.reports.get_by_key(key, owner)
         if found is not None:
-            text = f'Already saved report "{found.title}" (id {found.report_id}).'
+            text = f'Already saved report "{found.title}" (id {display_id(found.report_id)}).'
             return TurnResult(text, label="report", route="report", outcome="report_saved")
         _promote_report(ctx)
         rep = _build_report(
@@ -1990,7 +2068,7 @@ class PendingTurn:
             found = reports.get_by_key(key, self.session.profile.user_id)
             if found is None:
                 return None
-            text = f'Already saved report "{found.title}" (id {found.report_id}).'
+            text = f'Already saved report "{found.title}" (id {display_id(found.report_id)}).'
             self._built[1].update_state(
                 self.agent._config(self.session.session_id),
                 {"outcome": "report_saved", "final_text": text},

@@ -30,6 +30,7 @@ from opsfleet_agent.reports.schema import (
 )
 from opsfleet_agent.roles.analyst import ModelTurn, ToolCall
 from opsfleet_agent.roles.report_writer import (
+    FALLBACK_NOTE,
     MAX_VERIFIER_CALLS,
     MAX_WRITER_CALLS,
     UNVERIFIED_NOTE,
@@ -441,7 +442,10 @@ def test_writer_and_verifier_loops_are_bounded(make_env, store) -> None:
     env2 = make_env(bad)
     out2 = env2.ask("Write a report on complete orders")
     assert bad.kinds().count("writer") == MAX_WRITER_CALLS and "verifier" not in bad.kinds()
-    assert out2.outcome != "report_pending" and store.count() == 0
+    # live1: the writer replied but never parsed, so the code composes a labelled fallback
+    # draft from the analysis answer; it still waits for confirmation and nothing is saved.
+    assert out2.outcome == "report_pending" and FALLBACK_NOTE in out2.text
+    assert store.count() == 0
 
 
 def test_verifier_precheck_rejects_ungrounded_figure_without_a_call(make_env) -> None:
