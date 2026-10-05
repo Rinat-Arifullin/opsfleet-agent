@@ -129,7 +129,7 @@ The ADRs below were written by the architect from the approved digest (`docs/pro
      - (b) user or order grain: no quasi-identifier in the projection, ORDER BY or window partition; a quasi-identifier filter is allowed only if a separate capped population check returns at least k users;
      - (c) windows over a quasi-identifier, nested aggregates or correlated quasi-identifiers: rejected (`small_cell_unplaceable`).
 
-     "Top customers by spend" (user_id grain, no quasi-identifier) stays allowed, with an eval case;
+     "Top customers by spend" (user_id grain, no quasi-identifier) stays allowed by the base policy; since D-159 (2026-10-05) a customer-ranking turn is answered with spend bands and counts only (see the ADR-013 note);
   6. dry-run plus `maximum_bytes_billed`, session budget and row cap;
   7. a result scrubber;
   8. an output guard (PII, scope label, grounding), plus the action allowlist per role and router label and the answer injection scan (FR-75), failing closed;
@@ -376,6 +376,11 @@ The ADRs below were written by the architect from the approved digest (`docs/pro
   - FR-70 is the differencing guard for aggregates, M in the prototype, in its session and per-user cross-session forms (rev. 4.4); id-grain differencing is handled here, not by FR-70.
   - Some legitimate questions ("top customers in California") are answered as aggregates or refused with a reason; the refusal is templated and audited like other policy rejections.
   - HLD §5.2 row 5 and requirements FR-70 are updated to match (by their owners, not in this file).
+- **Note (D-159, owner, 2026-10-05; OD-14 of iteration D-156/D-157):** for customer rankings ("top 10 customers by spend", "which clients spent the most") the owner chose **bands only**: the answer gives spend bands, customer counts and aggregates such as each band's share of revenue, never individual customers, customer IDs or per-customer rows. This replaces the D-157 answer shape (opaque customer IDs). PII variants keep the PII refusal.
+  - Scope is **narrow**: only turns that `input_guard` detects as customer rankings (`is_customer_ranking_request`) are marked `aggregate_only`. Option A above and the base policy are unchanged for every other turn, so an id-grain query outside a ranking turn is still allowed under its existing rules (OD-1 in `docs/process/iter-d159-ods.md`).
+  - Enforced in **code**: on such a turn `run_sql` calls `check_aggregate_only`, which refuses a statement whose output is at id grain (grouped by an id key, or ungrouped table rows) or that returns an id column, with `SQL_POLICY` rule `customer_grain` and a bands hint. The refusal is retryable and bounded by the existing consecutive-failure limit. An answer that names customer IDs is retried once, then replaced by the bounded force-answer path or the fixed template.
+  - The analyst gets the `Customer ranking` rule (bands under $100, $100 to $499, $500 to $999, $1,000 and over; bands under k = 5 customers merged). The k-merge is a prompt rule, not code (OD-3).
+  - Tests: `tests/unit/test_d159_customer_bands.py`, `tests/unit/test_d157_top_customers.py`; eval `golden/top_customers`.
 
 ## ADR-014: Report residue and backups
 

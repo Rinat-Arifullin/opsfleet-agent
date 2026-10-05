@@ -143,6 +143,7 @@ __all__ = [
     "PolicyDecision",
     "Rule",
     "allowed_sources_text",
+    "check_aggregate_only",
     "check_sql",
     "regenerate_sql",
 ]
@@ -281,6 +282,7 @@ class Rule(StrEnum):
     QI_AT_ID_GRAIN = "qi_at_id_grain"
     SMALL_CELL_UNPLACEABLE = "small_cell_unplaceable"
     QI_DIFFERENCING = "qi_differencing"
+    CUSTOMER_GRAIN = "customer_grain"
 
 
 _HINTS: Final[MappingProxyType[Rule, str]] = MappingProxyType(
@@ -334,6 +336,12 @@ _HINTS: Final[MappingProxyType[Rule, str]] = MappingProxyType(
         Rule.QI_DIFFERENCING: (
             "compute one aggregate per query when grouping or filtering by customer "
             "attributes; do not combine, subtract or union several groupings or totals"
+        ),
+        Rule.CUSTOMER_GRAIN: (
+            "this question is answered with spend bands and customer counts only: compute "
+            "each customer's total in a subquery, then group those totals into spend bands "
+            "(CASE on the total) and return per band the number of customers and the share "
+            "of revenue; return no customer ids and no per-customer, per-order or per-item rows"
         ),
     }
 )
@@ -464,6 +472,25 @@ def check_sql(sql: str) -> PolicyDecision:
     """Check one model-written statement. Pure; fails closed on anything unexpected."""
     try:
         _check(sql)
+    except _Reject as rej:
+        return _deny(rej.rule)
+    except (SqlglotError, RecursionError):
+        return _deny(Rule.SQL_SYNTAX)
+    except Exception:  # noqa: BLE001 - fail closed on any analyser bug
+        return _deny(Rule.UNSUPPORTED_SYNTAX)
+    return _ALLOW
+
+
+def check_aggregate_only(sql: str) -> PolicyDecision:
+    """D-159: the extra check for a customer-ranking turn, after :func:`check_sql` allowed it.
+
+    Denies (:attr:`Rule.CUSTOMER_GRAIN`) a statement whose result is at row grain (one row
+    per customer, order or item, or plain table rows) or that returns an id column, also one
+    surfaced through MIN/MAX/ANY_VALUE. Pure; fails closed like :func:`check_sql`."""
+    try:
+        _check(sql)
+        if _Analyzer(_parse(sql)).returns_id_grain():
+            raise _Reject(Rule.CUSTOMER_GRAIN)
     except _Reject as rej:
         return _deny(rej.rule)
     except (SqlglotError, RecursionError):
@@ -1077,6 +1104,14 @@ class _Analyzer:
             if isinstance(source, Scope) and self._analyze(source).row_grain:
                 return True
         return False
+
+    def returns_id_grain(self) -> bool:
+        """True when the root result is at row grain or carries an id column (D-159)."""
+        scopes = list(self.root_scope.traverse())
+        for scope in scopes:
+            self.scope_of_expr[id(scope.expression)] = scope
+        root_info = self._analyze(self.root_scope)
+        return root_info.row_grain or any(_IDKEY in t for t in root_info.output_list)
 
     def _check_grain(self, scopes: list[Scope]) -> None:
         root_info = self._analyze(self.root_scope)

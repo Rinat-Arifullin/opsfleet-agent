@@ -86,10 +86,13 @@ from opsfleet_agent.graph.fixed_replies import (
 from opsfleet_agent.graph.grounding import check_grounding, extract_figures, merge_figures
 from opsfleet_agent.graph.intents import (
     COMMENT_FALLBACK_TEXT,
-    CUSTOMER_ID_NOTICE,
+    CUSTOMER_BANDS_NOTICE,
+    CUSTOMER_BANDS_RULE,
+    CUSTOMER_BANDS_SECTION,
     asks_for_customer_pii,
     is_customer_ranking_request,
     is_sql_request,
+    mentions_customer_id,
 )
 from opsfleet_agent.graph.llm import Limiters, LLMSuccess, LLMWrapper
 from opsfleet_agent.graph.memory import SessionMemory
@@ -181,6 +184,8 @@ PARTIAL_WITH_CONTEXT_TEXT: Final = (
 # router prompt); such a request is relabelled in code.
 CUSTOMER_OVERRIDE_LABELS: Final = frozenset({"injection", "off_topic"})
 ECHO_ERROR_CLASS: Final = "echo"  # D-156: the analyst repeated an earlier reply twice
+CUSTOMER_ID_ERROR_CLASS: Final = "customer_id"  # D-159: a ranking answer named customer IDs twice
+CUSTOMER_ID_REJECTED: Final = "customer_id_in_answer"
 MAX_PREVIOUS_ANSWER_CHARS: Final = 1500  # the force answer sees one earlier answer, trimmed
 _FORCE_RULES: Final = (
     "The analysis was cut short. Write a brief answer for the user that says what was "
@@ -714,18 +719,22 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
         elif rd.label in CUSTOMER_OVERRIDE_LABELS and is_customer_ranking_request(
             decision.scrubbed
         ):
-            # D-157: "who are our top 10 customers by spend?" is a data question. Customers are
-            # identified by the pseudonymous customer ID (ADR-013); the SQL policy and the
-            # output guard block direct identifiers whatever the label.
+            # D-157: "who are our top 10 customers by spend?" is a data question, answered with
+            # spend bands (D-159, below); the SQL policy and the output guard block direct
+            # identifiers whatever the label.
             if asks_for_customer_pii(decision.scrubbed):
                 update.update(label=rd.label, route="refuse")
                 refusal = REFUSALS[PII_REQUEST]
                 _record(ctx, "router", "intent", label=rd.label, override="customer_pii")
             else:
                 update.update(label="simple", route="full")
-                ctx.notice = ctx.notice or CUSTOMER_ID_NOTICE
                 _record(ctx, "router", "intent", label="simple", route="full",
                         override="customer_ranking")  # fmt: skip
+        if update["route"] == "full" and is_customer_ranking_request(decision.scrubbed):
+            # D-159: a customer ranking, whatever the label, is answered with spend bands and
+            # customer counts only. run_sql refuses id-grain queries for the rest of the turn.
+            ctx.sql_turn.aggregate_only = True
+            ctx.notice = ctx.notice or CUSTOMER_BANDS_NOTICE
         if update["route"] == "refuse":
             update.update(final_text=refusal or rd.refusal_text or REFUSAL_TEXT, outcome="refused")
         return update
@@ -855,12 +864,25 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
                 {"role": "user", "content": a.message},
             ]
 
-        res = run_analyst(role, _deps(), messages())
+        ranking = ctx.sql_turn.aggregate_only  # D-159: a customer-ranking turn
+        bands = ((CUSTOMER_BANDS_SECTION, CUSTOMER_BANDS_RULE),) if ranking else ()
+        res = run_analyst(role, _deps(), messages(bands))
+        if bands and res.status == "ok" and mentions_customer_id(res.output):
+            # D-159: a ranking answer that names customers by ID is never shown. One bounded
+            # retry with the bands rule; a second one goes to the force-answer fallback.
+            _record(ctx, "guard", "customer_id", verdict="retry", role=role,
+                    rule_hits=[CUSTOMER_ID_REJECTED])  # fmt: skip
+            res = run_analyst(role, _deps(), messages((*bands, ("Retry", CUSTOMER_BANDS_RULE))))
+            if res.status == "ok" and mentions_customer_id(res.output):
+                _record(ctx, "guard", "customer_id", verdict="block", role=role,
+                        rule_hits=[CUSTOMER_ID_REJECTED])  # fmt: skip
+                return {"status": "partial", "draft": "", "error_class": CUSTOMER_ID_ERROR_CLASS,
+                        "role": role}  # fmt: skip
         if res.status == "ok" and _is_echo(state, res.output):
             # D-156: the answer repeats an earlier reply. One bounded retry with a corrective
             # rule; a second echo goes to the force-answer fallback and is never shown.
             _record(ctx, "guard", "echo", verdict="retry", role=role, rule_hits=[ECHO_REJECTED])
-            res = run_analyst(role, _deps(), messages((("Retry", ECHO_RETRY_RULE),)))
+            res = run_analyst(role, _deps(), messages((*bands, ("Retry", ECHO_RETRY_RULE))))
             if res.status == "ok" and _is_echo(state, res.output):
                 _record(ctx, "guard", "echo", verdict="block", role=role,
                         rule_hits=[ECHO_REJECTED])  # fmt: skip
@@ -1296,6 +1318,11 @@ def _force_text(
         value = res.response.value
         text = value.text if isinstance(value, ModelTurn) else value
         if isinstance(text, str) and text.strip() and not getattr(value, "tool_calls", ()):
+            if ctx.sql_turn.aggregate_only and mentions_customer_id(text):
+                # D-159: a ranking turn never shows customer IDs: the template is shown instead
+                _record(ctx, "guard", "customer_id", verdict="block", role=FORCE_ANSWER_ROLE,
+                        rule_hits=[CUSTOMER_ID_REJECTED])  # fmt: skip
+                return template
             if not _is_echo(state, text):
                 return text.strip()
             # D-156: a reply that repeats an earlier one is never shown: the template is

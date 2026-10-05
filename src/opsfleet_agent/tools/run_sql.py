@@ -125,7 +125,7 @@ from opsfleet_agent.guards.small_cell import (
     SmallCellRewrite,
     apply_small_cell,
 )
-from opsfleet_agent.guards.sql_policy import MAX_SQL_CHARS, Rule
+from opsfleet_agent.guards.sql_policy import MAX_SQL_CHARS, Rule, check_aggregate_only
 
 __all__ = [
     "MAX_PURPOSE_CHARS",
@@ -426,6 +426,9 @@ class RunSqlTurn:
     statements: dict[str, str | None] = field(default_factory=dict)
     empty_results: int = 0
     ledger: list[dict[str, Any]] = field(default_factory=list)
+    # D-159: a customer-ranking turn. Only banded aggregates may run: a statement at customer,
+    # order or item grain, or one that returns an id column, is a retryable SQL_POLICY failure.
+    aggregate_only: bool = False
 
 
 @dataclass
@@ -661,6 +664,10 @@ class RunSqlTool:
         if isinstance(scoped, ScopeRefusal):
             return _from_refusal(scoped)
         assert scope is not None  # apply_scope refuses a None scope
+        if turn.aggregate_only:  # D-159: bands and counts only, no individual customers
+            decision = check_aggregate_only(args.sql)
+            if not decision.allowed:
+                return _from_refusal(ScopeRefusal.from_policy(decision))
         # 4: small cell
         sc = apply_small_cell(scoped, scope, self.k)
         if isinstance(sc, ScopeRefusal):

@@ -1,5 +1,6 @@
-"""D-157: "who are our top 10 customers by total spend?" is a data question answered by
-customer ID, even when the router labels it injection (offline, synthetic data only)."""
+"""D-157: "who are our top 10 customers by total spend?" is a data question, answered even when
+the router labels it injection (offline, synthetic data only). D-159: the answer is spend bands
+with customer counts (tests/unit/test_d159_customer_bands.py)."""
 
 from __future__ import annotations
 
@@ -8,7 +9,7 @@ from typing import Any
 import pytest
 
 from opsfleet_agent.graph.intents import (
-    CUSTOMER_ID_NOTICE,
+    CUSTOMER_BANDS_NOTICE,
     MAX_INTENT_CHARS,
     asks_for_customer_pii,
     is_customer_ranking_request,
@@ -21,7 +22,7 @@ from tests.unit.test_graph import make_env as make_env  # noqa: F401  (fixture)
 from tests.unit.test_graph import settings as settings  # noqa: F401  (fixture)
 
 TOP10 = "Who are our top 10 customers by total spend?"
-ANSWER = "The top customers by spend are listed by customer ID in the table above."
+ANSWER = "Most revenue comes from the highest spend band, shown in the table above."
 
 RANKING = [
     TOP10,
@@ -80,8 +81,8 @@ def test_ranking_check_is_bounded_and_typed() -> None:
 
 
 def test_notice_is_plain_english() -> None:
-    assert CUSTOMER_ID_NOTICE.isascii() and len(CUSTOMER_ID_NOTICE) < 120
-    assert "customer ID" in CUSTOMER_ID_NOTICE
+    assert CUSTOMER_BANDS_NOTICE.isascii() and len(CUSTOMER_BANDS_NOTICE) < 120
+    assert "bands" in CUSTOMER_BANDS_NOTICE and "ID" not in CUSTOMER_BANDS_NOTICE
 
 
 # --- graph ---------------------------------------------------------------------------------------
@@ -98,14 +99,15 @@ def test_mislabelled_top_customers_is_answered(make_env, label: str) -> None:  #
     out = env.ask(TOP10)
     assert out.outcome == "answered" and out.route == "full" and out.label == "simple"
     assert out.text.startswith(ANSWER) and analyst.calls
-    assert out.notice == CUSTOMER_ID_NOTICE
+    assert out.notice == CUSTOMER_BANDS_NOTICE
     assert {"override": "customer_ranking"}.items() <= _intent_spans(env)[-1].items()
 
 
 def test_correct_label_needs_no_override(make_env) -> None:  # noqa: F811
     env = make_env(Router("simple"), Scripted(ModelTurn(ANSWER)))
     out = env.ask(TOP10)
-    assert out.outcome == "answered" and out.notice is None
+    # D-159: no relabel, but the bands notice applies to every customer-ranking turn
+    assert out.outcome == "answered" and out.notice == CUSTOMER_BANDS_NOTICE
     assert not any(s.get("override") for s in _intent_spans(env))
 
 

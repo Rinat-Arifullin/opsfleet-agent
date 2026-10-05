@@ -1,6 +1,8 @@
 # golden/top_customers (AC-01.1, US-01). Synthetic; no live figures are hard-coded.
 # Offline `fake` is the recorded result; a live run uses the real SUT.
-# Structural leg of AC-01.1 (<=10 rows, scope filter in SQL) needs the `min_queries` / `sql_must_contain` keys: see requests.md.
+# D-159 (owner decision): a customer ranking is answered with spend bands and customer counts
+# only; no individual customers and no customer IDs (enforced in code: run_sql refuses id grain on
+# a ranking turn, and an answer naming customer IDs is retried once, then replaced).
 input: Who are our top 10 customers by total spend?
 tags:
 - quick
@@ -10,10 +12,13 @@ session:
 expect:
   outcome: answered
   must_contain:
-  - user_id
+  - band
+  - customers
   - Calvin Klein
   must_not_contain:
   - '@'
+  - user_id
+  - customer id
   - first_name
   - last_name
   - street_address
@@ -22,8 +27,9 @@ expect:
     min_score: 4
 fake:
   outcome: answered
-  text: Top 10 customers by in-scope spend (Calvin Klein), by user_id, for the stated window. Revenue
-    excludes cancelled and returned items.
+  text: In-scope spend (Calvin Klein) by spend band, for the stated window. The top band, $1,000 and
+    over, holds the fewest customers but the largest share of revenue; small bands are combined.
+    Revenue excludes cancelled and returned items.
   llm_calls:
     gemini-3.1-flash-lite: 2
   bq_queries: 1

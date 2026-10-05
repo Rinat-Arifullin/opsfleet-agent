@@ -9,8 +9,10 @@
   SQL is never shown, so the light path answers with a code-owned reply that describes the
   data used in business words (:func:`opsfleet_agent.guards.plain_language.sql_request_reply`).
 * :func:`is_customer_ranking_request` - D-157: "who are our top 10 customers by spend?" or
-  "list our customers". The router sometimes labels these ``injection``; A-3 / ADR-013 allow
-  them by pseudonymous customer ID, so the graph answers them instead of refusing.
+  "list our customers". The router sometimes labels these ``injection``; they are data
+  questions, so the graph answers them instead of refusing. D-159: the answer is spend bands
+  with customer counts only (no individual customers, no customer IDs); ``run_sql`` enforces
+  it for the turn and :func:`mentions_customer_id` checks the answer.
   :func:`asks_for_customer_pii` marks the ones that also ask for names, emails or addresses.
 
 The checks are pure, bounded regex checks on the scan fold the input guard uses (no model
@@ -25,15 +27,19 @@ from typing import Final
 
 from opsfleet_agent.graph.context import HISTORY_TURNS
 from opsfleet_agent.guards.input import _fold
+from opsfleet_agent.guards.small_cell import DEFAULT_K
 
 __all__ = [
     "MAX_INTENT_CHARS",
-    "CUSTOMER_ID_NOTICE",
     "COMMENT_FALLBACK_TEXT",
+    "CUSTOMER_BANDS_NOTICE",
+    "CUSTOMER_BANDS_RULE",
+    "CUSTOMER_BANDS_SECTION",
     "MEMORY_TEXT",
     "asks_for_customer_pii",
     "is_customer_ranking_request",
     "is_sql_request",
+    "mentions_customer_id",
 ]
 
 MAX_INTENT_CHARS: Final = 300  # longer messages are never treated as these intents
@@ -99,8 +105,20 @@ def is_sql_request(text: str) -> bool:
 
 
 # --- D-157: "top customers" is a data question, not an injection ------------------------------
-CUSTOMER_ID_NOTICE: Final = (
-    "Note: customers are shown by customer ID only. I don't share names, emails or addresses."
+# D-159 (owner 2026-10-05): it is answered with spend bands and customer counts only.
+CUSTOMER_BANDS_NOTICE: Final = (
+    "Note: I show customer spending as bands with customer counts, not individual customers."
+)
+CUSTOMER_BANDS_SECTION: Final = "Customer ranking"
+CUSTOMER_BANDS_RULE: Final = (
+    "This question asks for top customers or a customer ranking. Answer it with spend bands "
+    "and customer counts only, never with individual customers. Write one query that computes "
+    "each customer's total spend in a subquery, then groups those totals into spend bands with "
+    "CASE (for example under $100, $100 to $499, $500 to $999, $1,000 and over) and returns per "
+    "band the number of customers, the band's revenue and its share of total revenue. Do not "
+    "return or mention customer IDs, user IDs or per-customer rows: such a query is refused. "
+    f"A band with fewer than {DEFAULT_K} customers is merged into the next lower band; if that "
+    "is not possible, leave it out and say that small bands were combined."
 )
 _CUSTOMERS: Final = r"(?:customers?|buyers?|clients?|shoppers?|purchasers?|spenders?|users?)"
 _RANK: Final = (
@@ -147,8 +165,9 @@ def _ranking_fold(text: str) -> str | None:
 def is_customer_ranking_request(text: str) -> bool:
     """True for a ranking or list of customers with no injection wording (D-157).
 
-    The answer identifies customers by the pseudonymous customer ID only: the SQL policy and
-    the output guard block direct identifiers whatever the label."""
+    D-159: the answer is spend bands with customer counts only. The turn's ``run_sql`` refuses
+    a query at customer grain or one that returns an id, and the SQL policy and the output
+    guard block direct identifiers whatever the label."""
     return _ranking_fold(text) is not None
 
 
@@ -156,3 +175,21 @@ def asks_for_customer_pii(text: str) -> bool:
     """True for a customer ranking or list that also asks for names, emails or addresses."""
     folded = _ranking_fold(text)
     return folded is not None and bool(_CUSTOMER_PII_RE.search(folded))
+
+
+# An individual customer in an answer: "customer ID 12345", "user #881", "user_id", or a
+# "Customer ID" table column. A sentence that only says IDs are not shown does not match.
+_CUSTOMER_ID_RE: Final = re.compile(
+    r"\b(?:customer|user|client|buyer|shopper)s?[\s_-]*(?:ids?|#|no\.?|numbers?)\s*[:#=]?\s*\d"
+    r"|\b(?:customer|user|client|buyer|shopper)\s*#\s*\d"
+    r"|\buser_?ids?\b"
+    r"|\|\s*(?:customer|user|client|buyer)[\s_-]*id\s*\|",
+    re.IGNORECASE,
+)
+
+
+def mentions_customer_id(text: str) -> bool:
+    """True when an answer names individual customers by ID (D-159). Pure, linear regex."""
+    if not isinstance(text, str) or not text:
+        return False
+    return bool(_CUSTOMER_ID_RE.search(text))

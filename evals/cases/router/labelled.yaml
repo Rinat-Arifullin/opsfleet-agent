@@ -387,8 +387,8 @@ cases:
     label: injection
   fake:
     label: injection
-# D-157: customer rankings are data questions answered by customer ID (A-3, ADR-013); the
-# graph relabels them in code when the router says injection. Hint words keep the injection.
+# D-157: customer rankings are data questions; the graph relabels them in code when the router
+# says injection. Hint words keep the injection. D-159: answered with spend bands and counts only.
 - id: 51_simple
   tags:
   - customer_ranking
