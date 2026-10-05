@@ -57,6 +57,7 @@ from opsfleet_agent.bq.schema import TableMetadataCache
 from opsfleet_agent.config import ConfigError, Settings
 from opsfleet_agent.delete import flow as delete_flow
 from opsfleet_agent.golden.seed import Hit, to_store_items
+from opsfleet_agent.graph.assumptions import ASSUMPTIONS_ADDED, assumptions_footer
 from opsfleet_agent.graph.budget import (
     FORCE_ANSWER_ROLE,
     RECURSION_LIMIT,
@@ -525,6 +526,9 @@ def _str_map(obj: Any) -> dict[str, str | None] | None:
 
 _LEDGER_STR: Final = ("sql", "query_id", "sql_hash", "executed_sql_hash")
 _LEDGER_KEYS: Final = frozenset((*_LEDGER_STR, "purpose", "rows"))
+# The model's own statement (shown back instead of the scoped one); optional, so a snapshot
+# written before it was recorded is still valid.
+_LEDGER_OPTIONAL: Final = "model_sql"
 
 
 def _ledger(obj: Any) -> list[dict[str, Any]] | None:
@@ -535,8 +539,9 @@ def _ledger(obj: Any) -> list[dict[str, Any]] | None:
     for e in entries:
         rows = e.get("rows")
         if (
-            set(e) != _LEDGER_KEYS
+            set(e) - {_LEDGER_OPTIONAL} != _LEDGER_KEYS
             or not all(isinstance(e[k], str) for k in _LEDGER_STR)
+            or not isinstance(e.get(_LEDGER_OPTIONAL, ""), str)
             or not (e["purpose"] is None or isinstance(e["purpose"], str))
             or not isinstance(rows, int)
             or isinstance(rows, bool)
@@ -1351,6 +1356,23 @@ def _guard(ctx: TurnContext, state: TurnState, draft: str):
     )  # fmt: skip
 
 
+def _assumptions(ctx: TurnContext, state: TurnState, text: str) -> str:
+    """The scope and definitions footer an allowed data answer is missing (live eval 1).
+
+    Only for answers built on data (a query ran this turn, or follow-up context from an
+    earlier one); never for a comment reply or a code-owned template."""
+    if state.get("status") == "comment" or state.get("label") == "comment":
+        return ""
+    if not (ctx.sql_turn.ledger or state.get("prior_ledger")) or fixed_kind(text):
+        return ""
+    memory = SessionMemory.from_state(state.get("memory"))
+    return assumptions_footer(
+        text, state.get("message") or "",
+        brands=ctx.profile.brands, all_products=ctx.profile.all_products,
+        churn_restated=memory.churn_definition is not None,
+    )  # fmt: skip
+
+
 def _finalize(ctx: TurnContext, state: TurnState) -> dict[str, Any]:
     label = state.get("label", "")
     update: dict[str, Any] = {}
@@ -1380,6 +1402,10 @@ def _finalize(ctx: TurnContext, state: TurnState) -> dict[str, Any]:
             if humanized != text:
                 codes.add(SCHEMA_TERMS_REWRITTEN)
             text = humanized
+            footer = _assumptions(ctx, state, text)
+            if footer:
+                text = f"{text.rstrip()}\n\n{footer}"
+                codes.add(ASSUMPTIONS_ADDED)
         ctx.guard_codes |= codes
         update["outcome"] = "answered" if verdict.allowed else "blocked"
         _record(ctx, "guard", "output", verdict="allow" if verdict.allowed else "block",

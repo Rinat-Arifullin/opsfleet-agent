@@ -86,7 +86,7 @@ REFUSALS: Final[dict[str, str]] = {
         "I can't process encoded or obfuscated content. Please ask your question in plain English."
     ),
     PII_REQUEST: (
-        "I can't share personal data such as customer names, emails, phone numbers or "
+        "I can't share customers' personal details such as names, contact details or "
         "addresses. I can give you aggregated results or anonymised customer IDs instead, "
         'for example "top 5 customers by revenue, by customer ID".'
     ),

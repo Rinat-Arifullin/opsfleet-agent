@@ -266,6 +266,32 @@ def test_numbers_hook_compares_in_code():
     assert not all(ok for _, ok, _ in R.check_expect(c, R.SutResult(facts={"x": 120}), None))
 
 
+def test_must_contain_list_item_is_case_insensitive_any_of():
+    # live eval 1 followup_breakdown: "12-month revenue" must satisfy the 12-month window check
+    c = R.Case("golden/a", "golden", expect={"must_contain": ["Top 3", ["12 months", "12-month"]]})
+    for text in ("Top 3 categories, 12-MONTH revenue", "top 3 over the last 12 months"):
+        assert all(ok for _, ok, _ in R.check_expect(c, R.SutResult(text=text), None))
+    res = R.check_expect(c, R.SutResult(text="top 3 categories, Oct 2025 - Sep 2026"), None)
+    assert [(n, ok) for n, ok, _ in res] == [
+        ("must_contain:top 3", True), ("must_contain:12 months | 12-month", False),
+    ]  # fmt: skip
+
+
+def test_must_contain_rejects_an_empty_alternative_list():
+    c = R.Case("golden/a", "golden", expect={"must_contain": [[]]})
+    try:
+        R.check_expect(c, R.SutResult(text="x"), None)
+    except ValueError:
+        return
+    raise AssertionError("an empty alternative list must be refused")
+
+
+def test_bad_must_contain_item_is_a_usage_error(tmp_path):
+    write_case(tmp_path / "c", "golden/bad.yaml", "input: q\nexpect:\n  must_contain:\n  - []\n")
+    code, out = run(tmp_path, "--offline", cases=tmp_path / "c")
+    assert code == R.EXIT_REFUSED and "must_contain item" in out
+
+
 def test_bad_case_file_is_a_usage_error(tmp_path):
     write_case(tmp_path / "c", "golden/bad.yaml", "input: q\nbogus: 1\n")
     code, out = run(tmp_path, "--offline", cases=tmp_path / "c")

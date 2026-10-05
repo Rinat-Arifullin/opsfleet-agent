@@ -168,6 +168,11 @@ def _build_case(raw: dict[str, Any], case_id: str, suite: str, base_tags: list[s
     if bad:
         raise CaseError(f"{case_id}: unknown expect keys {sorted(bad)}")
     try:
+        for item in expect.get("must_contain") or []:
+            _alternatives(item)  # a bad item is a usage error at load, not a crash mid-run
+    except (TypeError, ValueError) as exc:
+        raise CaseError(f"{case_id}: {exc}") from None
+    try:
         matrix_mod.validate_fields(raw, case_id, EXPECT_KEYS)
     except matrix_mod.MatrixError as exc:
         raise CaseError(str(exc)) from None
@@ -383,6 +388,14 @@ def check_numbers(
     return out
 
 
+def _alternatives(item: str | list[str]) -> list[str]:
+    """A ``must_contain`` item: one phrase, or a list of case-insensitive alternatives."""
+    alts = [item] if isinstance(item, str) else list(item)
+    if not alts or not all(isinstance(a, str) and a for a in alts):
+        raise ValueError(f"must_contain item must be a phrase or a list of phrases: {item!r}")
+    return [a.lower() for a in alts]
+
+
 def check_expect(
     case: Case, res: SutResult, reference: Callable[[str], float] | None
 ) -> list[tuple[str, bool, str]]:
@@ -400,7 +413,8 @@ def check_expect(
         add("no_sql", not res.sql, f"{len(res.sql)} SQL statement(s) were run")
     text = res.text.lower()
     for s in e.get("must_contain", []):
-        add(f"must_contain:{s}", s.lower() in text, "text missing")
+        alts = _alternatives(s)  # a list item is any-of (live eval 1: "12 months" | "12-month")
+        add(f"must_contain:{' | '.join(alts)}", any(a in text for a in alts), "text missing")
     for s in e.get("must_not_contain", []):
         add(f"must_not_contain:{s}", s.lower() not in text, "forbidden text present")
     for t in e.get("must_not_call", []):

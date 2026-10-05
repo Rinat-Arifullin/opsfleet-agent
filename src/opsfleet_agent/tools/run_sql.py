@@ -737,6 +737,7 @@ class RunSqlTool:
             cache_hit=cache_hit,
             sql=query.sql,
             trace_sql=statement.sql,
+            model_sql=args.sql,
             purpose=args.purpose,
             statement_key=statement_key,
         )
@@ -880,6 +881,10 @@ class RunSqlTool:
                     # what the writer and verifier see: the scoped statement before
                     # differencing injection (stable across fingerprint history, L-c)
                     "sql": outcome.trace_sql,
+                    # live eval followup_why_march: prior queries are shown to the model as
+                    # it wrote them; the scoped form (@scope_brands, UNNEST, __p CTEs) was
+                    # copied back and refused by the policy
+                    "model_sql": outcome.model_sql,
                     "purpose": self.scrub(outcome.purpose),
                     "query_id": outcome.query_id,
                     "rows": len(outcome.rows),
@@ -1003,6 +1008,7 @@ class _Success:
     purpose: str
     statement_key: str
     hint: str | None = None
+    model_sql: str = ""  # the model's own statement, before the scope rewrite (shown back)
 
     def envelope(self, elapsed_s: float) -> dict[str, Any]:
         data: dict[str, Any] = {

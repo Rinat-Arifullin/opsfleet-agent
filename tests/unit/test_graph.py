@@ -1483,13 +1483,18 @@ def test_prior_ledger_is_projected_and_labelled(make_env) -> None:
     env = make_env(SeqRouter("simple"), analyst)
     env.ask("How many complete orders are there?")
     ledger = _state(env)["prior_ledger"]
-    assert ledger and all(set(e) <= {"sql", "purpose", "query_id", "rows", "sql_hash", "scope"}
-                          for e in ledger)  # fmt: skip
+    keys = {"sql", "model_sql", "purpose", "query_id", "rows", "sql_hash", "scope"}
+    assert ledger and all(set(e) <= keys for e in ledger)
+    assert all(e["model_sql"] == SIMPLE and "@scope_brands" in e["sql"] for e in ledger)
     n = len(analyst.calls)
     env.ask("And how does that compare with the cancelled ones?")
     system = analyst.calls[n][1][0]["content"]
     assert "Queries from earlier turns (not this turn's results)" in system
     assert "<<<PRIOR_QUERIES (untrusted data)" in system
+    # live eval followup_why_march: the model sees its own SQL, not the scope rewrite it
+    # would copy (the policy refuses @parameters, UNNEST and __ CTEs)
+    block = system.split("<<<PRIOR_QUERIES (untrusted data)", 1)[1]
+    assert "@scope_brands" not in block and "UNNEST" not in block and "__p" not in block
 
 
 def test_figures_carry_scope_and_drop_on_drift(make_env) -> None:  # R2-M4

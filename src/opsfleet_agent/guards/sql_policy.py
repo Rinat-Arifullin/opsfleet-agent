@@ -139,6 +139,7 @@ __all__ = [
     "PII_COLUMNS",
     "PROJECT",
     "QI_COLUMNS",
+    "SCOPE_PATTERN_HINT",
     "SOURCE_NOT_ALLOWED_HINT",
     "PolicyDecision",
     "Rule",
@@ -250,6 +251,18 @@ def allowed_sources_text() -> str:
 SOURCE_NOT_ALLOWED_HINT: Final = (
     f"that table or source is not available. Rewrite the query using only these tables of "
     f"{PROJECT}.{DATASET} and only their listed columns: {allowed_sources_text()}"
+)
+
+#: Live eval followup_why_march: the model copied the scope rewrite it saw in an earlier
+#: query (an ``@scope_brands`` parameter, ``UNNEST`` and ``__p``-style CTEs). The refusal
+#: is correct, the scope is code's job; this fixed hint says exactly what to write instead.
+SCOPE_PATTERN_HINT: Final = (
+    "query parameters (@name), UNNEST and CTE names starting with two underscores are not "
+    "available. Do not filter by brand yourself: the brand scope is applied automatically "
+    "to every query. Query the tables directly, for example join order_items to products "
+    "on products.id = order_items.product_id, and filter only on real columns such as "
+    "order_items.created_at and order_items.status. Allowed tables and columns: "
+    f"{allowed_sources_text()}"
 )
 
 
@@ -380,15 +393,16 @@ _ALLOW: Final = PolicyDecision(allowed=True, reason_code=Rule.OK, hint="")
 
 
 class _Reject(Exception):
-    """Internal: carries the rule only, never SQL text."""
+    """Internal: carries the rule (and optionally a fixed hint constant), never SQL text."""
 
-    def __init__(self, rule: Rule) -> None:
+    def __init__(self, rule: Rule, hint: str | None = None) -> None:
         super().__init__(rule.value)
         self.rule = rule
+        self.hint = hint
 
 
-def _deny(rule: Rule) -> PolicyDecision:
-    return PolicyDecision(allowed=False, reason_code=rule, hint=_HINTS[rule])
+def _deny(rule: Rule, hint: str | None = None) -> PolicyDecision:
+    return PolicyDecision(allowed=False, reason_code=rule, hint=hint or _HINTS[rule])
 
 
 # --------------------------------------------------------------------------- allowlists
@@ -473,7 +487,7 @@ def check_sql(sql: str) -> PolicyDecision:
     try:
         _check(sql)
     except _Reject as rej:
-        return _deny(rej.rule)
+        return _deny(rej.rule, rej.hint)
     except (SqlglotError, RecursionError):
         return _deny(Rule.SQL_SYNTAX)
     except Exception:  # noqa: BLE001 - fail closed on any analyser bug
@@ -492,7 +506,7 @@ def check_aggregate_only(sql: str) -> PolicyDecision:
         if _Analyzer(_parse(sql)).returns_id_grain():
             raise _Reject(Rule.CUSTOMER_GRAIN)
     except _Reject as rej:
-        return _deny(rej.rule)
+        return _deny(rej.rule, rej.hint)
     except (SqlglotError, RecursionError):
         return _deny(Rule.SQL_SYNTAX)
     except Exception:  # noqa: BLE001 - fail closed on any analyser bug
@@ -632,9 +646,9 @@ def _visible_ctes(table: exp.Table) -> set[str]:
 
 def _check_sources(root: exp.Expression) -> None:
     for node in _iter_nodes(root):
-        if isinstance(node, (exp.Parameter, exp.Placeholder, exp.SessionParameter)):
-            raise _Reject(Rule.SOURCE_NOT_ALLOWED)
-        if isinstance(node, (exp.Unnest, exp.Lateral, exp.TableSample)):
+        if isinstance(node, (exp.Parameter, exp.Placeholder, exp.SessionParameter, exp.Unnest)):
+            raise _Reject(Rule.SOURCE_NOT_ALLOWED, SCOPE_PATTERN_HINT)
+        if isinstance(node, (exp.Lateral, exp.TableSample)):
             raise _Reject(Rule.SOURCE_NOT_ALLOWED)
         if isinstance(node, exp.Table):
             _check_table(node)
@@ -654,7 +668,8 @@ def _check_table(table: exp.Table) -> None:
             raise _Reject(Rule.SOURCE_NOT_ALLOWED)
         return
     if name not in ALLOWED_TABLES and name not in _visible_ctes(table):
-        raise _Reject(Rule.SOURCE_NOT_ALLOWED)
+        hint = SCOPE_PATTERN_HINT if name.startswith("__") else None
+        raise _Reject(Rule.SOURCE_NOT_ALLOWED, hint)
 
 
 def _check_ctes(root: exp.Expression) -> None:
@@ -664,7 +679,9 @@ def _check_ctes(root: exp.Expression) -> None:
             raise _Reject(Rule.RECURSIVE_CTE)
         if isinstance(node, exp.CTE):
             name = node.alias
-            if not name or name.lower() in reserved or name.startswith("__"):
+            if name and name.startswith("__"):
+                raise _Reject(Rule.CTE_SHADOWS_TABLE, SCOPE_PATTERN_HINT)
+            if not name or name.lower() in reserved:
                 raise _Reject(Rule.CTE_SHADOWS_TABLE)
             alias = node.args.get("alias")
             if isinstance(alias, exp.TableAlias) and alias.columns:

@@ -75,8 +75,9 @@ CAPABILITIES_TEXT: Final = (
     "- compare periods, segments and trends;\n"
     "- write a report and save it to your library when you confirm;\n"
     "- list, open, search and delete your saved reports.\n"
-    "I don't have inventory, warehouse, marketing spend or website visit data, I never share "
-    "personal details about individual customers, and I work in English only."
+    "I don't have inventory, warehouse, marketing spend or website visit data, I don't share "
+    "customers' personal details such as names, contact details or addresses, "
+    "and I work in English only."
 )
 GREETING_TEMPLATE: Final = (
     "Hello! I can help you analyse the store's e-commerce data, for example revenue, "

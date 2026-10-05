@@ -13,7 +13,7 @@ expect:
   outcome: answered
   must_contain:
   - top 3
-  - 12 months
+  - [12 months, 12-month, twelve months]
   judge:
     min_score: 4
 estimate:
