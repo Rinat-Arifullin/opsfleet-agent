@@ -532,10 +532,10 @@ The checkpointer exists **before** 17 (M-3). Role subgraphs are compiled with `c
 - `prompts/report_writer.md`
 - `tests/unit/test_reports.py`
 **Done criteria**:
-- [ ] Named tests: `test_report_saved_with_owner_and_session`, `test_save_only_on_confirm`, `test_report_cancel_saves_nothing`, `test_revise_starts_new_turn`, `test_report_save_idempotent`, `test_resume_reshows_draft`, `test_report_schema_required_sections`, `test_save_last_answer_as_report`, `test_report_store_atomic_and_concurrent`
-- [ ] The report body passes the output guard (12) before it is saved, and is wrapped as untrusted when it is read back (SEC-13)
-- [ ] Red-team case: a delete attempt while a report draft is pending is refused, and the draft stays pending (TR-14)
-- [ ] [std]
+- [x] Named tests: `test_report_saved_with_owner_and_session`, `test_save_only_on_confirm`, `test_report_cancel_saves_nothing`, `test_revise_starts_new_turn`, `test_report_save_idempotent`, `test_resume_reshows_draft`, `test_report_schema_required_sections`, `test_save_last_answer_as_report`, `test_report_store_atomic_and_concurrent`
+- [x] The report body passes the output guard (12) before it is saved, and is wrapped as untrusted when it is read back (SEC-13)
+- [x] Red-team case: a delete attempt while a report draft is pending is refused, and the draft stays pending (TR-14)
+- [x] [std]
 **Effort**: XL (3) · **Depends on**: 4, 14b, 15 · **Risk**: high. **Rollback:** the save path stays disabled (reports are shown but not saved), and the owner is told.
 
 ## Iteration 18: Report list, view, substring search `[PARALLEL OK with 19]`
