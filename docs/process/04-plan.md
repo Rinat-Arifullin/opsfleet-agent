@@ -775,9 +775,9 @@ The reply that follows is routed to the input guard as a new turn. This takes ov
 - `evals/calibration/run.py`
 - `tests/unit/test_calibration.py`
 **Done criteria**:
-- [ ] Named test: `test_judge_calibration_gate_blocks_on_low_agreement`
-- [ ] The calibration status is written where `gates.py` reads it
-- [ ] [std]
+- [x] Named test: `test_judge_calibration_gate_blocks_on_low_agreement`
+- [x] The calibration status is written where `gates.py` reads it
+- [x] [std]
 **Effort**: M (1) · **Depends on**: 20 (with the T-1 labels), 27, 29 · **Risk**: medium (owner labels)
 
 ## Iteration 31: Golden seed and top-k retrieval
