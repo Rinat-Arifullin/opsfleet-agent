@@ -42,7 +42,7 @@ import unicodedata
 import uuid
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Annotated, Any, Final, TypedDict
 
@@ -409,6 +409,7 @@ class GraphServices:
     sleep: Callable[[float], object] = time.sleep
     jitter: Callable[[float], float] | None = None
     data_window: Callable[[], tuple[date, date]] | None = None
+    today: Callable[[], date] = lambda: datetime.now(UTC).date()  # D-174: the prompt's "Today"
     reports: Any = None  # iteration 17: store.reports.ReportStore; None = saving disabled
     # D-96: brands for the context name check (assemble_context drops an item naming a known
     # brand outside the scope). Offline source until the catalogue query lands (OD-12).
@@ -876,6 +877,7 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
 
     def _analyst(role: str, state: TurnState) -> dict[str, Any]:
         lo, hi = sv.window()
+        today = sv.today().isoformat()
         a = _assembled(state)  # iteration 15: scope-filtered, fenced context (FR-76)
         tables = schema_section(sv.cache)  # metadata cache only: no query, no bytes
 
@@ -885,6 +887,7 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
                 window=(lo.isoformat(), hi.isoformat()),
                 prior_queries=ctx.sql_turn.ledger if role == DEEP else (),
                 context_section=a.prompt_section(), extra_rules=extra, tables=tables,
+                today=today,
             )  # fmt: skip
             return [
                 {"role": "system", "content": system},

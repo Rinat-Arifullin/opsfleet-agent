@@ -99,7 +99,7 @@ There are 4 LLM roles plus the light path. The HLD's fifth role, the Library age
 | `config/models.yaml` | Model ids per role, limits, `small_cell_k: 5`, quotas, local-provider settings. It also lists `library_agent` and `summary` roles, which no code uses |
 | `config/profiles.yaml` | Demo profiles: `analyst_a` (one brand), `analyst_b` (two brands), `ceo_demo` (`all`) |
 | `config/golden_seed.yaml` | Golden Bucket seed |
-| `prompts/` | `analyst.md`, `router.md`, `report_writer.md`, `persona.md` (versioned in-file: analyst-v3, router-v3, report-writer-v1) |
+| `prompts/` | `analyst.md`, `router.md`, `report_writer.md`, `persona.md` (versioned in-file: analyst-v4, router-v3, report-writer-v1) |
 | `evals/` | Runner, live SUT, gates, judge, profile matrix, Langfuse dataset tool, case folders (§7) |
 | `tests/unit/`, `tests/live/` | Offline unit tests (no network) and `@pytest.mark.live` tests |
 
@@ -330,6 +330,7 @@ Full rows are in `docs/process/OWNER-QUEUE.md` and the ADRs are in `docs/decisio
 | D-170 | Aggregate-only mode lasts the whole session | — |
 | D-172 | Bands under 5 customers are merged into one row, then with the smallest band of 5 or more if still too small (fixed label `other bands`, counts and sums added, shares and averages empty). Bands that may share customers (`UNION`, a source that is not one row per customer) or are labelled by a raw value are hidden instead; window columns that could reveal them are emptied; `QUALIFY` and row-gating subqueries are refused | Summing counts of overlapping bands could overcount, a raw label would list each customer's value, and an order-dependent partner would let a re-sorted query be subtracted from the first, so the merge is canonical and only for provably disjoint, fixed-name bands |
 | D-173 | Once a primary model has used up its retries on provider errors (429, 5xx, timeout), later calls in the same turn that have a fallback go straight to it, once, with no retries (`LLMWrapper._degraded`); a limiter timeout or a budget stop does not count, and the next turn starts on the primary again | Going back to a primary that just failed spent three attempts per round on the same error and ran the analyst out of its sub-cap before the last query; every attempt still counts against the budget |
+| D-174 | The analyst prompt states today's UTC date in Scope (`GraphServices.today`, injectable) and analyst-v4 makes relative periods count from it, with a to-date period also bounded above by the day after today. Grounding reads a four-digit number before a period word ("2026 is a partial period", "2026 YTD") as a year | The dataset holds rows dated in the future, so an open-ended "this year" overstated revenue by about 1.6%; and a plain year sentence was flagged as an ungrounded figure and labelled the whole answer an estimate |
 
 ### Routing and roles
 | Decision | What | Why |

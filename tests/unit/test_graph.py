@@ -138,6 +138,7 @@ class Env:
             sleep=lambda s: None,
             jitter=lambda b: 0.0,
             data_window=lambda: WINDOW,
+            today=lambda: WINDOW[1],
         )
         from langgraph.checkpoint.memory import InMemorySaver
 
@@ -828,6 +829,26 @@ def test_grounding_glued_identifiers_and_times_are_not_numbers(draft) -> None:  
 )
 def test_grounding_real_year_contexts_still_pass(draft) -> None:  # L4
     assert _g(draft, [fig("q", ["n"], [[100.0]])]).unmatched == ()
+
+
+@pytest.mark.parametrize(
+    "draft",
+    [
+        "Note that 2026 is a partial period.",
+        "2025 was a full year.",
+        "2024 is the current year.",
+        "Revenue 2026 YTD rose.",
+        "Orders 2026 year-to-date rose.",
+    ],
+)
+def test_grounding_year_before_a_period_word_is_a_date(draft) -> None:
+    assert _g(draft, [fig("q", ["n"], [[100.0]])]).unmatched == ()
+
+
+def test_grounding_year_before_a_period_word_must_be_in_window() -> None:
+    f = [fig("q", ["n"], [[100.0]])]
+    assert _g("Note that 2093 is a partial period.", f).unmatched == ("date",)
+    assert _g("We sold 2023 units, a partial period.", f).unmatched == ("2023",)
 
 
 @pytest.mark.parametrize("draft", ["2024-00-15", "2024-13-01", "2024-02-30", "Mar 99 2024"])
@@ -1589,3 +1610,12 @@ def test_role_span_carries_error_class_on_failure(make_env) -> None:
     assert spans[0]["status"] == "failed"
     assert spans[0]["error_class"] == "NonRetryableLLMError"
     assert "SENTINEL" not in json.dumps(spans, default=str)  # class name only, no content
+
+
+def test_analyst_prompt_states_today_from_the_injected_clock(make_env) -> None:  # D-174
+    analyst = Scripted(ModelTurn("ok"))
+    make_env(Router("simple"), analyst).ask("How many orders were placed this year?")
+    system = analyst.calls[0][1][0]["content"]
+    scope = system.split("## Scope", 1)[1].split("##", 1)[0]
+    assert f"Today is {WINDOW[1].isoformat()} (UTC)." in scope
+    assert "day after Today" in " ".join(system.split())  # the to-date upper bound rule

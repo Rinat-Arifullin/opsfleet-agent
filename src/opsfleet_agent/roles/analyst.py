@@ -91,7 +91,7 @@ QUICK: Final = "quick_analyst"
 DEEP: Final = "deep_analyst"
 ESCALATE_SENTINEL: Final = "[[ESCALATE]]"
 _SENTINEL_RE: Final = re.compile(r"\[\[\s*escalate\s*\]\]", re.IGNORECASE)
-ANALYST_PROMPT_VERSION: Final = "analyst-v3"
+ANALYST_PROMPT_VERSION: Final = "analyst-v4"
 QUICK_ESCALATE_FAILED_SQL: Final = 2
 QUICK_ESCALATE_CALLS: Final = 4
 MAX_TOOL_CALLS_PER_STEP: Final = 4
@@ -232,6 +232,7 @@ def build_system_prompt(
     context_section: str = "",
     extra_rules: Sequence[tuple[str, str]] = (),
     tables: str = "",
+    today: str = "",
 ) -> str:
     """Code-built safety preamble first, then the rules, then the fenced persona (layers 1..7).
 
@@ -239,10 +240,13 @@ def build_system_prompt(
     restatement, prior queries, store blocks). It goes after the rules, never before them.
     ``extra_rules`` are further code-owned sections, e.g. the D-156 echo retry rule.
     ``tables`` is the code-built schema block (``schema_section``); empty leaves it out.
+    ``today`` (ISO, UTC) anchors relative periods (D-174); empty leaves it out.
     """
     body = prompt if prompt is not None else load_analyst_prompt()
     mode = _MODE_TEXT[role]
     scope = f"Your data access: {scope_label}. The data covers {window[0]} to {window[1]}."
+    if today:
+        scope += f" Today is {today} (UTC)."
     sections = [
         ("Scope", scope),
         ("Role", mode),

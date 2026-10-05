@@ -223,3 +223,11 @@ def test_light_model_reply_is_rewritten(make_env) -> None:
     assert "order_items" not in out.text
     spans = _guard_output_spans(env)
     assert spans and SCHEMA_TERMS_REWRITTEN in spans[-1]["rule_hits"]
+
+
+def test_scope_states_today_only_when_given() -> None:  # D-174
+    window = (date(2019, 1, 1).isoformat(), date(2026, 9, 30).isoformat())
+    kw = {"scope_label": "Acme", "persona": builtin_persona(), "window": window}
+    assert "Today is" not in build_system_prompt(DEEP, **kw)
+    system = build_system_prompt(DEEP, today="2026-10-05", **kw)
+    assert "Today is 2026-10-05 (UTC)." in system.split("## Role", 1)[0]

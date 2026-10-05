@@ -30,8 +30,8 @@ A draft number is grounded when it matches a grounding value:
 
 Dates are not numbers: each must be a valid calendar date or month inside the data window,
 otherwise it counts as unmatched. Small bare integers (10 or less, no unit) are prose ("top 5")
-and are ignored. A four-digit number is a year after a strong date word (Q1, FY, a month) or in a
-table key;
+and are ignored. A four-digit number is a year after a strong date word (Q1, FY, a month), in a
+table key or before a period word ("2026 is a partial period", "2026 YTD");
 after a weak one ("in", "since") it passes as an in-window year OR when it is a grounded number.
 A pure digit run glued to a letter ("A12345", "7f3a91c2") or a time ("10:30") is an identifier,
 skipped, unless the glue is a known currency, magnitude or count ("eur98765", "98765bnUSD"); a
@@ -110,6 +110,13 @@ _YEAR_RES: Final = (
     re.compile(rf"(?<![\w.,$])fy(?P<y>{_YEAR}){_YEAR_TAIL}", re.IGNORECASE),
     re.compile(rf"\((?P<y>{_YEAR})\)"),
     re.compile(rf"(?m)^[ \t|*•-]*(?P<y>{_YEAR})[ \t]*(?:[|:]|-\s)"),
+    # or before a period word: "2026 is a partial period", "2025 was a full year", "2026 YTD"
+    re.compile(
+        rf"(?<![\w.,$])(?P<y>{_YEAR})\s+(?:(?:is|was)\s+(?:(?:a|an|the|still)\s+)?"
+        rf"(?:(?:partial|incomplete|full|complete|current)\s+)?(?:year|period)\b"
+        rf"|ytd\b|year[- ]to[- ]date\b)",
+        re.IGNORECASE,
+    ),
 )
 # after a weak date word the number is ambiguous ("in 2024 sales rose", "since 2023 customers
 # placed 1,234"): it passes as an in-window year OR when it is a grounded number
