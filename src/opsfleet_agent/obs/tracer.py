@@ -92,6 +92,8 @@ SPAN_FIELDS: dict[str, tuple[str, ...]] = {
     "tool": (
         "tool", "outcome", "error_code", "args_keys", "rows", "truncated",
         "search_path",  # iteration 37: ranked | substring | substring_fallback
+        # iteration 38: + hybrid | hybrid_substring; the embedding was unavailable (degraded)
+        "semantic_unavailable",
     ),
     "guard": ("rule_hits", "verdict", "rule", "redaction_count", "grounding_flags"),
     "sql": (

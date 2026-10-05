@@ -52,6 +52,7 @@ from opsfleet_agent.reports.matcher import (
     session_candidates,
 )
 from opsfleet_agent.store import audit as A
+from opsfleet_agent.store.vector_schema import VECTOR_KEY, VECTOR_TABLE
 
 logger = logging.getLogger(__name__)
 
@@ -697,6 +698,13 @@ def check_tool_request(
     return req, None
 
 
+def _has_table(conn: Any, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM main.sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone()
+    return row is not None
+
+
 def setup_delete(conn: Any, audit: Any, store: Any, *, clock: Callable[[], float] = time.time,
                  key: DeleteKey | None = None) -> DeleteService | None:  # fmt: skip
     """Register the ``saved_report`` kind on the live schema and build the service. Any
@@ -707,10 +715,13 @@ def setup_delete(conn: Any, audit: Any, store: Any, *, clock: Callable[[], float
         # Iteration 37: when the FTS index exists, its rows are deleted (and the index
         # optimized) in the same audited transaction; a report must never survive as tokens.
         fts_deps = ((fts.FTS_TABLE, fts.FTS_KEY),) if fts.has_index(conn) else ()
+        # Iteration 38: the report's vector row is a plain declared dependent: deleted in the
+        # same audited transaction (audit record first) and counted exactly.
+        vec_deps = ((VECTOR_TABLE, VECTOR_KEY),) if _has_table(conn, VECTOR_TABLE) else ()
         A.register_deletable(
             A.DeletableKind(
                 KIND, "saved_report", "report_id", owner_column="owner_user_id",
-                fts_dependents=fts_deps,
+                dependents=vec_deps, fts_dependents=fts_deps,
             ),
             conn=conn,
         )  # fmt: skip

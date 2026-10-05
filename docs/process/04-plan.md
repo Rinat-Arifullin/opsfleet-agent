@@ -918,9 +918,9 @@ These iterations run in the reverse of the drop order: the most protected item (
 - `src/opsfleet_agent/reports/semantic.py`
 - `tests/unit/test_semantic.py`
 **Done criteria**:
-- [ ] Named tests: `test_search_semantic_degrades_to_fts`, `test_search_semantic_owner_and_scope`
-- [ ] The vector table is added to the parametrized residue test of 23
-- [ ] [std]
+- [x] Named tests: `test_search_semantic_degrades_to_fts`, `test_search_semantic_owner_and_scope`
+- [x] The vector table is covered by a residue test (zero rows, no vector bytes in the raw DB/WAL after a checkpoint); like 37's, it lives in `tests/unit/test_semantic.py` until 23's `test_residue.py` exists (see iter38-ods.md D-214)
+- [x] [std]
 **Effort**: M (1) · **Depends on**: 31, 37 · **Risk**: medium
 
 ## Iteration 39: Preferences, P (drop 1)

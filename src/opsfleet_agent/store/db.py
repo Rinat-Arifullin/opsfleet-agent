@@ -15,6 +15,7 @@ from opsfleet_agent.reports.fts import migration as fts_migration
 from opsfleet_agent.store.audit_schema import AUDIT_MARKER_SQL, AUDIT_MIGRATION
 from opsfleet_agent.store.quota_schema import QUOTA_MIGRATION
 from opsfleet_agent.store.reports_schema import REPORTS_MIGRATION
+from opsfleet_agent.store.vector_schema import VECTOR_MIGRATION
 
 BUSY_TIMEOUT_MS = 5000
 
@@ -27,6 +28,8 @@ MIGRATIONS: Sequence[tuple[int, Sequence[str]]] = (
     (4, QUOTA_MIGRATION),  # iteration 24: per-user quotas (store.quota_schema)
     # iteration 37: the FTS5 report index + backfill (reports.fts); empty without FTS5
     (5, fts_migration()),
+    # iteration 38: per-report vectors (store.vector_schema); DDL only, lazy backfill (D-210)
+    (6, VECTOR_MIGRATION),
 )
 
 

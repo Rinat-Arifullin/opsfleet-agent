@@ -18,6 +18,10 @@ update is :meth:`ReportStore.rename` (iteration 33), owner-checked and guarded.
 
 Iteration 37 (AC-21.13): the FTS5 index (``reports.fts``) is written in the same transaction
 as the insert and the rename; :meth:`ReportStore.ranked_search` is owner-filtered in SQL.
+
+Iteration 38 (AC-21.13/14): an optional :attr:`ReportStore.semantic` index
+(``reports.semantic.SemanticIndex``) embeds a report AFTER its save or rename transaction has
+committed; an embedding failure is logged and counted, never fails the save (D-209).
 """
 
 from __future__ import annotations
@@ -35,6 +39,7 @@ from opsfleet_agent.reports import fts
 from opsfleet_agent.reports.schema import missing_sections
 from opsfleet_agent.store.db import StoreError, write_tx
 from opsfleet_agent.store.reports_schema import REPORTS_MIGRATION
+from opsfleet_agent.store.vector_schema import VECTOR_MIGRATION
 
 __all__ = ["MAX_BODY_CHARS", "ReportError", "ReportStore", "SavedReport", "ensure_schema"]
 
@@ -77,10 +82,13 @@ _S_COLS: Final = ", ".join("s." + c.strip() for c in _COLS.split(","))
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    """Idempotent (the same DDL as migrations 3 and 5, for a connection not opened by
-    open_store). The FTS index is created (and backfilled) only when this SQLite supports it."""
+    """Idempotent (the same DDL as migrations 3, 5 and 6, for a connection not opened by
+    open_store). The FTS index is created (and backfilled) only when this SQLite supports it;
+    the vector table is DDL only (vectors are backfilled lazily by search, D-210)."""
     with write_tx(conn):
         for stmt in REPORTS_MIGRATION:
+            conn.execute(stmt)
+        for stmt in VECTOR_MIGRATION:
             conn.execute(stmt)
         if fts.fts5_supported() and not fts.has_index(conn):
             for stmt in fts.FTS_MIGRATION:
@@ -120,9 +128,29 @@ def _as_text(value: Any) -> str:
 
 
 class ReportStore:
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: sqlite3.Connection, semantic: Any = None) -> None:
         self.conn = conn
+        # reports.semantic.SemanticIndex or None (semantic search off; FTS only)
+        self.semantic = semantic
         ensure_schema(conn)
+
+    def _embed(self, rec: SavedReport) -> None:
+        """Embed one report outside any transaction. Never raises (D-209)."""
+        if self.semantic is None:
+            return
+        try:
+            self.semantic.index(self.conn, rec)
+        except Exception:  # noqa: BLE001 - SemanticIndex.index already never raises
+            pass
+
+    def semantic_search(
+        self, owner_user_id: str, candidates: Sequence[SavedReport], text: str
+    ) -> list[tuple[str, float]] | None:
+        """Cosine ranking of ``candidates`` (the owner's in-scope rows) for ``text``; None when
+        semantic search is off or unavailable (the caller degrades to FTS / word match)."""
+        if self.semantic is None:
+            return None
+        return self.semantic.search(self.conn, str(owner_user_id), candidates, text)
 
     def save(
         self,
@@ -206,6 +234,8 @@ class ReportStore:
             rec = _row(row)
             if created and fts.has_index(self.conn):  # same transaction: index and row agree
                 fts.index_report(self.conn, rec.report_id, rec.title, rec.body_markdown, rec.tags)
+        if created:  # iteration 38: after the commit, never inside it
+            self._embed(rec)
         return rec, created
 
     def get(self, report_id: str, owner_user_id: str) -> SavedReport | None:
@@ -247,7 +277,11 @@ class ReportStore:
                 f"SELECT {_COLS} FROM saved_report WHERE report_id=? AND owner_user_id=?",
                 (str(report_id), str(owner_user_id)),
             ).fetchone()
-        return _row(row) if row else None
+        if row is None:
+            return None
+        rec = _row(row)
+        self._embed(rec)  # iteration 38: re-embed the new title, after the commit
+        return rec
 
     def ranked_search(self, owner_user_id: str, match: str) -> list[SavedReport] | None:
         """Iteration 37 (AC-21.13): the owner's reports matching the FTS5 expression ``match``

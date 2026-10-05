@@ -246,12 +246,12 @@ def test_migration_backfills_index(tmp_path, monkeypatch) -> None:
     b = _add(store, "k2", owner="analyst_b", title="Medlar other")
     assert not fts.has_index(conn)
     monkeypatch.undo()
-    assert db.migrate(conn) == 5
+    assert db.migrate(conn) == max(v for v, _ in db.MIGRATIONS)
     assert fts.has_index(conn) and _fts_ids(conn) == {a, b}
     store = ReportStore(conn)
     assert [e.report_id for e in _ranked(store, "medlar").entries] == [a]
     assert [e.report_id for e in _ranked(store, "fruit").entries] == [a]  # tags backfilled
-    assert db.migrate(conn) == 5 and len(_fts_ids(conn)) == 2  # idempotent
+    assert db.migrate(conn) == max(v for v, _ in db.MIGRATIONS) and len(_fts_ids(conn)) == 2
     conn.close()
 
 
@@ -308,10 +308,14 @@ def test_library_tool_search_mode(store) -> None:
         turn_id=TURN, user_message="find", tools_used=lambda: (), pending=None,
         request_delete=None, tracer=tracer,
     )  # fmt: skip
-    bad = tools["search_reports"]({"text": "kumquat", "mode": "semantic"})
+    bad = tools["search_reports"]({"text": "kumquat", "mode": "fuzzy"})
     assert "mode" in str(bad).lower() and rid not in str(bad)
     ok = tools["search_reports"]({"text": "kumquat", "mode": "ranked"})
     assert rid in str(ok)
     assert tracer.spans[-1][2]["search_path"] == "ranked"
-    tools["search_reports"]({"text": "kumquat"})
+    tools["search_reports"]({"text": "kumquat", "mode": "substring"})
     assert tracer.spans[-1][2]["search_path"] == "substring"
+    # iteration 38: the default is the hybrid mode; without an embedder it degrades to ranked
+    tools["search_reports"]({"text": "kumquat"})
+    assert tracer.spans[-1][2]["search_path"] == "ranked"
+    assert tracer.spans[-1][2]["semantic_unavailable"] is True

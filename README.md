@@ -285,7 +285,7 @@ with `/` is a command and never reaches the LLM. Any other line is a turn with i
 | `/exit` (or `exit`, `quit`) | Quit; prints the session id for `--resume` |
 | `/reports [words]` | List your saved reports, optionally filtered |
 | `/open <id \| n \| title>` | Show a saved report (by id, list number or title) |
-| `/search <words> [tag:x] [from:YYYY-MM-DD] [to:YYYY-MM-DD]` | Ranked full-text search (SQLite FTS5, bm25, best match first) over your reports' titles, bodies and tags; every word must match. Falls back to a word match if FTS5 is unavailable |
+| `/search <words> [tag:x] [from:YYYY-MM-DD] [to:YYYY-MM-DD]` | Hybrid search over your own in-scope reports, best match first: full-text (SQLite FTS5, bm25, every word must match) fused by Reciprocal Rank Fusion with meaning (Gemini embeddings of title, summary and tags), so a synonym also finds a report. Without embeddings it degrades to the full-text ranking, and without FTS5 to a word match |
 | `/rename <id \| n \| "title"> <new title>` | Rename one of your saved reports (at most 120 characters; audited) |
 | `/export <id \| n \| title> [name.md]` | Write a saved report as Markdown to `data/exports/` (no other folder; works with the LLM down; audited) |
 | `/retry` (or type "retry report") | Retry the last failed or unsaved report of this session: re-runs only the writer and verifier on the kept results, no new queries; at most 3 tries |
@@ -821,7 +821,7 @@ design.
 | User preferences (R4.1): set by the user, applied to formatting, kept across sessions | Validation code exists (`graph/memory.py`); no role calls `set_preference` yet, and there is no preferences store | architecture.md §6.4 |
 | Feedback triage CLI (R4.2): root-cause classes, `promote` to a Golden candidate, `add-eval` | Feedback rows carry a triage state; the CLI is not built, so triage is done by reading `/trace` and editing `config/golden_seed.yaml` or the eval cases by hand | architecture.md §6.4 |
 | Library agent (separate LLM role for the report library) | Built: natural-language library questions go to the Library agent (list, search, view, rename, export, delete preview, preferences; no SQL). It cannot save a report; saving goes through Save / Revise / Cancel | [architecture.md §4.0](docs/architecture.md) |
-| Semantic report search | Not built; `/search` is ranked full-text (FTS5 bm25) plus `tag:`/`from:`/`to:` | architecture.md §6.3.2 |
+| Semantic report search | Built as hybrid search (FTS5 bm25 + embeddings, RRF k=60) over a per-report vector table in SQLite with a brute-force cosine scan over at most 200 of the owner's reports; no vector index or ANN service | architecture.md §6.3.2 |
 | `retry report` (rewrite from the stored evidence, no SQL) | Not built | architecture.md §2.3 |
 | `/export`, report rename | `/export` is a stub | architecture.md §6.3.1 |
 | Admin commands for access and persona changes in the REPL | Audit-first APIs exist; not wired to the REPL | technical.md §1.5 |

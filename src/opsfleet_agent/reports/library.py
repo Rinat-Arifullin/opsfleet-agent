@@ -36,6 +36,7 @@ from opsfleet_agent.reports.matcher import (
     owner_matches,
     owner_rows,
 )
+from opsfleet_agent.reports.semantic import rrf_fuse
 from opsfleet_agent.store.reports import MAX_BODY_CHARS, MAX_LIST, SavedReport
 
 __all__ = [
@@ -61,7 +62,10 @@ __all__ = [
 ]
 
 MAX_RESULTS: Final = 20
-SEARCH_MODES: Final = ("substring", "ranked")
+# iteration 38: "semantic" = hybrid (FTS bm25 ranks fused with cosine ranks by RRF, D-211)
+SEARCH_MODES: Final = ("substring", "ranked", "semantic")
+# paths that are ordered best match first (the rest are newest first)
+RANKED_PATHS: Final = frozenset({"ranked", "hybrid", "hybrid_substring"})
 MAX_TAGS: Final = 5
 MAX_ID_CHARS: Final = 64
 TITLE_CHARS: Final = 120
@@ -108,8 +112,11 @@ class ListResult:
     total: int  # matches among the scanned reports (the owner's own only)
     truncated_scan: bool  # the owner has more reports than were scanned
     # iteration 37: "ranked" (FTS5 bm25), "substring", or "substring_fallback" (ranked was
-    # asked for but the index is missing or refused the query)
+    # asked for but the index is missing or refused the query); iteration 38: "hybrid" (FTS
+    # + semantic, RRF) or "hybrid_substring" (word match + semantic, no FTS index)
     path: str = "substring"
+    # iteration 38: semantic was asked for but the embedding was unavailable (degraded)
+    semantic_unavailable: bool = False
 
 
 @dataclass(frozen=True)
@@ -205,7 +212,14 @@ def search_reports(
     Iteration 37 (AC-21.13): ``mode="ranked"`` with text uses the FTS5 index (every word must
     match, stemmed, over title, body and tags), best bm25 first, over the same owner rows; the
     scope, tag and date filters apply before the limit. Without an index it falls back to the
-    substring search (``path="substring_fallback"``)."""
+    substring search (``path="substring_fallback"``).
+
+    Iteration 38 (AC-21.13/14): ``mode="semantic"`` with text is the hybrid search. The
+    lexical list (FTS ranked, or word match without an index) and a cosine list are fused by
+    Reciprocal Rank Fusion (k=60). The cosine list is computed only over the owner's rows that
+    already passed the scope, tag and date filters (scope is filtered before scoring, never
+    after). When the embedding is unavailable it degrades to the ranked / word-match result
+    with ``semantic_unavailable=True``; ``path`` says which ran (never the query text)."""
     if mode not in SEARCH_MODES:
         raise LibraryError("unknown search mode")
     try:
@@ -222,7 +236,7 @@ def search_reports(
     if needle is None and not want_tags and date_from is None and date_to is None:
         raise LibraryError("give some search text, a tag or a date range")
     path, ranked = "substring", None
-    if mode == "ranked" and needle is not None:
+    if mode in ("ranked", "semantic") and needle is not None:
         try:
             match = fts.build_match(needle)
         except fts.FtsQueryError as exc:
@@ -244,7 +258,49 @@ def search_reports(
         and (date_to is None or r.created_at[:10] <= date_to)
     ]
     limit = max(1, min(int(limit), MAX_RESULTS))
-    return ListResult(tuple(_entry(r, scope) for r in hits[:limit]), len(hits), truncated, path)
+    unavailable = False
+    if mode == "semantic" and needle is not None:
+        hits, path, unavailable, truncated = _hybrid(
+            store, owner, scope, needle, hits, path, want_tags, date_from, date_to, truncated
+        )
+    return ListResult(
+        tuple(_entry(r, scope) for r in hits[:limit]), len(hits), truncated, path, unavailable
+    )
+
+
+def _hybrid(
+    store: Any,
+    owner: str,
+    scope: ProductScope | None,
+    needle: str,
+    lexical: list[SavedReport],
+    lexical_path: str,
+    want_tags: set[str],
+    date_from: str | None,
+    date_to: str | None,
+    truncated: bool,
+) -> tuple[list[SavedReport], str, bool, bool]:
+    """RRF of the lexical hits and the cosine hits over the filtered, in-scope owner rows."""
+    rows, more = owner_rows(store, owner)
+    candidates = [
+        r
+        for r in rows
+        if r.owner_user_id == owner
+        and in_scope(r, scope)
+        and want_tags <= {t.casefold() for t in r.tags}
+        and (date_from is None or r.created_at[:10] >= date_from)
+        and (date_to is None or r.created_at[:10] <= date_to)
+    ]
+    search = getattr(store, "semantic_search", None)
+    sem = search(owner, candidates, needle) if callable(search) else None
+    if sem is None:  # degrade: FTS ranked, or word match without an index
+        return lexical, lexical_path, True, truncated
+    by_id = {r.report_id: r for r in candidates}
+    by_id.update((r.report_id, r) for r in lexical)
+    semantic_ids = [rid for rid, _score in sem if rid in by_id]
+    fused = rrf_fuse([r.report_id for r in lexical], semantic_ids)
+    path = "hybrid" if lexical_path == "ranked" else "hybrid_substring"
+    return [by_id[rid] for rid in fused], path, False, truncated or more
 
 
 def view_report(store, owner: str, scope: ProductScope | None, report_id: str) -> ViewResult:

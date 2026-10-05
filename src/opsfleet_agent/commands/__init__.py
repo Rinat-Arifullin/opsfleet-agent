@@ -240,8 +240,10 @@ _SEARCH_USAGE: Final = "Usage: /search <words> [tag:<tag>] [from:YYYY-MM-DD] [to
 
 
 def _search(args: str, ctx: CommandContext) -> CommandResult:
-    """Ranked full-text search over the user's own in-scope reports (iteration 37, AC-21.13;
-    the substring search when the index is unavailable, recorded in the trace). The only state
+    """Hybrid search over the user's own in-scope reports: FTS bm25 ranks fused with semantic
+    (embedding) ranks by RRF (iteration 38, AC-21.13/14). Degrades to the ranked full-text
+    search, then to the word match, when the embedding or the index is unavailable; the path
+    that ran is recorded in the trace (never the query text). The only state
     kept is the id listing for "/open <n>"; it is never a delete target (AC-21.11)."""
     if ctx.report_store is None:
         return CommandResult(STORE_UNAVAILABLE_TEXT)
@@ -249,7 +251,7 @@ def _search(args: str, ctx: CommandContext) -> CommandResult:
 
     try:
         res = library.search_reports(
-            ctx.report_store, ctx.user_id, ctx.scope, mode="ranked",
+            ctx.report_store, ctx.user_id, ctx.scope, mode="semantic",
             **library.parse_search_args(args),
         )  # fmt: skip
     except library.LibraryError as exc:
@@ -259,7 +261,7 @@ def _search(args: str, ctx: CommandContext) -> CommandResult:
         return CommandResult("Could not search your reports right now.")
     _trace_search(ctx, res)
     ctx.listing[:] = [e.report_id for e in res.entries]
-    order = "best match first" if res.path == "ranked" else "newest first"
+    order = "best match first" if res.path in library.RANKED_PATHS else "newest first"
     header = f"Matching reports ({order}, {library.count_text(res)} in total):"
     return CommandResult(library.render_list(res, header=header, empty=NO_MATCH_TEXT))
 
@@ -272,6 +274,7 @@ def _trace_search(ctx: CommandContext, res: Any) -> None:
         ctx.tracer.record(
             "tool", "search_reports", tool="search_reports", outcome="ok",
             search_path=res.path, rows=len(res.entries), truncated=res.truncated_scan,
+            semantic_unavailable=bool(getattr(res, "semantic_unavailable", False)),
         )  # fmt: skip
     except Exception as exc:  # noqa: BLE001 - tracing never breaks the command
         log.error("search trace failed: %s", type(exc).__name__)
@@ -335,8 +338,11 @@ def _table() -> dict[str, Command]:
         Command("/reports", "/reports [words]", "List your saved reports.", _reports),
         Command("/open", "/open <id|n|title>", "Open a saved report.", _open),
         Command(
-            "/search", "/search <words> [tag:x]", "Search saved reports, best match first.", _search
-        ),  # fmt: skip
+            "/search",
+            "/search <words> [tag:x]",
+            "Search saved reports by words and meaning, best match first.",
+            _search,
+        ),
         Command(
             "/rename", '/rename <id|n|"title"> <new title>', "Rename a saved report.", _rename
         ),  # fmt: skip

@@ -142,7 +142,10 @@ LIBRARY_TOOL_SPECS: Final[dict[str, ToolSpec]] = {
                 "mode": {
                     "type": "string",
                     "enum": list(SEARCH_MODES),
-                    "description": "substring (default) or ranked: best full-text match first",
+                    "description": (
+                        "semantic (default): words and meaning, best match first; "
+                        "ranked: best full-text match first; substring: newest first"
+                    ),
                 },
             },
         },
@@ -340,9 +343,11 @@ def make_library_executors(
             tags = (tags,)
         if not isinstance(tags, list | tuple):
             return _err(INVALID_ARGS, "tags must be a list of words.", "Send a list.")
-        mode = _opt_str(args, "mode") or "substring"
+        mode = _opt_str(args, "mode") or "semantic"  # iteration 38: hybrid by default
         if mode not in SEARCH_MODES:
-            return _err(INVALID_ARGS, "mode must be substring or ranked.", "Use one of them.")
+            return _err(
+                INVALID_ARGS, "mode must be semantic, ranked or substring.", "Use one of them."
+            )
         try:
             res = search_reports(
                 store, owner, scope, text=_opt_str(args, "text"),
@@ -356,6 +361,7 @@ def make_library_executors(
                 tracer.record(
                     "tool", "search_reports", tool="search_reports", outcome="ok",
                     search_path=res.path, rows=len(res.entries),
+                    semantic_unavailable=res.semantic_unavailable,
                 )  # fmt: skip
             except Exception:  # noqa: BLE001, S110 - tracing never breaks the tool
                 pass

@@ -252,6 +252,7 @@ def build_runtime(
     from opsfleet_agent.obs.langfuse_sink import build_sink
     from opsfleet_agent.obs.tracer import Tracer
     from opsfleet_agent.persona import PersonaStore
+    from opsfleet_agent.reports.semantic import build_semantic_index
     from opsfleet_agent.roles.analyst import make_gemini_invoke
     from opsfleet_agent.store.audit import AuditLog, recorder
     from opsfleet_agent.store.db import open_store
@@ -304,7 +305,9 @@ def build_runtime(
         audit=recorder(audit_log, user_id=session.profile.user_id),
     )
     personas = PersonaStore()
-    reports = ReportStore(conn)  # iteration 17: the same app.db as audit and feedback
+    # iteration 17: the same app.db as audit and feedback; iteration 38: the semantic index
+    # (lazy provider embedder, no network until a save or a search embeds)
+    reports = ReportStore(conn, semantic=build_semantic_index(settings))
     preferences = SQLitePreferenceStore(conn)  # iteration 39: per-user, read every turn
     services = GraphServices(
         settings=settings,
