@@ -220,6 +220,8 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | D-163 | ✅ Owner 2026-10-05: D-159 OD-3, the minimum of 5 customers per spend band is enforced in code, not only in the prompt. Done (07ba671) | — | nothing |
 | D-164 | ✅ Owner 2026-10-05: D-155 OD-1/OD-2, no fallback on a router outage and no FR-17 carve-out for non-English memory/comment turns; current behaviour stays. D-160: old pre-matrix Langfuse dataset items are not archived. | — | nothing |
 | D-165 | ✅ Owner 2026-10-05: Live-1 router OD-1, go router-only. The English regex override for unavailable data (inventory, warehouse, ad spend, web visits) is removed; router-v3 labels these `simple` and the analyst says the data is not available and offers proxies. | — | nothing |
+| D-166 | ✅ Owner 2026-10-05: Live-1 reports OD-6, delete accepts the displayed `R-<id>` as well as the bare id. Done (78493b7) | — | nothing |
+| D-167 | ✅ Owner 2026-10-05: Live-1 reports OD-8, the catalogue's categories and departments join the brands in the PII allowlist, so NER no longer masks e.g. "Swim". Done (78493b7) | — | nothing |
 
 ## Scope questions (🟡: add now / defer to README "future work" / skip)
 
@@ -281,3 +283,5 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | D-165 | done | ed486d1. Regex unavailable-data override removed; the router decides and the analyst prompt (analyst-v2) says what is missing and offers proxies. |
 | D-162 | done | 07ba671. Sticky aggregate-only flag on the run_sql session and in checkpointed graph state; set by any customer-ranking turn, never cleared within a session. ODs in iter-d162-d163-bands.md. |
 | D-163 | done | 07ba671. Banded queries must return a provable distinct-customer count column (band_count_required); rows with fewer than 5 customers are dropped in run_sql. |
+| D-166 | done | 78493b7. parse_delete_request strips an optional `R-` prefix (command and natural-language forms); negation handling unchanged. |
+| D-167 | done | 78493b7. CATALOGUE_CATEGORIES/CATALOGUE_DEPARTMENTS in guards/pii.py; the CLI and the live eval SUT allowlist them. Cue-based hits ("Name:") are still masked. |

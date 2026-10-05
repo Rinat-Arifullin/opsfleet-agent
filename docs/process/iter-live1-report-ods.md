@@ -74,7 +74,7 @@ No hot files were touched, and there are no new dependencies or config fields. T
     - action items as strings, with "(not stated)" fields and `insight_ref` 1.
   - **What is still rejected.** `title` and `summary` stay required, so `{"title": "x"}` is still None. `validate_draft` still enforces its rules, such as at least 3 action items. A model that returns 2 action items gets the repair message, and then the fallback.
 - **OD-5: the reply options are capitalised.** `REPORT_PROMPT` now reads "Reply Save to store this report, Revise <what to change>, or Cancel.", and `DELETE_WHILE_PENDING_TEXT` uses the same casing. Replies are still matched case-insensitively.
-- **OD-6: the `R-` display id.**
+- **OD-6: the `R-` display id.** _Resolved: D-166, done in 78493b7._
   - **Where it is shown.** Saved and "Already saved" messages show `R-<32 hex>`. Storage and `/reports` lists keep the bare id; changing lists would touch many existing tests and is left to the owner.
   - **Where it is accepted.** `view_report` and `open_report` accept `R-<id>`, `r-<id>`, and the bare id. The prefix is stripped only in front of a full 32-hex id.
   - **Delete (not changed, risk area).** A delete of "R-<id>" is safely refused as `SELECTOR_EMPTY`. Suggested diff for the owner, in `delete/flow.py` `parse_delete_request`, before the selector is parsed: `raw = re.sub(r"\bR-(?=[0-9a-f]{32}\b)", "", raw)`, plus a test that "delete R-<id>" previews that id.
@@ -82,7 +82,7 @@ No hot files were touched, and there are no new dependencies or config fields. T
   - `report_save_confirm`, `q1_report` and `save_this` expect `outcome: answered`.
   - The graph returns `report_pending` or `report_saved`, and `evals/live_sut.py` passes these through.
   - Either the cases should expect `report_saved` (or `report_pending` for a draft-only case), or `live_sut` should map the `report_*` outcomes to `answered`. This is the owner's decision.
-- **OD-8: catalogue categories in the PII allowlist.** The live run also masked "Swim" (a category) as a person inside a report body. That did not block the save, but it damaged the text. Suggestion: build the allowlist from the catalogue's category and department values, not only from brands. Not done here, because it is in `guards/pii.py` and outside this brief.
+- **OD-8: catalogue categories in the PII allowlist.** _Resolved: D-167, done in 78493b7._ The live run also masked "Swim" (a category) as a person inside a report body. That did not block the save, but it damaged the text. Suggestion: build the allowlist from the catalogue's category and department values, not only from brands. Not done here, because it is in `guards/pii.py` and outside this brief.
 
 ## Verification
 
