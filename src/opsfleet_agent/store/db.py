@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from opsfleet_agent.store.audit_schema import AUDIT_MARKER_SQL, AUDIT_MIGRATION
+from opsfleet_agent.store.reports_schema import REPORTS_MIGRATION
 
 BUSY_TIMEOUT_MS = 5000
 
@@ -20,6 +21,7 @@ BUSY_TIMEOUT_MS = 5000
 MIGRATIONS: Sequence[tuple[int, Sequence[str]]] = (
     (1, ("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",)),
     (2, (*AUDIT_MIGRATION, AUDIT_MARKER_SQL)),
+    (3, REPORTS_MIGRATION),  # iteration 17: saved reports (store.reports_schema)
 )
 
 

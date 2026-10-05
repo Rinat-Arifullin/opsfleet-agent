@@ -1221,7 +1221,7 @@ def test_audit_migration_fold_is_accepted(tmp_path: Path) -> None:
     from the leaf module) produces exactly the layout AuditLog verifies."""
     assert MIGRATIONS[1] == (2, (*AUDIT_MIGRATION, AUDIT_MARKER_SQL))  # folded verbatim
     c = open_store(tmp_path / "fold.db")
-    assert migrate(c) == 2
+    assert migrate(c) == max(v for v, _ in MIGRATIONS)  # iter17: migration 3 follows
     make_reports(c, [R1])  # populated afterwards: the marker means no flag is needed
     log = A.AuditLog(c)
     assert log.record(A.GUARDRAIL_REFUSED, actor_user_id=USER, session_id=SESSION,

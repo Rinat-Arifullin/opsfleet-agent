@@ -304,6 +304,7 @@ def test_cli_commands(monkeypatch, capsys, factory):
         "/audit",
         "/persona",
         "/reports",
+        "/open 1",
         "/bogus \x1b[2Jsecret-ish",
         "/feedback up",
         "/exit",
@@ -315,7 +316,8 @@ def test_cli_commands(monkeypatch, capsys, factory):
     assert "Example questions:" in out
     assert AUDIT_UNAVAILABLE in out  # no audit log wired in this fake runtime
     assert "Active persona: builtin-0000abcd" in out
-    assert commands.NOT_AVAILABLE_TEXT.format(name="/reports") in out
+    assert commands.NOT_AVAILABLE_TEXT.format(name="/open") in out
+    assert out.count(commands.STORE_UNAVAILABLE_TEXT) == 2  # /reports and /feedback: no store
     assert commands.UNKNOWN_TEXT in out and "secret-ish" not in out
     assert commands.STORE_UNAVAILABLE_TEXT in out  # /feedback with no store
     sid = re.search(r"Session: ([0-9a-f]{32})", out).group(1)
@@ -673,3 +675,34 @@ def test_terminal_safe_strips_every_format_character() -> None:
 
     # U+061C arabic letter mark, U+180E mongolian vowel separator, ZWJ, soft hyphen
     assert terminal_safe("a؜b᠎c‍d­e") == "abcde"
+
+
+def test_reports_command_lists_only_own_titles_m4(tmp_path) -> None:
+    from opsfleet_agent.store.db import open_store
+    from opsfleet_agent.store.reports import ReportStore
+    from tests.unit.test_reports import _save_args
+
+    store = ReportStore(open_store(tmp_path / "reports.db"))
+    store.save(**dict(_save_args("k-a"), title="Synthetic A title"))
+    store.save(**dict(_save_args("k-b", owner="analyst_b"), title="Synthetic B title"))
+
+    def run(user: str) -> str:
+        ctx = commands.CommandContext(user_id=user, session_id="s", report_store=store)
+        return commands.dispatch("/reports", ctx).text
+
+    mine = run("analyst_a")
+    assert "Synthetic A title" in mine and "Synthetic B title" not in mine
+    assert "## Summary" not in mine  # titles only, never the body
+    assert run("analyst_c") == commands.NO_REPORTS_TEXT
+
+
+@pytest.mark.parametrize(
+    ("outcome", "remembered"),
+    [("report_pending", True), ("report_saved", True), ("answered", True), ("refused", False)],
+)
+def test_report_outcomes_set_last_turn_id_m6(capsys, outcome, remembered) -> None:
+    from types import SimpleNamespace
+
+    repl = SimpleNamespace(last_turn_id=None)
+    cli._Repl.show(repl, TurnResult("Synthetic text.", outcome=outcome), "t-1")
+    assert (repl.last_turn_id == "t-1") is remembered

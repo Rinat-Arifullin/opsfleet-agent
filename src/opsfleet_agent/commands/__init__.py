@@ -4,8 +4,9 @@ Commands are CLI-only: none of them is a tool, so no model role can reach them. 
 ``/audit`` lives only here (SEC-17). Every handler returns plain text; the CLI passes it
 through ``terminal_safe`` before stdout.
 
-Report commands (``/reports``, ``/open``, ``/search``, ``/export``) belong to iterations
-17/18/22a; until they land they are stubs that say so (OD-5 in docs/process/iter19-ods.md).
+Report commands: ``/reports`` (iteration 17) lists the user's own saved reports, titles
+only; ``/open``, ``/search``, ``/export`` belong to iterations 18/22a and are stubs that say so
+until they land (OD-5 in docs/process/iter19-ods.md).
 """
 
 from __future__ import annotations
@@ -42,6 +43,11 @@ class CommandContext:
     audit_log: Any = None
     tracer: Any = None
     persona_version: Callable[[], str] | None = None
+    report_store: Any = None  # iteration 17: store.reports.ReportStore (owner-scoped reads)
+
+
+REPORTS_LIST_LIMIT: Final = 20
+NO_REPORTS_TEXT: Final = "You have no saved reports yet."
 
 
 @dataclass(frozen=True)
@@ -130,6 +136,22 @@ def _persona(_args: str, ctx: CommandContext) -> CommandResult:
     return CommandResult(f"Active persona: {version} (read-only here).")
 
 
+def _reports(_args: str, ctx: CommandContext) -> CommandResult:
+    """The user's OWN saved reports, newest first: id, date and title only (no body)."""
+    if ctx.report_store is None:
+        return CommandResult(STORE_UNAVAILABLE_TEXT)
+    try:
+        rows = ctx.report_store.list(ctx.user_id, REPORTS_LIST_LIMIT)
+    except Exception as exc:  # a store failure never crashes the REPL
+        log.error("reports list failed: %s", type(exc).__name__)
+        return CommandResult("Could not read your reports right now.")
+    if not rows:
+        return CommandResult(NO_REPORTS_TEXT)
+    lines = [f"Your saved reports (newest first, up to {REPORTS_LIST_LIMIT}):"]
+    lines += [f"  {r.report_id}  {r.created_at[:10]}  {r.title}" for r in rows]
+    return CommandResult("\n".join(lines))
+
+
 def _stub(name: str) -> Callable[[str, CommandContext], CommandResult]:
     def handler(_args: str, _ctx: CommandContext) -> CommandResult:
         return CommandResult(NOT_AVAILABLE_TEXT.format(name=name))
@@ -150,9 +172,9 @@ def _table() -> dict[str, Command]:
         Command("/trace", "/trace [turn_id]", "Show the trace of a turn.", _trace),
         Command("/audit", "/audit [--session|--user]", "Show your audit events.", _audit),
         Command("/persona", "/persona", "Show the active persona version.", _persona),
+        Command("/reports", "/reports", "List your saved reports.", _reports),
     ]
     for name, usage, text in (
-        ("/reports", "/reports", "List saved reports."),
         ("/open", "/open <report_id>", "Open a saved report."),
         ("/search", "/search <words>", "Search saved reports."),
         ("/export", "/export <report_id>", "Export a saved report."),

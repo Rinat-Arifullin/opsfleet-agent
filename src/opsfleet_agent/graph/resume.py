@@ -137,6 +137,8 @@ def resume_turn(
     if _INPUT_NODE in pending.next:
         return ResumeOutcome(ResumeKind.ASK_AGAIN, ASK_AGAIN_TEXT)
     # seam (22a/17): a pending delete expires and a draft is re-shown here, before finish()
+    # iteration 17 (AC-06.5): a pending "confirm_save" is re-shown by finish() without invoking
+    # the graph; it never saves.
     turn_id = str(pending.values.get("turn_id") or "") or None
     result = pending.finish()
     return ResumeOutcome(ResumeKind.RESUMED, result.text, result=result, turn_id=turn_id)

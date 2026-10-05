@@ -157,6 +157,7 @@ class Runtime:
     trace_dir: Path | None = None
     persona_version: Callable[[], str] | None = None
     close: Callable[[], object] | None = None
+    report_store: Any = None  # iteration 17: ReportStore on app.db (/reports)
 
 
 AgentFactory = Callable[[Settings, Any, Session, Path], Runtime]
@@ -213,6 +214,7 @@ def build_runtime(
     from opsfleet_agent.store.db import open_store
     from opsfleet_agent.store.feedback import FeedbackStore
     from opsfleet_agent.store.fingerprints import FingerprintStore
+    from opsfleet_agent.store.reports import ReportStore
     from opsfleet_agent.tools.run_sql import scoped_job_config_factory
 
     project = settings.google_cloud_project
@@ -232,6 +234,7 @@ def build_runtime(
         audit=recorder(audit_log, user_id=session.profile.user_id),
     )
     personas = PersonaStore()
+    reports = ReportStore(conn)  # iteration 17: the same app.db as audit and feedback
     services = GraphServices(
         settings=settings,
         persona=personas.refresh,
@@ -241,6 +244,7 @@ def build_runtime(
         run_sql=tool,
         cache=cache,
         tracer=tracer,
+        reports=reports,
     )
     return Runtime(
         graph=AgentGraph(services, checkpointer),
@@ -252,6 +256,7 @@ def build_runtime(
         trace_dir=trace_dir,
         persona_version=lambda: personas.current.version,
         close=conn.close,
+        report_store=reports,
     )
 
 
@@ -298,6 +303,7 @@ class _Repl:
             audit_log=rt.audit_log,
             tracer=rt.tracer,
             persona_version=rt.persona_version,
+            report_store=rt.report_store,
         )
 
     def new_session(self) -> None:
@@ -344,8 +350,9 @@ class _Repl:
         _say(result.text)
         if getattr(result, "notice", None):
             _say(result.notice)
-        if turn_id and getattr(result, "outcome", None) == "answered":
-            self.last_turn_id = turn_id
+        outcome = str(getattr(result, "outcome", None) or "")
+        if turn_id and (outcome == "answered" or outcome.startswith("report_")):
+            self.last_turn_id = turn_id  # m6: report turns too (draft, saved, cancelled)
 
     def _cancelled(self, turn_id: str | None) -> None:
         """After a Ctrl-C: cancel the job, reset the flag, close the turn, say so.

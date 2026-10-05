@@ -20,17 +20,25 @@ Contract:
   no exception text); ``AgentGraph.run_turn`` wraps ``invoke`` the same way;
 * the supervisor never dispatches a role twice per turn (quick -> deep once, via
   ``TurnBudget.try_escalate``); every LLM call goes through the budgeted ``LLMWrapper``;
-* ``report`` and ``library`` labels run on the deep analyst for now (seam: 14b/15/17 add the
-  writer, verifier, library and delete nodes and their interrupts at ``_after_context``).
+* ``library`` runs on the deep analyst for now (seam: 15/22a add the library and delete nodes);
+* iteration 17: a ``report`` turn that ran SQL continues after grounding with
+  ``report_writer`` (writer -> verifier -> output guard) and ``confirm_save``, which pauses on
+  ``interrupt()``. The user's next message answers it (``AgentGraph.run_turn``): save stores the
+  draft once (idempotent key), cancel or an unrelated message saves nothing, revise starts a
+  new report turn, and a delete request is refused while the draft stays pending (TR-14).
 """
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import time
+import unicodedata
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -40,7 +48,9 @@ from typing import Annotated, Any, Final, TypedDict
 
 from langgraph.checkpoint.serde.encrypted import EncryptedSerializer
 from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.errors import GraphBubbleUp
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
 
 from opsfleet_agent.bq.client import BigQueryRunner
 from opsfleet_agent.bq.schema import TableMetadataCache
@@ -56,6 +66,7 @@ from opsfleet_agent.graph.budget import (
 from opsfleet_agent.graph.context import (
     AssembledContext,
     assemble_context,
+    covers,
     ledger_entry_for_state,
     previous_user_text,
     scoped_figures,
@@ -69,6 +80,7 @@ from opsfleet_agent.guards.input import check_input
 from opsfleet_agent.guards.output import REFUSAL_TEXT, ROLE_TOOLS, check_output
 from opsfleet_agent.guards.scope import ProductScope
 from opsfleet_agent.persona import Persona, assemble_prompt
+from opsfleet_agent.reports.schema import missing_sections
 from opsfleet_agent.roles.analyst import (
     DEEP,
     QUICK,
@@ -81,6 +93,7 @@ from opsfleet_agent.roles.analyst import (
     serialise_envelope,
 )
 from opsfleet_agent.roles.light_path import run_light_path
+from opsfleet_agent.roles.report_writer import REPORT_ROLE_SUBCAPS, WRITER_ROLE, produce_report
 from opsfleet_agent.roles.router import (
     LIGHT_ROLE_SUBCAPS,
     Invoke,
@@ -89,7 +102,9 @@ from opsfleet_agent.roles.router import (
     model_ids_from_settings,
     route,
 )
+from opsfleet_agent.roles.verifier import VERIFIER_ROLE
 from opsfleet_agent.session import Profile, Session, default_data_dir
+from opsfleet_agent.store.db import StoreError
 from opsfleet_agent.tools.run_sql import (
     RunSqlSession,
     RunSqlTool,
@@ -130,6 +145,47 @@ _FORCE_RULES: Final = (
     "Do not state any number you were not given. Do not call tools."
 )
 _QA_ROLE_SUBCAPS: Final = {**LIGHT_ROLE_SUBCAPS, QUICK: 6, DEEP: 6, FORCE_ANSWER_ROLE: 1}
+# iteration 17: a report turn runs under the REPORT caps (14 calls, 180 s) + writer/verifier subcaps
+_REPORT_ROLE_SUBCAPS: Final = {**_QA_ROLE_SUBCAPS, **REPORT_ROLE_SUBCAPS}
+CONFIRM_NODE: Final = "confirm_save"
+REPORT_PROMPT: Final = "Reply save to store this report, revise <what to change>, or cancel."
+SAVE_DISABLED_TEXT: Final = "Saving reports is turned off right now, so this report was not saved."
+SAVE_FAILED_TEXT: Final = "The report could not be saved; nothing was stored. Please ask again."
+CANCELLED_TEXT: Final = "Cancelled: the report draft was not saved."
+NOT_SAVED_TEXT: Final = "The report draft was not saved."
+REVISING_TEXT: Final = "Revising the report draft (the previous draft was not saved)."
+DELETE_WHILE_PENDING_TEXT: Final = (
+    "A report draft is waiting for your answer, so nothing can be deleted now. "
+    "Reply save, revise <what to change>, or cancel first."
+)
+NOTHING_TO_SAVE_TEXT: Final = "There is no earlier answer in this session to save as a report."
+CANCELLED_NOTHING_TO_SAVE_TEXT: Final = (
+    "The last report draft was cancelled, so there is nothing to save. Ask again for a new report."
+)
+# M1 (round 2): a turn on another user's session is refused with the same text as an unknown
+# session (no existence oracle) and the session's state is never read, changed or reset
+OTHER_OWNER_TEXT: Final = (
+    f"No saved session with that id for this user under the current {AES_KEY_ENV}."
+)
+SCOPE_CHANGED_TEXT: Final = (
+    "Your product access changed since this draft was written, so it was not saved."
+)
+_MAX_REPLY_CHARS: Final = 2000  # the draft reply is classified on a bounded prefix
+# m2: commands match plain-ASCII replies only (re.A: no Unicode case folding), so a
+# look-alike (long s, the Kelvin sign) is never consent; a bare "y" is not a save.
+_SAVE_RE: Final = re.compile(
+    r"^\s*(?:save(?: it| this| the report| the draft)?|yes|confirm|ok,? save)\s*[.!]?\s*$",
+    re.I | re.A,
+)
+_CANCEL_RE: Final = re.compile(
+    r"^\s*(?:cancel|no|n|discard|don'?t save|do not save)\s*[.!]?\s*$", re.I | re.A
+)
+_REVISE_RE: Final = re.compile(r"^\s*revise\b[\s:,.-]*(?P<changes>.*)$", re.I | re.S | re.A)
+_DELETE_RE: Final = re.compile(r"\b(?:delete|remove|erase|forget|drop|wipe|purge)\b", re.I | re.A)
+_SAVE_LAST_RE: Final = re.compile(
+    r"^\s*save (?:this|that|the last answer|the answer)(?: as a report)?\s*[.!]?\s*$",
+    re.I | re.A,
+)
 _AES_LENGTHS: Final = (16, 24, 32)
 
 
@@ -235,6 +291,8 @@ class TurnState(TypedDict, total=False):
     scope_snapshot: dict[str, Any]  # the scope the turn started under (FR-76)
     owner: str  # the profile user_id the turn started under; resume refuses any other user
     turn_ctx: dict[str, Any]  # TurnBudget counters, SQL ledger, tool names, figures
+    # iteration 17: the pending report draft (title, markdown, sections, sql_used, hash, ...)
+    report: dict[str, Any]
 
 
 _TURN_RESET: Final[dict[str, Any]] = {
@@ -253,6 +311,7 @@ _TURN_RESET: Final[dict[str, Any]] = {
     "error": False,
     "grounding_blocked": False,
     "context_message": "",
+    "report": {},  # iteration 17: a draft lives one turn (until confirm_save resolves it)
 }
 
 
@@ -272,6 +331,7 @@ class GraphServices:
     sleep: Callable[[float], object] = time.sleep
     jitter: Callable[[float], float] | None = None
     data_window: Callable[[], tuple[date, date]] | None = None
+    reports: Any = None  # iteration 17: store.reports.ReportStore; None = saving disabled
 
     def window(self) -> tuple[date, date]:
         if self.data_window is not None:
@@ -303,6 +363,8 @@ class TurnContext:
     notice: str | None = None
     prompt_cache: str | None = None
     assembled: AssembledContext | None = None  # set by load_context (iteration 15)
+    can_confirm: bool = False  # iteration 17: a checkpointer exists, so interrupt() can pause
+    forced_label: str | None = None  # iteration 17: "revise" re-runs the turn as a report
 
     def __post_init__(self) -> None:
         self.sql_turn = RunSqlTurn(self.turn_id, sql_counter=self.budget)
@@ -421,7 +483,10 @@ def _restore_ctx(ctx: TurnContext, snap: Any) -> bool:
     budget is exhausted and run_sql gives up, so the turn ends on force_answer's template.
     """
     snap = snap if isinstance(snap, dict) else {}
-    budget_ok = ctx.budget.restore(snap.get("budget"))
+    b = snap.get("budget")
+    if isinstance(b, dict) and b.get("kind") == TurnKind.REPORT.value:
+        _promote_report(ctx)  # iteration 17: a report turn resumes under the REPORT caps
+    budget_ok = ctx.budget.restore(b)
     sql = snap.get("sql") if isinstance(snap.get("sql"), dict) else {}
     seen, statements = _str_map(sql.get("seen")), _str_map(sql.get("statements"))
     ledger = _ledger(sql.get("ledger"))
@@ -466,6 +531,21 @@ def _restore_ctx(ctx: TurnContext, snap: Any) -> bool:
     ctx.guard_codes |= set(codes)
     ctx.notice = notice
     return True
+
+
+def _promote_report(ctx: TurnContext) -> None:
+    """Iteration 17: switch the turn to the REPORT budget (AC-06.4), keeping every count.
+
+    Idempotent. The new budget continues the QA counters (``restore`` never lowers them), the
+    start time and the usage records, and replaces the budget everywhere it is referenced."""
+    old = ctx.budget
+    if old.kind is TurnKind.REPORT:
+        return
+    new = TurnBudget(TurnKind.REPORT, clock=old._clock, role_subcaps=dict(_REPORT_ROLE_SUBCAPS))
+    new.restore({**old.snapshot(), "kind": TurnKind.REPORT.value})
+    new._start = old._start
+    new.usage = old.usage
+    ctx.budget = ctx.llm.budget = ctx.sql_turn.sql_counter = new
 
 
 def _snapshotting(ctx: TurnContext, fn: Callable[[TurnState], dict[str, Any]]):
@@ -519,6 +599,8 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
             llm=ctx.llm, model=model, invoke=sv.router_invoke, fallback_model=fb, tracer=ctx.tracer,
         )  # fmt: skip
         update.update(label=rd.label, route=rd.route, is_english=rd.is_english)
+        if ctx.forced_label and rd.route != "refuse":  # iteration 17: "revise" stays a report
+            update.update(label=ctx.forced_label, route="full")
         if rd.route == "refuse":
             update.update(final_text=rd.refusal_text or REFUSAL_TEXT, outcome="refused")
         return update
@@ -536,6 +618,8 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
 
     def load_context(state: TurnState) -> dict[str, Any]:
         _retrieve_golden(state)  # seam: Golden retrieval arrives with iteration 16
+        if state.get("label") == "report":
+            _promote_report(ctx)  # iteration 17: REPORT caps (14 calls, 180 s) for the turn
         a = _assemble(state, state["message"])
         ctx.assembled = a
         _record(ctx, "context", "load_context", **a.trace_fields(), **ctx.persona.trace_fields)
@@ -646,6 +730,44 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
         _record(ctx, "guard", "grounding", grounding_flags=len(result.unmatched))
         return {"draft": result.text, "figures": tag_scope(ctx.new_figures, scope)}
 
+    # --- iteration 17: report writer -> verifier -> output guard -> confirm -> save ----------
+
+    def report_writer(state: TurnState) -> dict[str, Any]:
+        # A report needs a grounded analysis that ran SQL; otherwise finalize shows the
+        # analysis answer as before (nothing to confirm, nothing saved).
+        ledger = [dict(e) for e in ctx.sql_turn.ledger]
+        if not ledger or state.get("status") != "ok" or state.get("grounding_blocked"):
+            return {}
+        scope = ctx.sql_session.scope
+        figures = merge_figures(scoped_figures(state.get("figures"), scope), ctx.new_figures)
+        rep = _build_report(
+            ctx, question=state.get("context_message") or state.get("message", ""),
+            analysis=state.get("draft", ""), ledger=ledger, figures=figures,
+        )  # fmt: skip
+        if rep is None:
+            return {}
+        text = f"{rep['markdown']}\n\n{REPORT_PROMPT}"
+        return {"report": rep, "route": "report", "final_text": text, "outcome": "report_pending"}
+
+    def confirm_save(state: TurnState) -> dict[str, Any]:
+        # Re-runs from the top on resume (LangGraph), so everything before interrupt() is
+        # read-only. Saving happens only on an explicit "save" answer (AC-06.1, AC-06.5).
+        rep = state.get("report") or {}
+        if not rep:
+            return {}
+        if sv.reports is None or not ctx.can_confirm:  # rollback: shown, never saved
+            text = f"{rep.get('markdown', '')}\n\n{SAVE_DISABLED_TEXT}"
+            return {"final_text": text, "outcome": "report_unsaved"}
+        decision = interrupt(
+            {"kind": CONFIRM_NODE, "title": rep.get("title", ""), "draft_hash": rep.get("hash", "")}
+        )
+        if decision == "save":
+            tid = str(state.get("turn_id") or "")
+            return _store_report(ctx, rep, turn_id=tid, key=_confirm_key(tid, rep))
+        if decision == "revise":
+            return {"final_text": REVISING_TEXT, "outcome": "report_cancelled"}
+        return {"final_text": CANCELLED_TEXT, "outcome": "report_cancelled"}
+
     def finalize(state: TurnState) -> dict[str, Any]:
         return _finalize(ctx, state)
 
@@ -657,12 +779,133 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
         "deep": deep,
         "force_answer": force_answer,
         "grounding": grounding,
+        "report_writer": report_writer,  # iteration 17
+        CONFIRM_NODE: confirm_save,  # iteration 17
         "finalize": finalize,
     }
 
 
 def _retrieve_golden(state: TurnState) -> list[Any]:
     return []  # no-op seam (iteration 16)
+
+
+# --- iteration 17: report helpers ----------------------------------------------------------------
+
+
+def _report_guard(ctx: TurnContext, text: str):
+    """The output guard for a report body (the writer calls no tools: ``tool_calls=()``)."""
+    return check_output(
+        text, role=WRITER_ROLE, label="report", tool_calls=(),
+        protected_snippets=analyst_protected_snippets(ctx.persona),
+        detector=ctx.services.detector,
+    )  # fmt: skip
+
+
+def _build_report(
+    ctx: TurnContext,
+    *,
+    question: str,
+    analysis: str,
+    ledger: list[dict[str, Any]],
+    figures: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Writer + verifier (bounded, budgeted), then the output guard on the rendered body.
+    None when no draft passes: the caller falls back to the analysis answer; nothing is saved."""
+    sv = ctx.services
+    res = produce_report(
+        question=question, analysis=analysis, sql_ledger=ledger, figures=figures,
+        scope_label=ctx.profile.scope_label, window=sv.window(), llm=ctx.llm,
+        invoke=sv.analyst_invoke,
+        models={r: model_ids_from_settings(sv.settings, r) for r in (WRITER_ROLE, VERIFIER_ROLE)},
+        persona=ctx.persona, deadline_hit=ctx.budget.deadline_hit,
+    )  # fmt: skip
+    if not res.ok or res.draft is None:
+        _record(ctx, "guard", "report", verdict="no_draft")
+        return None
+    verdict = _report_guard(ctx, res.markdown)
+    codes = set(verdict.codes())
+    ctx.guard_codes |= codes
+    if not verdict.allowed or not verdict.text or missing_sections(verdict.text):
+        _record(ctx, "guard", "report", verdict="block", rule_hits=sorted(codes))
+        return None
+    _record(ctx, "guard", "report", verdict="allow", rule_hits=sorted(codes))
+    d = res.draft
+    # B1: the title and sections come from the GUARDED body, never from the raw draft
+    return {
+        "title": _guarded_title(verdict.text),
+        "markdown": verdict.text,
+        "sections": _guarded_sections(verdict.text),
+        "sql_used": list(res.sql_used),
+        "hash": res.draft_hash,
+        "model": res.model,
+        "status": res.status,
+        "data_window": d.data_window,
+        "tags": [],
+    }
+
+
+def _guarded_title(body: str) -> str:
+    """The H1 of the guarded body (the writer renders the title there); "Report" if none."""
+    for line in body.splitlines():
+        if line.startswith("# "):
+            return line[2:].strip()[:200] or "Report"
+    return "Report"
+
+
+def _guarded_sections(body: str) -> dict[str, str]:
+    """``{heading: text}`` of the guarded body's ``## `` sections (stored as sections_json)."""
+    out: dict[str, list[str]] = {}
+    current: list[str] | None = None
+    for line in body.splitlines():
+        if line.startswith("## "):
+            current = out.setdefault(line[3:].strip(), [])
+        elif current is not None:
+            current.append(line)
+    return {k: "\n".join(v).strip() for k, v in out.items()}
+
+
+def _confirm_key(turn_id: str, rep: dict[str, Any]) -> str:
+    """The idempotency key of a confirmed draft: one save per (turn, draft hash)."""
+    return hashlib.sha256(f"{turn_id}:{rep.get('hash', '')}".encode()).hexdigest()
+
+
+def _reply_forms(raw: str) -> tuple[str, str]:
+    """(command text, folded text) of a bounded reply (m2). Commands match only a plain-ASCII
+    reply (anything else is no command: fail closed, nothing saved); delete intent is
+    searched on the NFKC-normalised, ASCII-folded text, so a look-alike cannot hide it."""
+    reply = raw[:_MAX_REPLY_CHARS]
+    nfkc = unicodedata.normalize("NFKC", reply)
+    folded = unicodedata.normalize("NFKD", nfkc).encode("ascii", "ignore").decode("ascii")
+    return (reply if reply.isascii() else ""), folded
+
+
+def _store_report(
+    ctx: TurnContext, rep: dict[str, Any], *, turn_id: str, key: str
+) -> dict[str, Any]:
+    """One idempotent save with owner and session; the store re-runs the output guard.
+    A store failure saves nothing and says so (the draft is not kept pending)."""
+    sv = ctx.services
+
+    def guard(body: str) -> tuple[bool, str]:
+        v = _report_guard(ctx, body)
+        return v.allowed, v.text
+
+    try:
+        rec, created = sv.reports.save(
+            owner_user_id=ctx.profile.user_id, session_id=ctx.session_id, turn_id=turn_id,
+            title=rep["title"], body_markdown=rep["markdown"],
+            sections=rep.get("sections") or {}, sql_used=rep.get("sql_used") or [],
+            scope_snapshot=scope_snapshot(ctx.sql_session.scope),
+            data_window=str(rep.get("data_window") or ""), draft_hash=rep["hash"],
+            idempotency_key=key, guard=guard, tags=rep.get("tags") or [],
+            model_used=str(rep.get("model") or ""), persona_version=str(ctx.persona.version),
+        )  # fmt: skip
+    except (StoreError, sqlite3.Error, KeyError, TypeError, ValueError) as exc:
+        logger.error("report save failed: %s", type(exc).__name__)
+        return {"final_text": SAVE_FAILED_TEXT, "outcome": "report_unsaved"}
+    verb = "Saved" if created else "Already saved"
+    text = f'{verb} report "{rec.title}" (id {rec.report_id}).'
+    return {"final_text": text, "outcome": "report_saved"}
 
 
 def _record(ctx: TurnContext, span: str, name: str | None = None, **fields: Any) -> None:
@@ -746,7 +989,7 @@ def _guard(ctx: TurnContext, state: TurnState, draft: str):
 def _finalize(ctx: TurnContext, state: TurnState) -> dict[str, Any]:
     label = state.get("label", "")
     update: dict[str, Any] = {}
-    if state.get("route") in ("refuse", "light", "clarify"):
+    if state.get("route") in ("refuse", "light", "clarify", "report"):  # report: iteration 17
         text = state.get("final_text", "")
         if not text:  # e.g. a resumed state without the light/refusal/clarify text: fail closed
             text, update["outcome"] = ERROR_TEXT, "error"
@@ -780,9 +1023,11 @@ def _finalize(ctx: TurnContext, state: TurnState) -> dict[str, Any]:
         update["memory"] = mem.without_pending().to_state()
     if state.get("message") and state.get("route") != "refuse":
         snap = snapshot_of(ctx.sql_session.scope)
+        # iteration 17: a report turn keeps the draft (not "Saved ...") as the assistant answer
+        answer = (state.get("report") or {}).get("markdown") or text
         update["history"] = [
             {"role": "user", "text": state["message"], "scope": snap},
-            {"role": "assistant", "text": text[:MAX_HISTORY_CHARS], "scope": snap},
+            {"role": "assistant", "text": answer[:MAX_HISTORY_CHARS], "scope": snap},
         ]
         if ctx.sql_turn.ledger:  # prior-turn grounding set for follow-ups (AC-07.1/07.2)
             scope = ctx.sql_session.scope
@@ -797,6 +1042,8 @@ def _safe(name: str, fn: Callable[[TurnState], dict[str, Any]]):
     def run(state: TurnState) -> dict[str, Any]:
         try:
             return fn(state)
+        except GraphBubbleUp:  # iteration 17: interrupt() must reach LangGraph, never swallowed
+            raise
         except Exception as exc:  # templated message only; class name logged, no text
             logger.error("graph node %s raised %s", name, type(exc).__name__)
             return {"error": True, "route": "error"} if name != "finalize" else {
@@ -846,6 +1093,17 @@ def _after_force(state: TurnState) -> str:
     return "finalize" if _errored(state) else "grounding"
 
 
+def _after_grounding(state: TurnState) -> str:
+    # iteration 17: a report turn continues to the writer; every other label is unchanged
+    if not _errored(state) and state.get("label") == "report":
+        return "report_writer"
+    return "finalize"
+
+
+def _after_writer(state: TurnState) -> str:
+    return CONFIRM_NODE if not _errored(state) and state.get("route") == "report" else "finalize"
+
+
 def _build(ctx: TurnContext, checkpointer: Any) -> Any:
     nodes = _make_nodes(ctx)
     g = StateGraph(TurnState)
@@ -858,7 +1116,9 @@ def _build(ctx: TurnContext, checkpointer: Any) -> Any:
     g.add_conditional_edges("deep", _after_role, ["force_answer", "finalize"])
     g.add_edge("light", "finalize")
     g.add_conditional_edges("force_answer", _after_force, ["grounding", "finalize"])
-    g.add_edge("grounding", "finalize")
+    g.add_conditional_edges("grounding", _after_grounding, ["report_writer", "finalize"])
+    g.add_conditional_edges("report_writer", _after_writer, [CONFIRM_NODE, "finalize"])
+    g.add_edge(CONFIRM_NODE, "finalize")  # iteration 17
     g.add_edge("finalize", END)
     return g.compile(checkpointer=checkpointer)
 
@@ -889,11 +1149,34 @@ class AgentGraph:
         self, raw_text: str, *, session: Session, turn_id: str | None = None
     ) -> TurnResult:
         """Run one turn. Never raises: any failure becomes a templated message."""
-        tid = turn_id or uuid.uuid4().hex[:12]
+        return self._run(raw_text, session, turn_id or uuid.uuid4().hex[:12])
+
+    def _run(
+        self,
+        raw_text: str,
+        session: Session,
+        tid: str,
+        forced_label: str | None = None,
+        check_pending: bool = True,
+    ) -> TurnResult:
         try:
             sql_session = self._sql_session(session)
             ctx = _new_context(self.services, raw_text, session, sql_session, tid)
+            ctx.can_confirm = self.checkpointer is not None  # iteration 17: interrupt() can pause
+            ctx.forced_label = forced_label
             graph = _build(ctx, self.checkpointer)
+            if self.checkpointer is not None:
+                st = graph.get_state(self._config(session.session_id))
+                values = dict(st.values or {})
+                if values.get("owner") and values.get("owner") != session.profile.user_id:
+                    # M1: another user's session is refused before any graph write, so its
+                    # history, ledger and pending draft stay exactly as they were
+                    return TurnResult(OTHER_OWNER_TEXT, outcome="refused")
+                # iteration 17: a reply to a pending report draft, or "save this as a report"
+                if check_pending and CONFIRM_NODE in tuple(st.next):
+                    return self._answer_draft(ctx, graph, values, raw_text, session, tid)
+                if check_pending and _SAVE_LAST_RE.match(_reply_forms(raw_text)[0]):
+                    return self._save_last(ctx, values, session, tid)
             start = {
                 **_TURN_RESET,
                 "turn_id": tid,
@@ -907,6 +1190,105 @@ class AgentGraph:
             logger.error("turn failed: %s", type(exc).__name__)
             return TurnResult(ERROR_TEXT, outcome="error")
         return _result(ctx, out)
+
+    # --- iteration 17: the confirm-before-save answer and "save this as a report" -------------
+
+    def _answer_draft(
+        self, ctx: TurnContext, graph: Any, values: dict[str, Any], raw: str, session: Session,
+        tid: str,
+    ) -> TurnResult:  # fmt: skip
+        """Classify the reply to a pending draft. Only an explicit save stores it (AC-06.1);
+        revise is a new turn with a full REPORT budget, cancel or anything else saves nothing
+        (AC-06.4); a delete request is refused and the draft stays pending (TR-14)."""
+        reply, folded = _reply_forms(raw)
+        config, durable = self._config(session.session_id), self._durability()
+
+        def resume(decision: str) -> TurnResult:
+            ctx.turn_id = ctx.sql_turn.turn_id = str(values.get("turn_id") or "")
+            if not _restore_ctx(ctx, values.get("turn_ctx")):
+                logger.error("report confirm: turn context malformed; budget exhausted")
+            out = run_with_recursion_guard(
+                lambda: graph.invoke(Command(resume=decision), config, **durable)
+            )
+            return _result(ctx, out)
+
+        # TR-14 (m1): delete intent is checked FIRST ("revise and delete ...", "save, then
+        # wipe ..." are refused); no delete while a draft waits; the state is untouched
+        if _DELETE_RE.search(folded):
+            return TurnResult(DELETE_WHILE_PENDING_TEXT, label="report", route="report",
+                              outcome="refused")  # fmt: skip
+        if _SAVE_RE.match(reply) or _SAVE_LAST_RE.match(reply):
+            if values.get("scope_snapshot") != scope_snapshot(ctx.sql_session.scope):
+                resume("cancel")  # m4: access changed since the draft: dropped, never saved
+                return TurnResult(SCOPE_CHANGED_TEXT, label="report", route="report",
+                                  outcome="report_cancelled")  # fmt: skip
+            return resume("save")
+        if _CANCEL_RE.match(reply):
+            return resume("cancel")
+        revise = _REVISE_RE.match(reply)
+        if revise:
+            resume("revise")  # the old draft is closed unsaved before the new turn starts
+            base = values.get("context_message") or values.get("message") or ""
+            changes = " ".join(revise.group("changes").split())
+            text = f"{base}\n\nRevision request: {changes}" if changes else base
+            # M3: under the caller's turn id, so a Ctrl-C close (close_interrupted_turn) matches
+            res = self._run(text, session, tid, "report", check_pending=False)
+            return dataclasses.replace(res, text=f"{REVISING_TEXT}\n\n{res.text}")
+        resume("cancel")  # an unrelated message: the draft is dropped and the agent says so
+        res = self._run(raw, session, tid, check_pending=False)
+        return dataclasses.replace(res, text=f"{NOT_SAVED_TEXT}\n\n{res.text}")
+
+    def _save_last(
+        self, ctx: TurnContext, values: dict[str, Any], session: Session, tid: str
+    ) -> TurnResult:
+        """AC-21.2: "save this as a report" turns the last in-scope answer into a report and
+        saves it at once (the request is the confirmation). Idempotent: a repeat finds the
+        saved report by its key before any LLM call. The graph history is not changed."""
+        sv = self.services
+        if sv.reports is None:
+            return TurnResult(SAVE_DISABLED_TEXT, label="report", route="report",
+                              outcome="report_unsaved")  # fmt: skip
+        if values.get("owner") != session.profile.user_id:  # M1: defence in depth
+            return TurnResult(NOTHING_TO_SAVE_TEXT, label="report", route="report",
+                              outcome="report_unsaved")  # fmt: skip
+        if values.get("outcome") == "report_cancelled":  # m5: a cancelled draft stays unsaved
+            return TurnResult(CANCELLED_NOTHING_TO_SAVE_TEXT, label="report", route="report",
+                              outcome="report_unsaved")  # fmt: skip
+        scope = ctx.sql_session.scope
+        history = [h for h in values.get("history") or [] if covers(scope, h.get("scope"))]
+        answer_i = next(
+            (i for i in range(len(history) - 1, -1, -1) if history[i].get("role") == "assistant"),
+            None,
+        )
+        before = history[:answer_i] if answer_i is not None else []
+        question = next(
+            (h.get("text", "") for h in reversed(before) if h.get("role") == "user"), ""
+        )
+        ledger = [
+            {k: v for k, v in e.items() if k != "scope"}
+            for e in values.get("prior_ledger") or []
+            if covers(scope, e.get("scope"))
+        ][-6:]
+        if answer_i is None or not question or not ledger:
+            return TurnResult(NOTHING_TO_SAVE_TEXT, label="report", route="report",
+                              outcome="report_unsaved")  # fmt: skip
+        answer = str(history[answer_i].get("text") or "")
+        owner = session.profile.user_id
+        key = hashlib.sha256(f"last:{session.session_id}:{owner}:{answer}".encode()).hexdigest()
+        found = sv.reports.get_by_key(key, owner)
+        if found is not None:
+            text = f'Already saved report "{found.title}" (id {found.report_id}).'
+            return TurnResult(text, label="report", route="report", outcome="report_saved")
+        _promote_report(ctx)
+        rep = _build_report(
+            ctx, question=question, analysis=answer, ledger=ledger,
+            figures=scoped_figures(values.get("figures"), scope),
+        )  # fmt: skip
+        if rep is None:
+            out = {"final_text": SAVE_FAILED_TEXT, "outcome": "report_unsaved"}
+        else:
+            out = _store_report(ctx, rep, turn_id=tid, key=key)
+        return _result(ctx, {**out, "label": "report", "route": "report"})
 
     def _durability(self) -> dict[str, str]:
         """``durability="sync"``: each node's checkpoint is on disk before the next node
@@ -944,6 +1326,12 @@ class PendingTurn:
         restored. Never starts a new turn. Never raises."""
         if self._built is None or not self.next:
             return TurnResult(ERROR_TEXT, outcome="error")
+        if CONFIRM_NODE in self.next:  # iteration 17: a pending draft is re-shown, never saved
+            saved = self._already_saved()
+            if saved is not None:
+                return saved
+            text = self.values.get("final_text") or ERROR_TEXT
+            return TurnResult(text, label="report", route="report", outcome="report_pending")
         ctx, graph = self._built
         try:
             ctx.turn_id = ctx.sql_turn.turn_id = str(self.values.get("turn_id") or "")
@@ -956,6 +1344,30 @@ class PendingTurn:
             logger.error("resume failed: %s", type(exc).__name__)
             return TurnResult(ERROR_TEXT, outcome="error")
         return _result(ctx, out)
+
+    def _already_saved(self) -> TurnResult | None:
+        """m3: a crash after the store write but before the checkpoint leaves a saved draft
+        pending. Then the turn is closed (as if finalize ran) and the user is told; it is
+        never saved twice. None (re-show the draft) when not saved or on any error."""
+        reports = self.agent.services.reports
+        rep = self.values.get("report") or {}
+        if reports is None or not rep or self._built is None:
+            return None
+        try:
+            key = _confirm_key(str(self.values.get("turn_id") or ""), rep)
+            found = reports.get_by_key(key, self.session.profile.user_id)
+            if found is None:
+                return None
+            text = f'Already saved report "{found.title}" (id {found.report_id}).'
+            self._built[1].update_state(
+                self.agent._config(self.session.session_id),
+                {"outcome": "report_saved", "final_text": text},
+                as_node="finalize",
+            )
+        except Exception as exc:
+            logger.error("resume: saved-draft check failed: %s", type(exc).__name__)
+            return None
+        return TurnResult(text, label="report", route="report", outcome="report_saved")
 
 
 def _result(ctx: TurnContext, out: Any) -> TurnResult:
