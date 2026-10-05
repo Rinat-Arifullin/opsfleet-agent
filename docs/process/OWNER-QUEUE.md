@@ -167,6 +167,10 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | D-130 | Should report-writer turns also get golden examples? Today only analyst turns do | Analyst turns only; the report writer works on verified results, not SQL | any time |
 | D-131 | The 0.6 similarity threshold for retrieving examples was tuned only on the offline fake embedder | Keep 0.6; re-check it in the live eval run (45) and adjust | at 45 |
 | D-132 | The known brand list is profiles + seed until a BigQuery product catalogue is available; brands outside it are not caught by the brand-scope check | Accept for the prototype; the HLD names the catalogue lookup as the production path | before HLD freeze |
+| D-133 | OD-9: list, search and the future delete-by-phrase all scan the owner's newest 200 reports (shared owner_matches; a note is shown when truncated). Delete by phrase cannot reach older reports | Accept for the prototype; lift with an FTS index (iteration 37) | before 22a sign-off |
+| D-134 | The follow-up-context half of AC-22.3 (an opened report becomes context for the next question) is not done; it needs a graph.py change | Land it as a small follow-up after 22a/22b, when graph.py is quiet | before 45 |
+| D-135 | /open grammar: an id, a 1-2 digit row number from the last listing (always a row, never an id), or title words (one hit opens, several are listed). /search takes words plus tag:, from:, to:. Queries need at least 3 letters or digits; wildcard characters are literals | Accept | any time |
+| D-136 | library.py imports the private _one_line from graph.context | Make it public (one_line) during the graph.py follow-up in D-134 | with D-134 |
 
 ## Scope questions (🟡: add now / defer to README "future work" / skip)
 
@@ -209,3 +213,4 @@ Started 2026-10-04 evening, when the owner handed Step 5 to the orchestrator for
 | 19 | done (🔴 pending) | bea1bf7. One review round (no BLOCKER, 3 MAJOR + 7 MINOR fixed). 3011 tests. D-78, D-90, D-106 done in code. Owner items D-118..D-122 |
 | 17 | done (🔴 pending) | cfa876a. Three review rounds (1 BLOCKER + 4 MAJOR + 7 MINOR, then 2 MAJOR + 2 MINOR in the re-review, all fixed or documented). 3056 tests. Owner items D-123..D-128 |
 | wire (D-96/D-117/D-114) | done (🔴 pending) | 3093 passed, plain and strict; seeds 1/7 green; review: no blocker, 5 fixes applied |
+| 18 | done (7736216) | 3131 passed, plain and strict; seed 5 green; review: no blocker, 3 major + 6 minor fixed, AC-22.3 follow-up half deferred (D-134) |

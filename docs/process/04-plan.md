@@ -547,8 +547,8 @@ The checkpointer exists **before** 17 (M-3). Role subgraphs are compiled with `c
 - `src/opsfleet_agent/reports/matcher.py`
 - `tests/unit/test_library.py`
 **Done criteria**:
-- [ ] Named tests: `test_list_reports_owner_only`, `test_view_report_owner_only`, `test_list_filter_matches_delete_matcher`, `test_list_masks_drifted_report_title`, `test_view_report_scope_drift`, `test_report_search_filters`, `test_search_reports_owner_and_scope`, `test_search_results_not_delete_targets`, `test_matcher_rejects_empty_and_wildcards`
-- [ ] [std]
+- [x] Named tests: `test_list_reports_owner_only`, `test_view_report_owner_only`, `test_list_filter_matches_delete_matcher`, `test_list_masks_drifted_report_title`, `test_view_report_scope_drift`, `test_report_search_filters`, `test_search_reports_owner_and_scope`, `test_search_results_not_delete_targets`, `test_matcher_rejects_empty_and_wildcards`
+- [x] [std]
 **Effort**: M (1) · **Depends on**: 17 · **Risk**: medium
 
 ## Iteration 19: REPL UX, command table, narrow `--resume` 🔴
