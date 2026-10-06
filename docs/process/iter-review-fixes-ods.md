@@ -74,6 +74,18 @@ areas touched: PII (D-227), deletion/erasure and audit (D-228, D-230), the libra
   and erasure is the authenticated IAM principal of the IAM-gated job, recorded in Cloud
   Audit Logs. `support_demo` stays as a synthetic id (README examples and tests use it); the
   config comment and README say so. Test: `test_triage.py`.
+- **D-260 Grounding reads month-day dates and "quarter of <year>" as dates.** A Q2 answer
+  ("second quarter of 2026 (April 1 to June 30)") got the estimate label: `2026` had no year
+  context and `30` (a yearless day above the small-int limit) was a figure. Now
+  `graph/grounding.py` treats `Q2/H1/second quarter/first half of <year>` as a year context
+  (checked against the data window), and a capitalised month with a day 1-31 in either order
+  (`June 30`, `30 June`, `the 30th of June`, ordinals, `June 1-30`, `April 1 to June 30`) as a
+  date when the day has an ordinal, closes a range, or is followed by punctuation, a line end
+  or a range word. An impossible day (`June 31`, `Feb 30`) is an unmatched `date`. Fail
+  closed: a day before a plain word stays a figure (`June 30 orders` may be a count of 30), as
+  does a lowercase month (`may 30`), a unit or decimal (`June 30%`) and a bare `half of 2093`;
+  they ground only if the ledger has the number. `$999` in the same answer is still labelled.
+  Test: `test_grounding_dates.py`.
 
 ## Docs touched
 - README: the user-erasure bullets (D-230), the `--as` note (D-234), the
