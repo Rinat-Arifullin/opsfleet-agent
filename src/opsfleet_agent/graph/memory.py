@@ -106,7 +106,10 @@ _SYNONYMS: Final[dict[str, dict[Any, tuple[str, ...]]]] = {
         ),
     },
 }  # fmt: skip
-_FIELDS: Final = tuple(_SYNONYMS)
+# Iteration 39b (D-240): a numeric field, the default list length for top-N and table answers.
+ROWS_MIN: Final = 1
+ROWS_MAX: Final = 50
+_FIELDS: Final = (*_SYNONYMS, "rows")
 
 _URL_RE: Final = re.compile(r"(?i)(https?:|www\.|://|\bftp:|[a-z0-9-]+\.(com|net|org|io)\b)")
 _CODE_RE: Final = re.compile(
@@ -263,7 +266,7 @@ class PreferenceStore(Protocol):
 @dataclass(frozen=True)
 class SessionMemory:
     churn_definition: str | None = None  # session restatement (A-4); None = default
-    preferences: Mapping[str, Any] = field(default_factory=dict)  # format/depth/charts
+    preferences: Mapping[str, Any] = field(default_factory=dict)  # format/depth/charts/rows
     notes: tuple[PreferenceNote, ...] = ()
     pending_clarification: PendingClarification | None = None
     # Snapshot of the scope the restatement was captured under (R4-L4): assembly applies it
@@ -497,8 +500,7 @@ def set_preference(
             return PreferenceResult(False, memory, NOTE_REJECTED, "too_many_notes")
         new_note = PreferenceNote(cleaned, dict(scope_snapshot))
         return PreferenceResult(True, replace(memory, notes=(*memory.notes, new_note)))
-    values = _SYNONYMS.get(field or "")
-    if values is None or not _valid_value(field or "", value):
+    if field not in _FIELDS or not _valid_value(field or "", value):
         return PreferenceResult(False, memory, INVALID_ARGS, "bad_field_or_value")
     if not _value_in_message(field or "", value, message):
         return PreferenceResult(False, memory, VALUE_NOT_IN_MESSAGE, "value_not_in_message")
@@ -506,13 +508,22 @@ def set_preference(
     return PreferenceResult(True, replace(memory, preferences=prefs))
 
 
+def clamp_rows(value: int) -> int:
+    """The ``rows`` preference bound (D-240): a whole number in ROWS_MIN..ROWS_MAX."""
+    return max(ROWS_MIN, min(ROWS_MAX, int(value)))
+
+
 def _valid_value(field: str, value: Any) -> bool:
+    if field == "rows":
+        return type(value) is int and ROWS_MIN <= value <= ROWS_MAX
     if field == "charts":
         return isinstance(value, bool)
     return isinstance(value, str) and value in _SYNONYMS[field]
 
 
 def _value_in_message(field: str, value: Any, message: str) -> bool:
+    if field == "rows":  # the number itself, as a whole number, in the user's message
+        return re.search(rf"(?<![\w.]){value}(?![\w.])", _norm(message)) is not None
     if field == "charts":
         negated = _CHART_NEG_RE.search(_norm(message)) is not None or any(
             message_contains(message, p) for p in _SYNONYMS["charts"][False]
@@ -554,4 +565,10 @@ def render_preferences(memory: SessionMemory) -> str:
         out.append("Suggest a chart when it helps.")
     elif charts is False:
         out.append("Do not suggest charts.")
+    rows = prefs.get("rows")
+    if _valid_value("rows", rows):  # a validated int, never user text (D-240)
+        out.append(
+            f"For top-N, ranked and list answers, show at least {rows} rows (use LIMIT {rows} "
+            "or more) unless the question names its own number; the result row cap still applies."
+        )
     return "\n".join(f"- {line}" for line in out)

@@ -67,7 +67,8 @@ areas touched: PII (D-227), deletion/erasure and audit (D-228, D-230), the libra
   `evals/live_seed.py` and `evals/live_sut.py` match. `obs/tracer.py` `scrub_text` replaces
   AWS access key ids (`AKIA`/`ASIA` + 16 `[0-9A-Z]`) with `[secret]`; the test builds the
   key-shaped strings at runtime, so no key-like literal is in the repo.
-  Tests: `test_eval_cases_golden.py`, `test_tracer.py`.
+  Tests: `test_eval_cases_golden.py`, `test_tracer.py`. (The skip was removed in iteration 39b,
+  D-239: the seeder now applies `session.preferences`.)
 - **D-234 Maintainer identity in production is the IAM principal.** `--as <id>` against
   `config/maintainers.yaml` is a local-prototype convenience, not authentication. The HLD
   (`docs/architecture.md`, Security) now states that in production the maintainer for triage

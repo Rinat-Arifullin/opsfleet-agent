@@ -2,10 +2,14 @@
 
 No LLM call. Every change goes through ``graph.memory.set_preference``, the same code
 validation the ``set_preference`` tool contract uses: enumerated values only (format, depth,
-charts), and notes through ``sanitise_note`` (no PII, URLs, code, instructions, wider scope;
-at most 200 characters, at most 5). A rejected change is not stored and the reply says why
-(AC-24.2). The store (``store.preferences``) is the source of truth: the graph reads it every
-turn, so a change applies from the next question and in later sessions.
+charts) or a whole number 1..50 (rows, iteration 39b), and notes through ``sanitise_note``
+(no PII, URLs, code, instructions, wider scope; at most 200 characters, at most 5). A
+rejected change is not stored and the reply says why (AC-24.2). ``/prefs <free text>`` that
+is not a subcommand ("/prefs give me min 10 rows in tables") goes through the
+chat-preference path (D-241): mapped onto the fields where it can be, otherwise stored as a
+note through the same sanitiser as ``/prefs note``. The store (``store.preferences``) is the
+source of truth: the graph reads it every turn, so a change applies from the next question
+and in later sessions.
 
 Not audited: a preference is the user's own UI choice, like ``/feedback`` (D-179). The
 trace event carries the action and the rejection code only, never a value or note text.
@@ -14,6 +18,7 @@ trace event carries the action and the rejection code only, never a value or not
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Final
 
 from opsfleet_agent.graph.context import snapshot_of
@@ -21,17 +26,23 @@ from opsfleet_agent.graph.memory import (
     MAX_NOTE_CHARS,
     MAX_NOTES,
     NOTE_REJECTED,
+    ROWS_MAX,
+    ROWS_MIN,
     SessionMemory,
+    clamp_rows,
     set_preference,
 )
+from opsfleet_agent.graph.nl_preferences import detect_preference
 from opsfleet_agent.obs import tracer as tr
 
 log = logging.getLogger(__name__)
 
 USAGE: Final = (
     "Usage: /prefs | /prefs set format table|bullets|prose | /prefs set depth "
-    "brief|standard|deep | /prefs set charts on|off | /prefs note <text> | /prefs reset"
+    "brief|standard|deep | /prefs set charts on|off | /prefs set rows 1-50 | /prefs note <text> "
+    "| /prefs reset | /prefs <what you prefer, in your words>"
 )
+PREFERENCE_FIELDS: Final = ("format", "depth", "charts", "rows")
 # Canonical command values -> (stored value, the message set_preference checks it against)
 _VALUES: Final[dict[str, dict[str, tuple[Any, str]]]] = {
     "format": {v: (v, v) for v in ("table", "bullets", "prose")},
@@ -41,10 +52,29 @@ _VALUES: Final[dict[str, dict[str, tuple[Any, str]]]] = {
         **{v: (False, "no charts") for v in ("off", "no", "false")},
     },
 }
+_ROWS_ALLOWED: Final = f"a whole number from {ROWS_MIN} to {ROWS_MAX}"
+
+
+def canonical_value(key: str, raw: Any) -> tuple[Any, str] | None:
+    """``(stored value, the message set_preference checks it against)`` for a ``/prefs set``
+    value, or None. ``rows`` takes any whole number and clamps it to 1..50 (D-240)."""
+    if key == "rows":
+        text = str(raw).strip()
+        if isinstance(raw, bool) or not re.fullmatch(r"\d{1,6}", text):
+            return None
+        rows = clamp_rows(int(text))
+        return rows, f"{rows} rows"
+    return _VALUES.get(key, {}).get(str(raw).strip().lower())
+
+
+def allowed_values(key: str) -> str:
+    return _ROWS_ALLOWED if key == "rows" else ", ".join(_VALUES.get(key, {}))
+
+
 NOT_A_PREFERENCE_TEXT: Final = (
-    "Not saved: '{key}' is not a preference. Preferences can set format, depth and charts "
-    "only; data access, personal-data protection, safety rules and report sections are fixed "
-    "and cannot be changed by a preference."
+    "Not saved: '{key}' is not a preference. Preferences can set format, depth, charts "
+    "and rows only; data access, personal-data protection, safety rules and report sections "
+    "are fixed and cannot be changed by a preference."
 )
 BAD_VALUE_TEXT: Final = "Not saved: {key} must be one of: {allowed}."
 NOTE_REJECTED_TEXT: Final = (
@@ -65,7 +95,7 @@ def _render(memory: SessionMemory) -> str:
     if not prefs and not memory.notes:
         return EMPTY_TEXT
     lines = ["Your preferences (they shape format and depth only; safety and scope rules win):"]
-    for key in ("format", "depth", "charts"):
+    for key in PREFERENCE_FIELDS:
         if key in prefs:
             value = prefs[key]
             shown = ("on" if value else "off") if key == "charts" else str(value)
@@ -108,20 +138,21 @@ def handle_prefs(
         if len(kv) != 2:
             return USAGE
         key, raw = kv[0].lower(), kv[1].lower()
-        if key not in _VALUES:
+        if key not in PREFERENCE_FIELDS:
             _trace(tracer, "set", "not_a_preference")
             return NOT_A_PREFERENCE_TEXT.format(key=key[:40])
-        if raw not in _VALUES[key]:
+        canonical = canonical_value(key, raw)
+        if canonical is None:
             _trace(tracer, "set", "bad_value")
-            return BAD_VALUE_TEXT.format(key=key, allowed=", ".join(_VALUES[key]))
-        value, message = _VALUES[key][raw]
+            return BAD_VALUE_TEXT.format(key=key, allowed=allowed_values(key))
+        value, message = canonical
         res = set_preference(current, message=message, scope_snapshot={}, field=key, value=value)
-        if not res.ok:  # defence in depth: the table above only holds valid values
+        if not res.ok:  # defence in depth: canonical_value only returns valid values
             _trace(tracer, "set", res.code)
-            return BAD_VALUE_TEXT.format(key=key, allowed=", ".join(_VALUES[key]))
+            return BAD_VALUE_TEXT.format(key=key, allowed=allowed_values(key))
         store.save(user_id, res.memory.persistable())
         _trace(tracer, "set", "")
-        return f"Saved: {key} = {raw}. It applies from your next question."
+        return f"Saved: {key} = {_raw_of(key, value)}. It applies from your next question."
     if action == "note" and rest:
         if scope is None:
             _trace(tracer, "note", "no_scope")
@@ -135,4 +166,113 @@ def handle_prefs(
         store.save(user_id, res.memory.persistable())
         _trace(tracer, "note", "")
         return "Note saved. It is used as background data for answers in your current scope."
-    return USAGE
+    if action in _SUBCOMMANDS:  # a known subcommand in the wrong form: the usage line
+        return USAGE
+    return _free_text(args.strip(), store=store, user_id=user_id, scope=scope, tracer=tracer)
+
+
+_SUBCOMMANDS: Final = frozenset({"view", "reset", "set", "note", "help"})
+
+
+def _free_text(text: str, *, store: Any, user_id: str, scope: Any, tracer: Any) -> str:
+    """``/prefs <free text>`` (D-241): the user invoked /prefs, so the text is a standing
+    preference by definition. Fields where the chat detector maps it, otherwise each sentence
+    as a note through the ``/prefs note`` sanitiser. A single word (most likely a mistyped
+    subcommand) and questions give the usage line."""
+    if len(text.split()) < 2:
+        return USAGE
+    detected = detect_preference(text, standing=True)
+    if detected is None:  # only questions or punctuation: nothing to save
+        return USAGE
+    reply, _saved, _rejected = apply_nl_preference(
+        detected, store=store, user_id=user_id, scope=scope, tracer=tracer
+    )
+    return reply or USAGE
+
+
+# --- natural-language preferences (iteration 39b, D-235..D-238) -----------------------------
+
+NL_UNDO_TEXT: Final = "To undo: /prefs reset (or /prefs to view what is saved)."
+NL_AMBIGUOUS_TEXT: Final = (
+    "Not saved: '{key}' was named more than once with different values. Say one, for "
+    "example /prefs set {key} {example}."
+)
+NL_UNAVAILABLE_TEXT: Final = "Not saved: preferences are unavailable right now."
+_NL_EXAMPLE: Final = {"format": "table", "depth": "brief", "charts": "off", "rows": "10"}
+
+
+def _raw_of(key: str, value: Any) -> str:
+    if key == "charts" and isinstance(value, bool):
+        return "on" if value else "off"
+    return str(value)
+
+
+def apply_nl_preference(
+    detected: Any, *, store: Any, user_id: str, scope: Any = None, tracer: Any = None
+) -> tuple[str, bool, bool]:
+    """Persist a preference the user stated in chat (``graph.nl_preferences.NLPreference``).
+
+    The same code path as ``/prefs set`` and ``/prefs note``: each value goes through its
+    canonical ``/prefs`` message into ``set_preference`` and each note through
+    ``sanitise_note`` (D-238). ``detected`` comes only from the user's own message of this
+    turn. Returns ``(confirmation text, saved anything, rejected anything)``.
+    """
+    if store is None:
+        _trace(tracer, "nl", "unavailable")
+        return NL_UNAVAILABLE_TEXT, False, True
+    try:
+        current = store.load(user_id)
+    except Exception as exc:  # noqa: BLE001 - a store failure must not fail the turn
+        log.warning("nl prefs load failed: %s", tr.format_error(exc))
+        _trace(tracer, "nl", "unavailable")
+        return NL_UNAVAILABLE_TEXT, False, True
+    saved: list[str] = []
+    problems: list[str] = []
+    for key, value in detected.settings:
+        found = canonical_value(key, _raw_of(key, value))
+        if found is None:
+            problems.append(BAD_VALUE_TEXT.format(key=key[:40], allowed=allowed_values(key)))
+            continue
+        canonical, message = found
+        res = set_preference(
+            current, message=message, scope_snapshot={}, field=key, value=canonical
+        )
+        if not res.ok:
+            _trace(tracer, "nl_set", res.code)
+            problems.append(BAD_VALUE_TEXT.format(key=key, allowed=allowed_values(key)))
+            continue
+        current = res.memory
+        saved.append(f"{key} = {_raw_of(key, canonical)}")
+        _trace(tracer, "nl_set", "")
+    for note in detected.notes:
+        if scope is None:
+            _trace(tracer, "nl_note", "no_scope")
+            problems.append(NO_SCOPE_TEXT)
+            continue
+        res = set_preference(current, message=note, scope_snapshot=snapshot_of(scope), note=note)
+        if not res.ok:
+            _trace(tracer, "nl_note", res.code)
+            too_many = res.code == NOTE_REJECTED and res.reason == "too_many_notes"
+            problems.append(TOO_MANY_NOTES_TEXT if too_many else NOTE_REJECTED_TEXT)
+            continue
+        current = res.memory
+        saved.append("a note")
+        _trace(tracer, "nl_note", "")
+    for key in detected.ambiguous:
+        _trace(tracer, "nl_set", "ambiguous")
+        problems.append(NL_AMBIGUOUS_TEXT.format(key=key, example=_NL_EXAMPLE.get(key, "")))
+    if saved:
+        try:
+            store.save(user_id, current.persistable())
+        except Exception as exc:  # noqa: BLE001 - say so instead of claiming it was saved
+            log.warning("nl prefs save failed: %s", tr.format_error(exc))
+            _trace(tracer, "nl", "unavailable")
+            return NL_UNAVAILABLE_TEXT, False, True
+    lines: list[str] = []
+    if saved:
+        lines.append(
+            f"Saved preference: {', '.join(saved)}. It applies from now on, in this and later "
+            f"sessions. {NL_UNDO_TEXT}"
+        )
+    lines += problems
+    return "\n".join(lines), bool(saved), bool(problems)

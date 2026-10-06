@@ -145,8 +145,8 @@ def test_turn_cap(tmp_path):
     assert built == []
 
 
-# saved_reports, persona and setup_turns are seeded live (tests/unit/test_live_seed.py).
-@pytest.mark.parametrize("seed", ["preferences", "unknown_seed"])
+# saved_reports, persona, preferences and setup_turns are seeded live (test_live_seed.py).
+@pytest.mark.parametrize("seed", ["unknown_seed", "memory"])
 def test_unsupported_session_seeds_fail_clearly(tmp_path, seed):
     sut, _ = make_sut(tmp_path)
     with pytest.raises(CaseError, match="not supported"):

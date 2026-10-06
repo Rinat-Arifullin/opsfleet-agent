@@ -14,7 +14,7 @@ State lives in a dedicated data dir (``OPSFLEET_EVAL_DATA_DIR``, default
 ``<OPSFLEET_DATA_DIR or data>/eval-live``), so eval sessions, reports and quota never mix
 with the user's own store (OD-1 in docs/process/iter40b-ods.md). Inside it each case runs
 as a namespaced user (``<id>.ev<tag>``) with its ``session:`` seeds (saved reports, persona,
-setup turns) applied through the real APIs: see :mod:`evals.live_seed`.
+preferences, setup turns) applied through the real APIs: see :mod:`evals.live_seed`.
 """
 
 from __future__ import annotations
@@ -47,8 +47,7 @@ FLUSH_BOUND_S: Final = 5.0
 ENV_DATA_DIR: Final = "OPSFLEET_EVAL_DATA_DIR"
 ENV_CASE_TIMEOUT: Final = "OPSFLEET_EVAL_CASE_TIMEOUT_S"
 UNATTRIBUTED: Final = "unattributed"  # LLM calls the trace does not name a model for
-# Seeds applied live (evals/live_seed.py); `preferences` is not yet (they persist in
-# user_preferences since iteration 39).
+# Seeds applied live (evals/live_seed.py), `preferences` included since iteration 39b (D-239).
 SUPPORTED_SESSION_KEYS: Final = live_seed.SUPPORTED_SESSION_KEYS
 
 

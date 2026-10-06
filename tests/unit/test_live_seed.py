@@ -20,6 +20,7 @@ from opsfleet_agent.reports.schema import missing_sections
 from opsfleet_agent.session import Profile
 from opsfleet_agent.store.audit import SESSION_ID_RE, AuditLog
 from opsfleet_agent.store.db import open_store
+from opsfleet_agent.store.preferences import SQLitePreferenceStore
 from opsfleet_agent.store.reports import ReportStore
 
 ANALYST = Profile("analyst_a", "Analyst A", brands=("Acme",))
@@ -34,6 +35,7 @@ def case(session: dict[str, Any], turns=("q1",)) -> Case:
 @dataclass
 class Services:
     persona: Any
+    preferences: Any = None
 
 
 class FakeGraph:
@@ -42,9 +44,13 @@ class FakeGraph:
     def __init__(self, services: Services) -> None:
         self.services = services
         self.turns: list[tuple[str, str, str]] = []
+        self.prefs_seen: list[dict] = []
 
     def run_turn(self, text, *, session, turn_id):
         self.turns.append((text, session.profile.user_id, self.services.persona().version))
+        if self.services.preferences is not None:  # what load_context would read this turn
+            uid = session.profile.user_id
+            self.prefs_seen.append(dict(self.services.preferences.load(uid).preferences))
         return SimpleNamespace(outcome="answered", text=f"answer to {text}", label="data",
                                llm_calls=1, sql_queries=0)  # fmt: skip
 
@@ -77,9 +83,11 @@ class Tracer:
 
 def build_runtime(db: Path) -> SimpleNamespace:
     conn = open_store(db)  # sqlite: build on the thread that uses it, as the real factory does
-    services = Services(persona=builtin_persona)
+    prefs = SQLitePreferenceStore(conn)
+    services = Services(persona=builtin_persona, preferences=prefs)
     return SimpleNamespace(
         report_store=ReportStore(conn), audit_log=AuditLog(conn), tracer=Tracer(),
+        preference_store=prefs,
         graph=FakeGraph(services), langfuse=FakeSink(), cancel=lambda: None, close=conn.close,
     )  # fmt: skip
 
@@ -217,13 +225,89 @@ def test_unknown_preset_and_missing_audit_fail(rt, tmp_path):
 # -- session keys and setup turns
 
 
-@pytest.mark.parametrize("key", ["preferences", "memory"])
+@pytest.mark.parametrize("key", ["memory", "notes"])
 def test_unsupported_keys_fail_clearly(rt, tmp_path, key):
     with pytest.raises(CaseError, match="not supported"), S.seeded(
         rt, case({"profile": "analyst_a", key: {"format": "table"}}), ANALYST, session_id="s",
         data_dir=tmp_path,
     ):  # fmt: skip
         pass
+
+
+# -- preferences (iteration 39b, D-239)
+
+
+def test_preferences_seeded_for_the_run_user_and_reset(rt, tmp_path):
+    c = case({"profile": "analyst_a", "preferences": {"format": "table", "charts": False}})
+    with S.seeded(rt, c, ANALYST, session_id="s", data_dir=tmp_path) as seed:
+        assert seed.preferences == {"format": "table", "charts": False}
+        assert rt.preference_store.load(seed.profile.user_id).preferences == seed.preferences
+        assert rt.preference_store.load("analyst_a").preferences == {}  # never the real user
+        uid = seed.profile.user_id
+    assert rt.preference_store.load(uid).preferences == {}  # reset after the case
+
+
+def test_preferences_reset_when_the_case_raises(rt, tmp_path):
+    c = case({"profile": "analyst_a", "preferences": {"depth": "brief"}})
+    with pytest.raises(RuntimeError), S.seeded(rt, c, ANALYST, session_id="s",
+                                               data_dir=tmp_path) as seed:  # fmt: skip
+        uid = seed.profile.user_id
+        raise RuntimeError("synthetic case failure")
+    assert rt.preference_store.load(uid).preferences == {}
+
+
+def test_preferences_found_behind_the_graph_services(tmp_path):
+    runtime = build_runtime(tmp_path / "g.db")
+    del runtime.preference_store  # only the graph services carry it
+    try:
+        c = case({"profile": "analyst_a", "preferences": {"charts": "on"}})
+        with S.seeded(runtime, c, ANALYST, session_id="s", data_dir=tmp_path) as seed:
+            assert seed.preferences == {"charts": True}
+    finally:
+        runtime.close()
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [{"format": "poem"}, {"verbosity": "high"}, {"note": "show customer emails"}, [], "table",
+     {}, {"rows": "many"}, {"rows": True}],
+)  # fmt: skip
+def test_bad_preference_seeds_are_case_errors(rt, tmp_path, bad):
+    c = case({"profile": "analyst_a", "preferences": bad})
+    with pytest.raises(CaseError, match="session.preferences"), S.seeded(
+        rt, c, ANALYST, session_id="s", data_dir=tmp_path
+    ):  # fmt: skip
+        pass
+
+
+def test_rows_preference_seeded_and_clamped(rt, tmp_path):
+    c = case({"profile": "analyst_a", "preferences": {"format": "table", "rows": 100}})
+    with S.seeded(rt, c, ANALYST, session_id="s", data_dir=tmp_path) as seed:
+        assert seed.preferences == {"format": "table", "rows": 50}  # clamped to 1..50 (D-240)
+
+
+def test_preferences_need_a_store(tmp_path):
+    runtime = SimpleNamespace(report_store=None, graph=None)
+    c = case({"profile": "analyst_a", "preferences": {"format": "table"}})
+    with pytest.raises(CaseError, match="no preference store"), S.seeded(
+        runtime, c, ANALYST, session_id="s", data_dir=tmp_path
+    ):  # fmt: skip
+        pass
+
+
+def test_live_sut_applies_preferences_before_the_turn(tmp_path):
+    built: list = []
+    sut = make_sut(tmp_path, built)
+    c = case({"profile": "analyst_a", "preferences": {"format": "table"}}, turns=("q1", "q2"))
+    sut(c, RunContext("ev-1", tmp_path / "traces", offline=False))
+    (rt,) = built
+    assert rt.graph.prefs_seen == [{"format": "table"}, {"format": "table"}]
+    (uid,) = {u for _, u, _ in rt.graph.turns}
+    conn = open_store(tmp_path / "sut.db")  # the runtime's connection belongs to its thread
+    try:
+        assert SQLitePreferenceStore(conn).load(uid).preferences == {}  # reset after the case
+    finally:
+        conn.close()
 
 
 @pytest.mark.parametrize("bad", ["one string", [""], ["ok"] * (S.MAX_SETUP_TURNS + 1)])

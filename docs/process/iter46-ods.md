@@ -37,7 +37,9 @@ No slash command changed, so `/help` is unchanged.
   change is a `PREFERENCE_REJECTED` envelope and nothing is stored. Routing is unchanged: a
   `memory` label still goes to the light path (D-180); only a message the router labels
   `library` reaches this tool. This is the smallest safe change: it adds no new route for
-  preferences.
+  preferences. (Iteration 39b, D-235: a code-owned detector in `input_guard` now saves
+  standing preferences stated in chat before routing reaches this tool; the tool remains for
+  phrasings the detector does not cover.)
 - **D-196 `GraphServices` carries `audit` and `export_dir`.** Rename and export through the
   agent call the iteration 33 tool functions, which write the audit record first (D-191). The
   graph therefore needs the audit log and the exports directory. When `audit` is `None` (tests

@@ -31,7 +31,7 @@ REQUIRED_GOLDEN = {
 }
 OPTIONAL_GOLDEN = {
     "persona_tone_change", "preference_table_vs_bullets", "retry_report_without_ledger",
-    "library_agent",
+    "library_agent", "preference_from_chat",
 }
 # Live-1 set 2: more topics, so live runs do not repeat the same questions
 SET2_GOLDEN = {
@@ -93,10 +93,13 @@ def test_golden_cases_shape(cases):
 
 def test_optional_cases_marked(cases):
     g = _golden(cases)
-    assert g["preference_table_vs_bullets"].skip
-    skip = g["preference_table_vs_bullets"].skip
-    assert "eval seeder" in skip and "not shipped" not in skip  # 39 has shipped (D-233)
+    # the live seeder applies session.preferences since iteration 39b (D-239)
+    assert not g["preference_table_vs_bullets"].skip
+    assert g["preference_table_vs_bullets"].session["preferences"] == {"format": "table"}
     assert not g["persona_tone_change"].skip
+    chat = g["preference_from_chat"]
+    assert not chat.skip and "preferences" not in chat.session  # set by the first turn
+    assert len(chat.turns) == 2
 
 
 def test_golden_profiles_are_synthetic(cases):

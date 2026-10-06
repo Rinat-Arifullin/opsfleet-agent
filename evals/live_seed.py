@@ -18,8 +18,11 @@ Seeds go through the production APIs, never raw SQL:
 * ``setup_turns`` are played as real turns before the case's own turns; their results and
   spans are not scored.
 
-``preferences`` (not seeded yet; they persist in ``user_preferences`` since iteration 39)
-and unknown keys raise ``CaseError``.
+* ``preferences`` (``format``/``depth``/``charts``) are saved for the namespaced user with
+  ``commands.preferences.apply_nl_preference`` on ``SQLitePreferenceStore``, the same
+  validation and store as ``/prefs set``, and reset after the case (D-239).
+
+Unknown keys raise ``CaseError``.
 All seed text is synthetic.
 """
 
@@ -35,7 +38,10 @@ from typing import Any, Final
 
 from evals.run import Case, CaseError
 
-SUPPORTED_SESSION_KEYS: Final = frozenset({"profile", "saved_reports", "persona", "setup_turns"})
+SUPPORTED_SESSION_KEYS: Final = frozenset(
+    {"profile", "saved_reports", "persona", "setup_turns", "preferences"}
+)
+PREFERENCE_KEYS: Final = ("format", "depth", "charts", "rows")
 REPORT_KEYS: Final = frozenset({"id", "title", "owner", "created", "tags", "sections"})
 MAX_SEED_REPORTS: Final = 20
 MAX_SETUP_TURNS: Final = 4
@@ -111,6 +117,7 @@ class Seeded:
     tag: str
     reports: tuple[Any, ...] = ()  # SavedReport records
     persona_version: str | None = None
+    preferences: Mapping[str, Any] | None = None  # what the store holds after seeding
 
 
 def _owner_id(owner: Any, base_user_id: str, tag: str) -> str:
@@ -178,6 +185,56 @@ def seed_reports(store: Any, case: Case, run_profile: Any, base_user_id: str, ta
     return tuple(out)
 
 
+def _preference_store(runtime: Any) -> Any:
+    store = getattr(runtime, "preference_store", None)
+    if store is None:
+        from opsfleet_agent.graph.degraded import unwrap
+
+        services = getattr(unwrap(getattr(runtime, "graph", None)), "services", None)
+        store = getattr(services, "preferences", None)
+    return store
+
+
+def _raw_preference(key: str, value: Any) -> str:
+    if key == "charts" and isinstance(value, bool):  # YAML `on`/`off` load as booleans
+        return "on" if value else "off"
+    return str(value).strip().lower()
+
+
+def seed_preferences(store: Any, case: Case, user_id: str) -> Mapping[str, Any] | None:
+    """Save ``session.preferences`` for ``user_id`` through the ``/prefs`` path (D-239)."""
+    from opsfleet_agent.commands.preferences import (
+        allowed_values,
+        apply_nl_preference,
+        canonical_value,
+    )
+    from opsfleet_agent.graph.nl_preferences import NLPreference
+
+    raw = case.session.get("preferences")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or not raw:
+        raise CaseError(f"session.preferences must be a mapping of {list(PREFERENCE_KEYS)}")
+    unknown = sorted(set(raw) - set(PREFERENCE_KEYS))
+    if unknown:
+        raise CaseError(f"session.preferences: unknown keys {unknown} "
+                        f"(known: {list(PREFERENCE_KEYS)})")  # fmt: skip
+    if store is None:
+        raise CaseError("the live runtime has no preference store to seed")
+    settings = []
+    for key in (k for k in PREFERENCE_KEYS if k in raw):
+        canonical = canonical_value(key, _raw_preference(key, raw[key]))
+        if canonical is None:
+            raise CaseError(f"session.preferences.{key} must be one of: {allowed_values(key)}")
+        settings.append((key, canonical[0]))  # the canonical stored value
+    detected = NLPreference(settings=tuple(settings))
+    text, saved, rejected = apply_nl_preference(detected, store=store, user_id=user_id)
+    if not saved or rejected:
+        store.reset(user_id)
+        raise CaseError(f"session.preferences not applied: {text}")
+    return dict(store.load(user_id).preferences)
+
+
 def _structural_smoke(persona: Any) -> bool:
     # The real smoke subset is a live eval run of its own (commands/persona.py); a seed only
     # needs the parsed, validated persona (OD-6).
@@ -232,9 +289,22 @@ def seeded(runtime: Any, case: Case, profile: Any, *, session_id: str, data_dir:
     run_profile = dataclasses.replace(profile, user_id=run_user_id(base, tag))
     reports = seed_reports(getattr(runtime, "report_store", None), case, run_profile, base, tag,
                            session_id)  # fmt: skip
+    store = _preference_store(runtime) if "preferences" in case.session else None
+    prefs = seed_preferences(store, case, run_profile.user_id)
+    try:
+        with _persona_seeded(runtime, case, run_profile, data_dir=data_dir, tag=tag) as version:
+            yield Seeded(run_profile, base, tag, reports, version, prefs)
+    finally:
+        if prefs is not None:
+            store.reset(run_profile.user_id)
+
+
+@contextlib.contextmanager
+def _persona_seeded(runtime: Any, case: Case, run_profile: Any, *, data_dir: Path,
+                    tag: str) -> Iterator[str | None]:  # fmt: skip
     preset = case.session.get("persona")
     if preset is None:
-        yield Seeded(run_profile, base, tag, reports)
+        yield None
         return
     services = _services(runtime)
     source, version = apply_persona_preset(
@@ -245,6 +315,6 @@ def seeded(runtime: Any, case: Case, profile: Any, *, session_id: str, data_dir:
     previous = services.persona
     services.persona = source
     try:
-        yield Seeded(run_profile, base, tag, reports, version)
+        yield version
     finally:
         services.persona = previous

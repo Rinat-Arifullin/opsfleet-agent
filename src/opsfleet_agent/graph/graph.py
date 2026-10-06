@@ -55,6 +55,7 @@ from langgraph.types import Command, interrupt
 
 from opsfleet_agent.bq.client import BigQueryRunner
 from opsfleet_agent.bq.schema import TableMetadataCache
+from opsfleet_agent.commands.preferences import apply_nl_preference
 from opsfleet_agent.config import ConfigError, Settings
 from opsfleet_agent.delete import flow as delete_flow
 from opsfleet_agent.golden.seed import Hit, to_store_items
@@ -99,10 +100,11 @@ from opsfleet_agent.graph.intents import (
 )
 from opsfleet_agent.graph.llm import Limiters, LLMSuccess, LLMWrapper
 from opsfleet_agent.graph.memory import SessionMemory, render_preferences
+from opsfleet_agent.graph.nl_preferences import detect_preference
 from opsfleet_agent.graph.providers import is_local
 from opsfleet_agent.guards.echo import ECHO_REJECTED, ECHO_RETRY_RULE, is_echo
 from opsfleet_agent.guards.echo import normalise as normalise_echo
-from opsfleet_agent.guards.input import PII_REQUEST, REFUSALS, check_input
+from opsfleet_agent.guards.input import NON_ENGLISH, PII_REQUEST, REFUSALS, check_input
 from opsfleet_agent.guards.output import REFUSAL_TEXT, ROLE_TOOLS, OutputVerdict, check_output
 from opsfleet_agent.guards.plain_language import (
     PLAIN_LANGUAGE_RULE,
@@ -762,6 +764,13 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
         decision = check_input(ctx.raw_text, detector=_turn_detector(ctx))
         if not decision.allowed or decision.scrubbed is None:
             _record(ctx, "guard", "input", verdict="refuse", rule=decision.rule)
+            if decision.rule == NON_ENGLISH and decision.scrubbed and not ctx.forced_label:
+                # D-236: a non-English message that is ONLY a standing format/depth/charts
+                # preference ("отвечай таблицами") is saved; every other rule ran first and
+                # found nothing. Notes and mixed messages keep the English-only refusal.
+                pref = _nl_preference_only(ctx, decision.scrubbed)
+                if pref is not None:
+                    return pref
             text = decision.refusal or REFUSAL_TEXT
             return {"route": "refuse", "final_text": text, "outcome": "refused", "label": "refused"}
         ctx.notice = decision.pii_notice
@@ -815,6 +824,8 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
             ctx.notice = ctx.notice or CUSTOMER_BANDS_NOTICE
         if update["route"] == "refuse":
             update.update(final_text=refusal or rd.refusal_text or REFUSAL_TEXT, outcome="refused")
+        elif not ctx.forced_label:
+            _nl_preference(ctx, decision.scrubbed, update)
         return update
 
     def light(state: TurnState) -> dict[str, Any]:
@@ -1618,8 +1629,57 @@ def _assumptions(ctx: TurnContext, state: TurnState, text: str) -> str:
     )  # fmt: skip
 
 
+def _nl_preference(
+    ctx: TurnContext, message: str, update: dict[str, Any], *, detected: Any = None
+) -> None:
+    """Iteration 39b (D-235..D-238): a standing preference stated in the user's own message
+    of this turn ("from now on answer in tables", "отвечай кратко") is saved through the
+    ``/prefs`` code path. A message that is only a preference gets the code-owned
+    confirmation (route ``preference``, no LLM answer); a message that also asks a data
+    question keeps its route and the confirmation becomes the turn notice (D-237). The
+    graph reloads the store in ``load_context``, so the preference shapes this answer too."""
+    detected = detected or detect_preference(message)
+    if detected is None:
+        return
+    text, saved, rejected = apply_nl_preference(
+        detected, store=ctx.services.preferences, user_id=ctx.profile.user_id,
+        scope=ctx.sql_session.scope, tracer=ctx.tracer,
+    )  # fmt: skip
+    # the /prefs "tool" span (apply_nl_preference) carries the outcome; this one the route
+    _record(ctx, "router", "intent", label="preference",
+            route="notice" if detected.mixed else "preference")  # fmt: skip
+    if detected.mixed:
+        ctx.notice = f"{ctx.notice}\n{text}" if ctx.notice else text
+        return
+    update.update(label="preference", route="preference", final_text=text,
+                  outcome="refused" if rejected and not saved else "answered")  # fmt: skip
+
+
+def _nl_preference_only(ctx: TurnContext, message: str) -> dict[str, Any] | None:
+    """D-236: the enum-only preference of a message the English-only rule refused, or None.
+    No free text of such a message is ever stored (no notes), and no model sees it.
+
+    The heuristic name detector can mask a Russian verb pair as a name ("показывай минимум
+    10 строк"), so the raw text is checked too. That is safe: only allowlisted enum or
+    bounded-int values are stored, never text, and the update keeps the scrubbed message."""
+
+    def _enum_only(text: str) -> Any:
+        got = detect_preference(text)
+        ok = got is not None and not got.mixed and not got.notes and got.settings
+        return got if ok else None
+
+    detected = _enum_only(message) or _enum_only(str(ctx.raw_text or ""))
+    if detected is None:
+        return None
+    update: dict[str, Any] = {"message": message, "pii_notice": ""}
+    _nl_preference(ctx, message, update, detected=detected)
+    return update
+
+
 # routes whose final_text is code-owned and shown as is (iteration 46: the library failure)
-_TEXT_ROUTES: Final = ("refuse", "light", "clarify", "report", "delete", "retry", "library")
+_TEXT_ROUTES: Final = (
+    "refuse", "light", "clarify", "report", "delete", "retry", "library", "preference",
+)  # fmt: skip
 
 
 def _finalize(ctx: TurnContext, state: TurnState) -> dict[str, Any]:
@@ -1787,7 +1847,7 @@ def _errored(state: TurnState) -> bool:
 def _after_guard(state: TurnState) -> str:
     if _errored(state):
         return "finalize"
-    if state.get("route") == "refuse":
+    if state.get("route") in ("refuse", "preference"):
         return "finalize"
     if state.get("route") == "light":
         # R2-M1(a): a reply to a pending clarification ("1") must reach load_context even when

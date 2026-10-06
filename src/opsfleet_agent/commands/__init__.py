@@ -341,8 +341,9 @@ def _table() -> dict[str, Command]:
         Command("/persona", "/persona", "Show the active persona version.", _persona),
         Command(
             "/prefs",
-            "/prefs [set <key> <value>|note|reset]",
-            "View or change your answer preferences.",
+            "/prefs [set <key> <value>|note|reset|<your words>]",
+            "View or change answer preferences: format, depth, charts, rows (1-50), notes. "
+            "Or say it: '/prefs give me min 10 rows in tables', 'from now on answer in tables'.",
             _prefs,
         ),
         Command("/reports", "/reports [words]", "List your saved reports.", _reports),

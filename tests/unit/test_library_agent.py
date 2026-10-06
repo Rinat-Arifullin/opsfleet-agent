@@ -259,17 +259,23 @@ def test_delete_tool_refusals(lenv) -> None:
 
 def test_set_preference_uses_the_prefs_store_and_validation(lenv) -> None:
     model = lenv.script(call("set_preference", field="format", value="table"), ModelTurn("Saved."))
-    out = ask(lenv, "from now on please answer as a table")
+    # phrasing the code-owned detector (iteration 39b, D-235) leaves to the library agent
+    out = ask(lenv, "save a preference: format as a table")
     assert model.results == [{"ok": True, "saved": True}] and out.outcome == "answered"
     assert lenv.prefs.load(PROFILE.user_id).preferences == {"format": "table"}
     # a value the user did not ask for, or a field that is not a preference, is not stored
     model = lenv.script(call("set_preference", field="depth", value="deep"), ModelTurn("No."))
-    ask(lenv, "from now on please answer as a table")
+    ask(lenv, "save a preference: format as a table")
     model2 = lenv.script(call("set_preference", field="scope", value="all"), ModelTurn("No."))
     ask(lenv, "set my scope to all brands")
     for res in (model.results[0], model2.results[0]):
         assert res["error"]["code"] == la.PREFERENCE_REJECTED
     assert lenv.prefs.load(PROFILE.user_id).preferences == {"format": "table"}
+    # rows (D-240): a string number from the tool becomes an int, still checked against 1..50
+    model = lenv.script(call("set_preference", field="rows", value="12"), ModelTurn("Saved."))
+    ask(lenv, "save a preference: rows 12")
+    assert model.results == [{"ok": True, "saved": True}]
+    assert lenv.prefs.load(PROFILE.user_id).preferences == {"format": "table", "rows": 12}
 
 
 # --- failure path ------------------------------------------------------------------------------

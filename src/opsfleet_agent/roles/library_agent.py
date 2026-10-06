@@ -215,9 +215,9 @@ LIBRARY_TOOL_SPECS: Final[dict[str, ToolSpec]] = {
             "type": "object",
             "properties": {
                 "action": _str("set, view or reset"),
-                "field": _str("format, depth or charts"),
+                "field": _str("format, depth, charts or rows"),
                 "value": _str("format: table|bullets|prose; depth: brief|standard|deep; "
-                              "charts: true|false"),
+                              "charts: true|false; rows: a whole number 1-50"),
                 "note": _str("A short background note, in the user's words"),
             },  # fmt: skip
         },
@@ -490,6 +490,8 @@ def make_library_executors(
         value: Any = args.get("value")
         if args.get("field") == "charts" and isinstance(value, str):
             value = {"true": True, "false": False}.get(value.strip().lower(), value)
+        if args.get("field") == "rows" and isinstance(value, str) and value.strip().isdigit():
+            value = int(value.strip())  # set_preference checks 1..50 and that it is in the message
         res = set_preference(
             current, message=user_message, scope_snapshot=dict(scope_snapshot or {}),
             action=action, field=_opt_str(args, "field"), value=value,

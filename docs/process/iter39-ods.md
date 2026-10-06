@@ -60,7 +60,9 @@ No new dependencies and no config fields.
   audited either, and a preference is the user's own UI choice. The trace records an
   allowlisted `tool` span with the action and the rejection code only, never a value or note
   text.
-- **D-180 No natural-language preference hook.** "Remember I like tables" is routed by the router's
+- **D-180 No natural-language preference hook.** *Superseded by D-235..D-238 (iteration 39b,
+  `docs/process/iter-nl-prefs-ods.md`): a standing preference stated in chat is now saved
+  through the `/prefs` path.* Original decision: "Remember I like tables" is routed by the router's
   `memory` label to the light path. Wiring `set_preference` into that path changes routing
   and the light-path prompt, which is not a low-risk change for this iteration. Changes go
   through `/prefs` only. The new adversarial eval case checks that an NL attempt to store a
@@ -110,7 +112,7 @@ Suite: 3933 passed, 6 deselected. The strict golden run and the offline fixture 
 new eval case passes offline from its recorded `fake` (it was not run live).
 
 ## Out of scope
-- Natural-language preference changes (D-180)
+- Natural-language preference changes (D-180; built later in iteration 39b, D-235..D-238)
 - The library agent
 - Adding the table to the iteration 23 residue test and the iteration 35 erasure flow (the
   hook is in place, D-181)

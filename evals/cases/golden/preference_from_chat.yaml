@@ -1,0 +1,42 @@
+# golden/preference_from_chat (iteration 39b, D-235..D-238). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT (not run live yet: owner).
+# Turn 1 states a standing preference in plain words: the code-owned detector saves it through the
+# /prefs path with no model call and confirms how to undo it. Turn 2 is a data question with no
+# format request, so the table comes from the stored preference.
+turns:
+- From now on answer in tables.
+- What were the top 5 categories by revenue last month?
+tags:
+- quick
+- preferences
+- optional
+session:
+  profile: analyst_a
+expect:
+  outcome: answered
+  must_contain:
+  - '|'
+  max_llm_calls: 10
+  judge:
+    min_score: 4
+estimate:
+  llm:
+    quick_analyst: 2
+    report_verifier: 1
+  bq: 1
+fake:
+  outcome: answered
+  text: |-
+    | category | revenue |
+    |---|---|
+    | Jeans | (from query) |
+  llm_calls:
+    gemini-3.1-flash-lite: 3
+  bq_queries: 1
+  judge_score: 5
+  sql:
+  - SELECT 1 /* recorded placeholder */
+
+# D-160 profile matrix: the preference is per user and the format check is scope-independent.
+profiles: [analyst_a]
+profiles_reason: the format comes from the stored preference, not the scope; one profile is enough
