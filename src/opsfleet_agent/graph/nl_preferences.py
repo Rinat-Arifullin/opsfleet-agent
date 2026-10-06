@@ -164,6 +164,11 @@ _CHART_NEG_RE: Final = re.compile(
     rf"{_W}(?:don't|dont|do\s+not|not|no|without|skip|never|stop|no\s+more|"
     rf"без|не|нет|никаких|никогда)\s+(?:[\w']+\s+){{0,3}}?{_CHART_WORDS}{_E}"
 )
+# "charts off", "charts: none", "графики не нужны": the opt-out word after the chart word
+_CHART_NEG_POST_RE: Final = re.compile(
+    rf"{_W}{_CHART_WORDS}\s*[:=,-]?\s*(?:please\s+)?(?:off|none|no|never|disabled?|hidden|hide|"
+    rf"не\s+нужны|не\s+надо|выкл\w*|нет){_E}"
+)
 # "tables instead of bullets", "tables, not bullets": the alternative is removed before mapping
 _ALTERNATIVE_RE: Final = re.compile(
     rf"{_W}(?:instead\s+of|rather\s+than|over|not|вместо|а\s+не|но\s+не|не)\s+"
@@ -231,7 +236,7 @@ def _values(norm: str) -> tuple[list[tuple[str, Any]], list[str]]:
             out.append((field_name, found[0]))
         elif len(found) > 1:
             ambiguous.append(field_name)
-    if _CHART_NEG_RE.search(norm):
+    if _CHART_NEG_RE.search(norm) or _CHART_NEG_POST_RE.search(norm):
         out.append(("charts", False))
     elif _CHART_RE.search(norm):
         out.append(("charts", True))

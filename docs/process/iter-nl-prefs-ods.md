@@ -88,9 +88,19 @@ No new dependencies, no config fields, no schema change.
   `/prefs`, so no standing marker is needed and no data-request check applies. Values map to
   the fields; any sentence with no value becomes a note through the `/prefs note` sanitiser
   (policy, PII and instruction notes are refused with the same text). The reply lists what
-  was saved and how to undo it. The usage line stays for an empty or malformed subcommand
-  (`/prefs set`, `/prefs set rows`), a single word (most likely a mistyped subcommand) and a
-  question.
+  was saved and how to undo it. The usage line stays for an empty subcommand (`/prefs set`,
+  `/prefs note`), a single word (most likely a mistyped subcommand) and a question.
+- **D-242 lenient `/prefs set`.** The owner typed `/prefs set format reports table` and got the
+  usage line again. A `set` that is not exactly `<field> <value>` now goes through the same
+  detector, but saves field values only, never a note: with a named field (`set format
+  reports table`, `set depth very short`, `set charts none`, `set rows 10 please`) only that
+  field may be saved; with no field name (`set tables`) any field value found is saved. Nothing
+  found gives a targeted line: the field's allowed values (`set format markdown`, `set rows
+  ten`, `set rows -3`, `set charts maybe`) or the not-a-preference line (`set scope all
+  brands`, `set pii off`). For `charts` the field word alone is not an "on". The same change
+  fixes a detector bug: "charts none" / "charts please off" / "графики не нужны" (the
+  opt-out word after the chart word) were read as charts on; `_CHART_NEG_POST_RE` now reads
+  them as off.
 
 ## Tests
 - detection: 15 standing statements (EN and RU), 11 one-off or non-preference messages not
@@ -106,6 +116,8 @@ No new dependencies, no config fields, no schema change.
   phrase through the guard, the library tool with a string number, the seeder with an int
 - `/prefs <free text>`: maps to rows and format, becomes a note, policy text refused, usage
   only for empty or malformed input
+- lenient `/prefs set` (D-242): 8 loose forms saved, 9 targeted refusals with nothing stored,
+  a named field never saves a note or another field; charts opt-out after the chart word
 - seeder: seeded for the run user and reset, reset when the case raises, store found behind the
   graph services, bad seeds are case errors, a store is required, the live SUT applies the
   preference before the turn

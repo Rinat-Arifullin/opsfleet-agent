@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import re
+from types import SimpleNamespace
 from typing import Any, Final
 
 from opsfleet_agent.graph.context import snapshot_of
@@ -135,16 +136,14 @@ def handle_prefs(
         return RESET_TEXT
     if action == "set":
         kv = rest.split()
-        if len(kv) != 2:
+        if not kv:
             return USAGE
-        key, raw = kv[0].lower(), kv[1].lower()
+        key = kv[0].lower()
         if key not in PREFERENCE_FIELDS:
-            _trace(tracer, "set", "not_a_preference")
-            return NOT_A_PREFERENCE_TEXT.format(key=key[:40])
-        canonical = canonical_value(key, raw)
-        if canonical is None:
-            _trace(tracer, "set", "bad_value")
-            return BAD_VALUE_TEXT.format(key=key, allowed=allowed_values(key))
+            return _lenient_set(None, rest, store=store, user_id=user_id, tracer=tracer)
+        canonical = canonical_value(key, kv[1]) if len(kv) == 2 else None
+        if canonical is None:  # "set format reports table", "set charts none": read the words
+            return _lenient_set(key, " ".join(kv[1:]), store=store, user_id=user_id, tracer=tracer)
         value, message = canonical
         res = set_preference(current, message=message, scope_snapshot={}, field=key, value=value)
         if not res.ok:  # defence in depth: canonical_value only returns valid values
@@ -172,6 +171,40 @@ def handle_prefs(
 
 
 _SUBCOMMANDS: Final = frozenset({"view", "reset", "set", "note", "help"})
+
+
+def _lenient_set(key: str | None, words: str, *, store: Any, user_id: str, tracer: Any) -> str:
+    """``/prefs set`` that is not exactly ``<field> <value>`` (D-242): read the words with the
+    chat detector and save field values only, never a note. ``key`` (when the user named a
+    field) limits what may be saved to that field; nothing found gives the allowed values of
+    that field (or the not-a-preference line), not the whole usage line."""
+    if key == "rows":
+        numbers = re.findall(r"(?<![\w.-])\d{1,6}(?![\w.])", words)
+        found = canonical_value("rows", numbers[0]) if len(set(numbers)) == 1 else None
+        values = [("rows", found[0])] if found else []
+        ambiguous: tuple[str, ...] = ()
+    else:
+        text = f"{key} {words}" if key else words
+        detected = detect_preference(text, standing=True) if text.strip() else None
+        values = [
+            (k, v) for k, v in (detected.settings if detected else ()) if key in (None, k)
+        ]
+        if key == "charts" and values == [("charts", True)]:  # the field word alone is no "on"
+            said_on = any(canonical_value("charts", w) == (True, "charts") for w in words.split())
+            values = values if said_on else []
+        ambiguous = tuple(a for a in (detected.ambiguous if detected else ()) if key in (None, a))
+    if not values and not ambiguous:
+        if key is None:
+            _trace(tracer, "set", "not_a_preference")
+            first = words.split()[0] if words.split() else ""
+            return NOT_A_PREFERENCE_TEXT.format(key=first[:40])
+        _trace(tracer, "set", "bad_value")
+        return BAD_VALUE_TEXT.format(key=key, allowed=allowed_values(key))
+    picked = SimpleNamespace(settings=tuple(values), notes=(), ambiguous=ambiguous)
+    reply, _saved, _rejected = apply_nl_preference(
+        picked, store=store, user_id=user_id, tracer=tracer
+    )
+    return reply
 
 
 def _free_text(text: str, *, store: Any, user_id: str, scope: Any, tracer: Any) -> str:

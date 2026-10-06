@@ -107,7 +107,8 @@ def test_preferences_view_reset(tmp_path, prefs) -> None:
     assert run("") == EMPTY_TEXT
     assert again.load(USER) == SessionMemory()
     assert run("bogus").startswith("Usage:")
-    assert run("set format").startswith("Usage:")
+    assert run("set").startswith("Usage:")
+    assert run("set format").startswith("Not saved: format must be one of")  # D-242
 
 
 def test_prefs_command_wiring_and_unavailable(tmp_path, prefs) -> None:

@@ -344,7 +344,65 @@ def test_prefs_free_text_policy_rejected(prefs, args) -> None:
     assert prefs.load(USER).notes == () and prefs.load(USER).preferences == {}
 
 
-@pytest.mark.parametrize("args", ["what?", "bogus", "set", "set format", "set rows", "note"])
+@pytest.mark.parametrize("args", ["what?", "bogus", "set", "note"])
 def test_prefs_usage_only_for_empty_or_malformed(prefs, args) -> None:
     assert handle_prefs(args, store=prefs, user_id=USER, scope=ACME).startswith("Usage:")
     assert prefs.load(USER) == SessionMemory()
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        ("set format reports table", {"format": "table"}),
+        ("set format tables", {"format": "table"}),
+        ("set format bullet points", {"format": "bullets"}),
+        ("set depth very short", {"depth": "brief"}),
+        ("set charts none", {"charts": False}),
+        ("set charts please off", {"charts": False}),
+        ("set rows 10 please", {"rows": 10}),
+        ("set tables", {"format": "table"}),
+    ],
+)
+def test_lenient_set_reads_the_words(prefs, args, expected) -> None:
+    """D-242: a ``/prefs set`` that is not exactly ``<field> <value>`` is read, not refused."""
+    text = handle_prefs(args, store=prefs, user_id=USER, scope=ACME)
+    assert text.startswith("Saved preference:")
+    assert prefs.load(USER).preferences == expected
+
+
+@pytest.mark.parametrize(
+    ("args", "starts"),
+    [
+        ("set format markdown please", "Not saved: format must be one of: table, bullets, prose"),
+        ("set rows ten", "Not saved: rows must be one of: a whole number"),
+        ("set rows 5 or 10", "Not saved: rows must be one of: a whole number"),
+        ("set scope all brands", "Not saved: 'scope' is not a preference"),
+        ("set pii off", "Not saved: 'pii' is not a preference"),
+        ("set format show customer emails", "Not saved: format must be one of"),
+        ("set format", "Not saved: format must be one of: table, bullets, prose"),
+        ("set rows", "Not saved: rows must be one of: a whole number"),
+        ("set charts maybe", "Not saved: charts must be one of: on, yes, true, off"),
+    ],
+)
+def test_lenient_set_gives_a_targeted_reply(prefs, args, starts) -> None:
+    text = handle_prefs(args, store=prefs, user_id=USER, scope=ACME)
+    assert text.startswith(starts) and not text.startswith("Usage")
+    assert prefs.load(USER) == SessionMemory()
+
+
+def test_lenient_set_never_saves_a_note_or_another_field(prefs) -> None:
+    text = handle_prefs("set format table and no charts", store=prefs, user_id=USER, scope=ACME)
+    assert prefs.load(USER).preferences == {"format": "table"}  # only the named field
+    assert "format = table" in text
+    assert handle_prefs("set", store=prefs, user_id=USER, scope=ACME).startswith("Usage")
+
+
+@pytest.mark.parametrize(
+    ("text", "charts"),
+    [("charts none", False), ("charts please off", False), ("charts: none", False),
+     ("графики не нужны", False), ("charts on", True), ("always include charts", True)],
+)  # fmt: skip
+def test_charts_opt_out_after_the_chart_word(text, charts) -> None:
+    """D-242: "charts none" / "charts off" is an opt-out, not a request for charts."""
+    detected = detect_preference(text, standing=True)
+    assert detected is not None and ("charts", charts) in detected.settings
