@@ -958,13 +958,6 @@ skills and the human gates.
   - lint, unit tests with no network, and the offline eval on every commit;
   - live runs against Gemini only with my explicit OK, to protect the free-tier quota.
 
-### Time log
-
-| Date | Step | Work |
-|---|---|---|
-| 2026-10-04 | Steps 1–4 | Requirements, HLD, design reviews, plan and plan reviews (gates G1–G3); skeleton, config, CLI loop, graph with budgets, tracer |
-| 2026-10-05 | Step 5 | Guards (SQL policy, scope, small cells, differencing, PII), BigQuery client, analysts, report writer and verifier, two-phase delete, stores, evals, Langfuse, LM Studio provider, live checks and fixes across all three profiles, docs |
-
 Per-iteration detail, including what was decided and why, is in the `docs/process/iter*-ods.md`
 notes and in the git history.
 
@@ -972,55 +965,21 @@ notes and in the git history.
 
 ## Local model (LM Studio, dev only)
 
-Gemini is the default and the only provider used for evaluation. For development you can run
-the CLI against a local model served by [LM Studio](https://lmstudio.ai) through its
-OpenAI-compatible API, so you do not spend the Gemini free-tier quota (D-143, ADR-015). If you
-never set `OPSFLEET_LLM_PROVIDER`, nothing changes. Everything local is test-only: there is no
-fallback between LM Studio and Gemini in either direction.
+For development you can point the CLI at a local model in [LM Studio](https://lmstudio.ai)
+(OpenAI-compatible API) to save the Gemini free-tier quota (D-143, ADR-015). Gemini stays the
+default and the only provider used for evals; there is no fallback between the two.
 
-1. In LM Studio, download and load a chat model and an embedding model, then start the local
-   server (default `http://127.0.0.1:1234/v1`). The defaults in `config/models.yaml` are:
+```sh
+export OPSFLEET_LLM_PROVIDER=lmstudio
+export OPSFLEET_LLM_BASE_URL=http://127.0.0.1:1234/v1   # optional, this is the default
+uv run opsfleet-agent --user <profile>
+```
 
-   ```yaml
-   local:
-     chat_model: qwen/qwen3.8-27b
-     embedding_model: text-embedding-nomic-embed-text-v1.5
-     embedding_dim: 768
-   ```
-
-   Any chat model with tool calling works; set its id exactly as LM Studio lists it
-   (`curl http://127.0.0.1:1234/v1/models`). The embedding model must return vectors of
-   length `local.embedding_dim` (768 for nomic-embed-text v1.5); change it together with the
-   embedding model.
-2. Run the CLI with the local provider:
-
-   ```sh
-   export OPSFLEET_LLM_PROVIDER=lmstudio
-   # optional, default http://127.0.0.1:1234/v1 (IPv4 loopback; avoids IPv6 localhost issues on macOS)
-   export OPSFLEET_LLM_BASE_URL=http://127.0.0.1:1234/v1
-   uv run opsfleet-agent --user <profile>
-   ```
-
-What changes under `lmstudio`:
-
-- `GEMINI_API_KEY` is not required. `GOOGLE_CLOUD_PROJECT` and ADC are still required, because
-  queries still run on BigQuery.
-- Every agent role (router, analysts, report writer, verifier, ...) uses `local.chat_model`.
-  There is no fallback model and no free-tier rate limiter. The eval judge is not switched:
-  `evals/judge.py` stays Gemini-only.
-- The startup check calls `GET <base_url>/models` instead of the Gemini model list. If a
-  configured model is not loaded, the error lists the ids LM Studio reports, so you can copy the
-  right one into `config/models.yaml`. If the server is down you get
-  `LM Studio is not reachable at <url>; start the server and load <model>.`
-- Reasoning output (`<think>...</think>` or a separate `reasoning_content` field) is removed
-  before it reaches any parser or the screen.
-- Golden-example vectors are cached in `<data dir>/lmstudio/`, separate from the Gemini cache,
-  so the two embedding models never mix. The app database (`app.db`), checkpoints and traces are
-  shared between providers.
-
-Answer quality, latency and tool-calling reliability depend on the local model. Eval results and
-the deliverable are measured on Gemini only. To check your setup, run the live smoke test:
-`OPSFLEET_LLM_PROVIDER=lmstudio uv run pytest -m live tests/live/test_lmstudio_smoke.py -q`.
+- Load a chat model with tool calling and an embedding model in LM Studio and set their ids under
+  `local:` in `config/models.yaml` (the embedding size must match `local.embedding_dim`).
+- `GEMINI_API_KEY` is not needed; `GOOGLE_CLOUD_PROJECT` and ADC still are (queries run on BigQuery).
+- Golden-example vectors are cached separately per provider. Quality depends on the local model.
+- Smoke test: `OPSFLEET_LLM_PROVIDER=lmstudio uv run pytest -m live tests/live/test_lmstudio_smoke.py -q`.
 
 ## Observability with Langfuse (optional)
 
