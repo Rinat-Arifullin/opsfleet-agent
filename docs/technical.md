@@ -87,6 +87,7 @@ There are 5 LLM roles plus the light path, as in ADR-009.
 | `tools/run_sql.py` | The only path from a model to BigQuery. Runs every guard in order (§4) | `RunSqlTool` :723 (`run` :763, `_pipeline` :818, `_scrub_rows` :554, `_merge_small_bands` :594, `_cap` :716), `MAX_ROWS=200` |
 | `tools/schema_tool.py`, `tools/registry.py` | Schema description with PII columns hidden; tool registry | — |
 | `bq/client.py` | `WarehouseClient` protocol and `BigQueryRunner`: mandatory dry run, `maximum_bytes_billed`, 1 GB per query, 10 GB per session, 60 s, 200 rows | `BigQueryRunner` :267 (`prepare` :304, `execute` :335) |
+| `bq/preflight.py` | Startup check: ADC plus one dry run, each failure mapped to one actionable `ConfigError` line | `bq_startup_check`, `preflight_message` |
 | `bq/errors.py`, `bq/memo.py`, `bq/schema.py` | Error classification (raw error text is inspected, never kept), memo keyed after the scope rewrite, table metadata cache | `ErrorCode` :31, `run_memoised` :131, `TableMetadataCache` |
 | `reports/` | Report schema and required sections, matcher for `/open`, `/search` and delete selectors, library listing with `R-` display ids, ranked FTS5 index (`fts.py`) and the embedding index fused by RRF (`semantic.py`; hybrid results carry a `words` / `similar` / `words+similar` match label, D-232) | `ReportDraft` `schema.py:104`, `REQUIRED_SECTIONS` :55, `draft_hash` :383, `match_reports` `matcher.py:106`, `delete_candidates` :120, `DISPLAY_PREFIX` `library.py:81`, `search_reports` :204, `open_report` :390, `build_match` `fts.py:134`, `rrf_fuse` `semantic.py:110`, `SemanticIndex` :123, `build_semantic_index` :273 |
 | `delete/` | Two-phase delete (§5) | `DeleteKey` `token.py:56`, `derive_token` :100, `verify_proof` :128; `DeleteService` `flow.py:275`, `parse_delete_request` :190, `setup_delete` :708 |
@@ -154,7 +155,7 @@ flowchart TD
    - Run the resume precheck, which refuses an unknown session, another user's session or an undecryptable checkpoint, before any network call.
    - Run `startup_check`.
    - Install the PII detector, with the allowlist built from the scope brands and the catalogue.
-   - Build the runtime, `DegradedGraph(AgentGraph)`.
+   - Build the runtime, `DegradedGraph(AgentGraph)`. After the Golden index, it runs `bq_startup_check` (`bq/preflight.py`): ADC plus one free dry run in `GOOGLE_CLOUD_PROJECT`; a missing login, role, API or project is one line.
    - A failed step stops startup with one actionable line.
 2. **REPL** (`_Repl` :362).
    - The input is cleaned first.

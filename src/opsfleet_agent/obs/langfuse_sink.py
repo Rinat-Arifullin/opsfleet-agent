@@ -262,8 +262,9 @@ class LangfuseSink:
     # -- inputs
 
     def on_span(self, clean: dict[str, Any]) -> None:
-        """``Tracer.extra_sink``: buffer an already cleaned span if a turn is running."""
-        if not self.enabled:
+        """``Tracer.extra_sink``: buffer an already cleaned span if a turn is running. ``llm``
+        spans are skipped: the wrapped invoke already sends each attempt as a generation."""
+        if not self.enabled or clean.get("type") == "llm":
             return
         end = time.time_ns()
         dur = clean.get("duration_ms")

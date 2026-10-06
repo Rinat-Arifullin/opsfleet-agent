@@ -74,9 +74,9 @@ with the gaps listed in [Not built](#not-built-and-known-gaps)). The production 
 | **R3** High-stakes oversight | A report is saved only after the user replies Save, Revise or Cancel. Deleting is two-phase: a preview, then a confirmation proven with an HMAC token that expires after 600 s. The audit record is written first, in the same transaction as the delete; if the audit write fails, nothing is deleted. The model has no delete tool. | `graph/graph.py`, `delete/`, `store/audit.py` |
 | **R4.1** User-level learning (preferences) | Built. `/prefs [set format\|depth\|charts\|rows <value> \| note <text> \| reset \| <your words>]`, a standing preference stated in chat ("From now on answer in tables", "Keep answers short", "No charts", "Remember that I prefer bullet points", "min 10 rows", Russian "Впредь отвечай кратко", "показывай минимум 10 строк"; detected in code, iteration 39b, D-235..D-241; a one-off "show it as a table" or "show 10 rows" is not saved; `/prefs <your words>` maps free text onto the fields or saves it as a note) and the Library agent's `set_preference` tool. `rows` (1-50) is a default list length for top-N and list answers, given to the model as a fixed sentence; a number in the question ("top 3") wins and the SQL row and byte caps still apply. All of these go through `graph.memory.set_preference` validation (enumerated values only; nothing that widens scope or asks for PII). Preferences persist per user in the `app.db` `user_preferences` table and are rendered as a lower-precedence prompt block below the safety rules. | `graph/memory.py`, `store/preferences.py`, `commands/preferences.py`, `graph/nl_preferences.py`, `roles/library_agent.py` |
 | **R4.2** System-level learning | `/feedback up\|down [reason] [comment]` is stored per turn with a triage state, and the trace links feedback to the turn, so a bad answer can be traced to the failing step. Golden examples are a YAML file the analytics team edits; a new trio is added there and checked by the eval suite. A maintainer triage CLI (`python -m opsfleet_agent.commands.triage`) classifies each item's root cause from its trace, drafts a regression eval case (`add-eval`) and writes a Golden candidate (`promote`) only after a PII scan, a BigQuery dry run and a green offline eval run; every state change is audited first. | `commands/feedback.py`, `commands/triage.py`, `store/feedback.py`, `config/golden_seed.yaml` |
-| **R5** Resilience | Every LLM call goes through a deadline-aware wrapper: 2 retries with backoff, then the fallback model, which stays on for the rest of the turn. Budgets cap LLM calls, SQL calls and wall time per turn. On a budget or deadline hit, a forced partial answer is written. When the LLM is down, `/reports`, `/open`, `/search` and `/export` still work (degraded mode). Each BigQuery 503 gets one bounded retry. | `graph/llm.py`, `graph/budget.py`, `graph/degraded.py` |
+| **R5** Resilience | **SQL self-correction:** a syntax error, unknown column, policy refusal, timeout or over-cap estimate goes back to the analyst as a typed error with a fix hint, and the analyst rewrites the query. At most 3 failures in a row (1 attempt + 2 corrections), then `GIVE_UP` and an answer from what is known. An empty result gets one hint to check the filters; a second empty result ends querying. Costs do not grow: every attempt is parsed and dry-run before it runs (a failed dry run bills nothing), an identical query in the same turn is refused as `DUPLICATE_QUERY`, and each correction counts toward the turn's LLM and SQL caps. Every LLM call goes through a deadline-aware wrapper: 2 retries with backoff, then the fallback model, which stays on for the rest of the turn. Budgets cap LLM calls, SQL calls and wall time per turn. On a budget or deadline hit, a forced partial answer is written. When the LLM is down, `/reports`, `/open`, `/search` and `/export` still work (degraded mode). Each BigQuery 503 gets one bounded retry. | `tools/run_sql.py`, `graph/llm.py`, `graph/budget.py`, `graph/degraded.py` |
 | **R6** Quality assurance | Golden, router and adversarial eval suites run per profile, with gates: golden ≥ 80%, adversarial 100%, PII recall ≥ 95%. An LLM judge is calibrated against human labels. CI runs lint, unit tests and the offline eval. | `evals/`, `.github/workflows/ci.yml` |
-| **R7** Observability | Each turn is written as JSONL traces to `data/traces/` with PII and secrets masked by key and by pattern. Langfuse tracing is optional. `/trace` shows a turn and `/audit` the audit log. | `obs/`, `commands/trace.py`, `commands/audit.py` |
+| **R7** Observability | Each turn is written as JSONL traces to `data/traces/` with PII and secrets masked by key and by pattern. Every provider attempt (including retries, fallbacks and limiter timeouts) is its own `llm` span with model, outcome, tokens and latency. Langfuse tracing is optional. `/trace` shows a turn and `/audit` the audit log. | `obs/`, `commands/trace.py`, `commands/audit.py` |
 | **R8** Agility (persona) | The tone lives in `prompts/persona.md`, hot-reloaded and validated. Persona text that tries to touch rules is rejected, and the code-built safety rules always come first. `/persona` shows the active version. | `persona.py`, `commands/persona.py` |
 
 | Deliverable | Where |
@@ -263,22 +263,22 @@ references is in [docs/technical.md](docs/technical.md).
 with one line saying what to fix.
 
 1. **Settings and profile.** It loads `.env` from the current directory, then
-   `config/profiles.yaml` and `config/models.yaml`. The profile decides the brand scope for the
-   whole session: `analyst_a` sees one brand, `analyst_b` two, and `ceo_demo` has the explicit
+   `config/profiles.yaml` and `config/models.yaml`, checks that the required variables are set
+   and that `data/` is writable. The profile decides the brand scope for the whole session:
+   `analyst_a` sees one brand, `analyst_b` two, and `ceo_demo` has the explicit
    `all_products` flag.
 2. **Checkpointer.** It opens `data/checkpoints.db`. The graph state is encrypted with
    `LANGGRAPH_AES_KEY`. With `--resume`, it first checks that the session exists, belongs to
    this user and decrypts. This happens before any network call.
-3. **Startup check:**
-   - the required variables are set;
-   - ADC credentials load;
-   - a dry run against BigQuery succeeds;
-   - every model id in `models.yaml` is in the Gemini model list;
-   - the spaCy model is installed;
-   - `data/` is writable.
-4. **PII detector.** It installs the regex scrubber plus Presidio with spaCy `en_core_web_sm`.
-   Brand and catalogue names are allowlisted so that product names are not masked as people.
-5. **Runtime.** It builds the graph, wraps it in the degraded-mode wrapper and starts the REPL.
+3. **Gemini check.** Every model id in `models.yaml` must be in the model list for your key.
+4. **PII detector.** It installs the regex scrubber plus Presidio with spaCy `en_core_web_sm`
+   (missing model: refuse). Brand and catalogue names are allowlisted so that product names
+   are not masked as people.
+5. **BigQuery check.** After loading the Golden examples, it builds the client from ADC and dry-runs one query on
+   `thelook_ecommerce.orders` in `GOOGLE_CLOUD_PROJECT` (a dry run bills nothing). Missing or
+   expired ADC, a missing `roles/bigquery.jobUser`, a disabled BigQuery API or a wrong project
+   id each stop startup with one line naming the fix (`bq/preflight.py`).
+6. **Runtime.** It builds the graph, wraps it in the degraded-mode wrapper and starts the REPL.
 
 ### 2. The REPL and commands
 
@@ -480,8 +480,17 @@ sequenceDiagram
   call is refused (fails closed on cost). Delete confirmations are never blocked by quota.
 - **Degraded mode:** if Gemini is unreachable, the CLI says so and the library commands keep
   working.
-- **BigQuery:** a 503 gets one retry after 2 s. Other errors are mapped to plain messages, and
-  the analyst may fix its SQL within the budget.
+- **BigQuery:** a 503 gets one retry after 2 s. Other errors are mapped to plain messages.
+- **SQL self-correction (R5):** a failed query returns a typed error code with a fix hint
+  instead of raising. Retryable codes are `SQL_SYNTAX`, `UNKNOWN_COLUMN` (the hint names the
+  column), `SQL_POLICY` (for a refused table, the hint lists the allowed tables and columns), `BQ_RUNTIME`,
+  `TIMEOUT`, `COST_CAP` and `SQL_TOO_LONG`. The analyst rewrites and calls `run_sql` again.
+  After 3 failures in a row the tool answers `GIVE_UP` and the analyst answers from what is
+  known. A query with no rows gets a hint to check the date window, spellings and status
+  values; a second empty result tells the analyst to stop and say which filters matched
+  nothing. Corrections cannot inflate cost: parse and policy errors never reach BigQuery,
+  syntax and column errors fail at the free dry run, an identical query in the same turn is
+  refused as `DUPLICATE_QUERY`, and every attempt counts toward the turn's LLM and SQL caps.
 
 ### 12. Memory and resume
 
@@ -494,8 +503,9 @@ persist per user in `user_preferences` (iteration 39).
 ### 13. Observability
 
 - **JSONL traces** go to `data/traces/<session>.jsonl`. A trace holds the router decision, each
-  LLM call (model, tokens, latency, retry number), each tool call with sanitized SQL, bytes
-  scanned, and the grounding and guard verdicts. Secret-bearing keys are dropped by name, and
+  provider attempt as its own `llm` span (model, outcome, attempt number, tokens, latency;
+  a retry, a fallback and a limiter timeout are separate spans), each tool call with
+  sanitized SQL, bytes scanned, and the grounding and guard verdicts. Secret-bearing keys are dropped by name, and
   PII is masked by pattern before writing.
 - **Audit log** (`/audit`): saves, delete previews, confirmations, executions and
   cancellations, guard refusals.
@@ -518,18 +528,14 @@ SQLite runs in WAL mode with `secure_delete`, and the folder is git-ignored.
 
 ## Setup
 
-### Prerequisites
+You need **Python 3.12**, **[uv](https://docs.astral.sh/uv/)** (or pip), the **`gcloud`** CLI,
+**your own GCP project** with the BigQuery API enabled and `roles/bigquery.jobUser` for your
+account (the dataset is public; queries are billed to your project, capped at 1 GB each, and
+the free tier covers 1 TB a month), and a **Gemini API key** from
+[Google AI Studio](https://aistudio.google.com/apikey) (the free tier is enough; see
+[limits](#gemini-free-tier-limits)).
 
-- **Python 3.12** (see `.python-version`).
-- **[uv](https://docs.astral.sh/uv/)** (recommended) or pip.
-- **Google Cloud SDK** (`gcloud`) for Application Default Credentials.
-- **Your own GCP project** with the BigQuery API enabled. The dataset is public; queries are
-  billed to your project. Your account needs `roles/bigquery.jobUser` on it. The agent caps
-  every query at 1 GB billed, and the BigQuery free tier covers 1 TB of queries per month.
-- **A Gemini API key** from [Google AI Studio](https://aistudio.google.com/apikey). The free
-  tier is enough; see [limits](#gemini-free-tier-limits).
-
-### 1. Get the code
+### 1. Install
 
 ```bash
 git clone https://github.com/Rinat-Arifullin/opsfleet-agent.git opsfleet-data-agent
@@ -539,17 +545,14 @@ git clone https://github.com/Rinat-Arifullin/opsfleet-agent.git opsfleet-data-ag
 cd opsfleet-data-agent
 ```
 
-### 2a. Install with uv (recommended)
-
 ```bash
 uv sync
 ```
 
-This creates `.venv` from `uv.lock`. It also installs the pinned spaCy model
-`en_core_web_sm` 3.8.0, which is listed as a wheel URL in `pyproject.toml`, so no separate
-download is needed.
+`uv sync` installs everything from `uv.lock`, including the spaCy model `en_core_web_sm`.
 
-### 2b. Or install with pip
+<details>
+<summary>Without uv (pip)</summary>
 
 ```bash
 python3.12 -m venv .venv
@@ -563,55 +566,48 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-```bash
-pip install -e . --no-deps
-```
+On Windows, activate with `.venv\Scripts\activate`. `requirements.txt` is exported from
+`uv.lock`; it includes the spaCy model and the project itself (`-e .`), which registers the
+`opsfleet-agent` command. Then drop the `uv run` prefix from the commands below.
 
-`requirements.txt` is exported from `uv.lock` and includes the spaCy model wheel. The second
-`pip install` registers the `opsfleet-agent` command; without it, run
-`python -m opsfleet_agent` from the repository root with `PYTHONPATH=src`.
+</details>
 
-### 3. Configure `.env`
+### 2. Configure
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` and set the three required values:
+Set three values in `.env` (it is git-ignored, and the app never prints or logs them):
 
 | Variable | Value |
 |---|---|
 | `GOOGLE_CLOUD_PROJECT` | Your GCP project id (BigQuery jobs run and are billed there) |
 | `GEMINI_API_KEY` | Your AI Studio key |
-| `LANGGRAPH_AES_KEY` | Exactly 16, 24 or 32 characters; encrypts the saved conversation state |
-
-Generate an AES key:
+| `LANGGRAPH_AES_KEY` | 32 hex characters from the command below; encrypts saved conversations |
 
 ```bash
 python3 -c "import secrets; print(secrets.token_hex(16))"
 ```
 
-`.env` is git-ignored. The app never prints or logs these values. If you change
-`LANGGRAPH_AES_KEY`, old sessions can no longer be resumed; new ones work.
-
-### 4. Authenticate to Google Cloud (ADC)
+Log in for Application Default Credentials (a service account key in
+`GOOGLE_APPLICATION_CREDENTIALS` works too):
 
 ```bash
 gcloud auth application-default login
 ```
 
-The agent picks up these credentials through Application Default Credentials. A service
-account key via `GOOGLE_APPLICATION_CREDENTIALS` works too.
-
-### 5. Check
+### 3. Start
 
 ```bash
 uv run opsfleet-agent --user analyst_a
 ```
 
-If something is missing, startup stops with one line naming the problem. For example:
-`GOOGLE_CLOUD_PROJECT is not set. See README → Setup.` Or a BigQuery permission error that
-names the missing role.
+Startup checks the settings, the Gemini models and BigQuery (ADC plus one free dry run) before
+the first prompt. If something is missing, it stops with one line naming the fix, for example
+`GOOGLE_CLOUD_PROJECT is not set. See README → Setup.` or `BigQuery refused a dry run in
+project my-proj: the account needs roles/bigquery.jobUser ...`. Changing `LANGGRAPH_AES_KEY`
+later only means old sessions can no longer be resumed.
 
 ---
 

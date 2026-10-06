@@ -212,6 +212,8 @@ def _scenario(sink, tracer):
         with pytest.raises(TimeoutError):
             analyst("pro", msgs, [SimpleNamespace(name="run_sql")], 5.0)
         analyst("pro", msgs, [SimpleNamespace(name="run_sql")], 5.0)
+        # the JSONL llm span of the same attempt is not a second Langfuse generation
+        tracer.record("llm", "analyst_quick", model="pro", outcome="ok", attempt=2)
         tracer.record("sql", "run_sql", sql_text="SELECT 1 FROM t WHERE x = 'abc'", rows=3,
                       bytes_billed=1024, cache_hit=False)  # fmt: skip
         tracer.record("tool", "run_sql", tool="run_sql", outcome="ok", rows=3)

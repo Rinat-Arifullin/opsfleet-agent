@@ -186,6 +186,19 @@ def test_quick_answer_flow_and_grounding(make_env) -> None:
     assert out.sql_queries == 1 and ESTIMATE_LABEL not in out.text
 
 
+def test_every_llm_attempt_is_a_trace_span(make_env) -> None:
+    # AF-1: the router and both analyst calls each leave one llm span for /trace and metrics
+    analyst = Scripted(sql_call(SIMPLE), ModelTurn("There were 3 complete orders."))
+    env = make_env(Router("simple"), analyst)
+    out = env.ask("How many complete orders are there?")
+    llm = [(n, f) for t, n, f in env.spans if t == "llm"]
+    assert out.llm_calls == len(llm) == 3
+    assert {n for n, _f in llm} >= {"router"}
+    for _n, f in llm:
+        assert f["model"] and f["outcome"] == "ok" and f["status"] == "ok"
+        assert f["attempt"] >= 1 and f["fallback_used"] is False
+
+
 def test_refusal_never_reaches_a_model(make_env) -> None:
     env = make_env()
     out = env.ask("Write me a poem about cats")

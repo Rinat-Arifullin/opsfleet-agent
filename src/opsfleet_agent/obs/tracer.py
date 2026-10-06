@@ -82,6 +82,8 @@ SPAN_FIELDS: dict[str, tuple[str, ...]] = {
     "role": ("agent", "model", "prompt_version", "retries", "llm_calls", "sql"),
     "llm": (
         "model",
+        "outcome",
+        "attempt",
         "tokens_in",
         "tokens_out",
         "retries",

@@ -244,6 +244,7 @@ def build_runtime(
 ) -> Runtime:  # pragma: no cover - production wiring: BigQuery and Gemini clients
     """Wire the production graph: BigQuery runner, schema cache, guards, stores, tracer."""
     from opsfleet_agent.bq.client import BigQueryRunner, make_bigquery_client
+    from opsfleet_agent.bq.preflight import bq_startup_check
     from opsfleet_agent.bq.schema import TableMetadataCache
     from opsfleet_agent.golden.runtime import build_golden_index, offline_known_brands
     from opsfleet_agent.graph.graph import AgentGraph, GraphServices, build_run_sql_tool
@@ -267,7 +268,7 @@ def build_runtime(
     profiles = load_profiles_with_overrides(None, data_dir).values()
     known_brands = offline_known_brands(profiles, golden.trios if golden else ())  # D-96
     project = settings.google_cloud_project
-    client = make_bigquery_client(project)
+    client = bq_startup_check(project, make_bigquery_client)  # RC-1: ADC + dry run, or refuse
     runner = BigQueryRunner(client, project, job_config_factory=scoped_job_config_factory())
     cache = TableMetadataCache(client)
     conn = open_store(data_dir / "app.db")

@@ -63,6 +63,7 @@ from opsfleet_agent.graph.assumptions import ASSUMPTIONS_ADDED, assumptions_foot
 from opsfleet_agent.graph.budget import (
     FORCE_ANSWER_ROLE,
     RECURSION_LIMIT,
+    LLMCallRecord,
     PartialAnswer,
     TurnBudget,
     TurnKind,
@@ -517,6 +518,23 @@ class TurnResult:
     guard_codes: frozenset[str] = frozenset()
 
 
+class _LLMSpanSink:
+    """UsageSink: one ``llm`` span per provider attempt (retry, fallback, limiter timeout).
+    Only a fatal error is ``status=error``; a transient attempt that was retried is not."""
+
+    def __init__(self, ctx: TurnContext) -> None:
+        self.ctx = ctx
+
+    def record(self, rec: LLMCallRecord) -> None:
+        _record(
+            self.ctx, "llm", rec.role, model=rec.model, outcome=rec.outcome, attempt=rec.attempt,
+            retries=int(rec.is_retry), fallback_used=rec.is_fallback,
+            duration_ms=round(rec.latency_ms, 1), limiter_wait_ms=round(rec.limiter_wait_ms, 1),
+            tokens_in=rec.tokens_in, tokens_out=rec.tokens_out,
+            status="error" if rec.outcome == "fatal_error" else "ok",
+        )  # fmt: skip
+
+
 def _new_context(
     services: GraphServices, raw_text: str, session: Session, sql_session: RunSqlSession, tid: str
 ) -> TurnContext:
@@ -529,10 +547,12 @@ def _new_context(
     limiters = Limiters(rpm, s.limiter_fraction, clock=services.clock, sleep=services.sleep)
     extra = {"jitter": services.jitter} if services.jitter is not None else {}
     llm = LLMWrapper(budget, limiters, clock=services.clock, sleep=services.sleep, **extra)
-    return TurnContext(
+    ctx = TurnContext(
         services, raw_text, session.profile, session.session_id, tid, sql_session, budget, llm,
         services.persona(),
     )  # fmt: skip
+    budget.usage.sink = _LLMSpanSink(ctx)  # AF-1: every attempt reaches /trace and metrics
+    return ctx
 
 
 # --- crash resume: per-turn context in state (HLD 4.0.6, R2-m6) ---------------------------------
