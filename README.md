@@ -107,7 +107,7 @@ flowchart LR
 
     subgraph proc["Local process: Python 3.12, opsfleet-agent"]
         cli["CLI REPL<br/>slash commands"]
-        graph["LangGraph agent graph<br/>(code supervisor + LLM roles)"]
+        agentGraph["LangGraph agent graph<br/>(code supervisor + LLM roles)"]
         guards["Guards in code<br/>SQL policy, scope rewrite,<br/>small cells, differencing,<br/>PII scrub, output guard"]
         cfg["config/ + prompts/<br/>models, profiles, Golden seed,<br/>persona"]
     end
@@ -126,13 +126,13 @@ flowchart LR
 
     lf["Langfuse (optional,<br/>self-hosted, fail-open)"]
 
-    user --> cli --> graph
-    graph --> guards
-    graph --> cfg
-    graph --> app & ckpt & traces & emb
-    graph -->|"masked prompts"| gem
+    user --> cli --> agentGraph
+    agentGraph --> guards
+    agentGraph --> cfg
+    agentGraph --> app & ckpt & traces & emb
+    agentGraph -->|"masked prompts"| gem
     guards -->|"dry run, then capped query<br/>(ADC credentials)"| bq
-    graph -.->|"masked spans"| lf
+    agentGraph -.->|"masked spans"| lf
 ```
 
 The production version of this picture (Cloud Run, Vertex AI, Cloud SQL, authorized views,
@@ -451,7 +451,7 @@ sequenceDiagram
     C->>DB: audit delete.previewed
     C-->>U: preview (≤ 20 shown), "reply yes to delete", expires in 600 s
     U->>C: yes
-    C->>C: re-derive HMAC token; 9 checks<br/>(owner, turn, expiry, same set, replay, key, proof …)
+    C->>C: re-derive HMAC token, run 9 checks<br/>(owner, turn, expiry, same set, replay, key, proof …)
     C->>DB: audit delete.confirmed
     C->>DB: BEGIN IMMEDIATE
     C->>DB: INSERT audit delete.executed
