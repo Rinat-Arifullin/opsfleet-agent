@@ -1,0 +1,49 @@
+# golden/return_rate_by_category (AC-01.2, US-01). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+input: Which product categories have the highest return rate?
+tags:
+- quick
+- us01
+- set2
+session:
+  profile: analyst_a
+expect:
+  outcome: answered
+  must_contain:
+  - - return rate
+    - returned
+  - categor
+  - Calvin Klein
+  must_not_contain:
+  - '@'
+  - first_name
+  - last_name
+  - street_address
+  - email
+  judge:
+    min_score: 4
+fake:
+  outcome: answered
+  text: 'Return rate by category for Calvin Klein: returned items as a share of items sold, over the stated
+    window. The top three categories are listed first.'
+  llm_calls:
+    gemini-3.1-flash-lite: 2
+  bq_queries: 1
+  judge_score: 5
+  sql:
+  - SELECT 1 /* recorded placeholder */
+
+# D-160 profile matrix: the scope named in the answer follows the profile.
+per_profile:
+  analyst_b:
+    fake:
+      text: 'Return rate by category for Carhartt and Levi''s: returned items as a share of items sold,
+        over the stated window. The top three categories are listed first.'
+    expect:
+      must_contain: [&id001 [return rate, returned], categor, Carhartt, Levi's]
+  ceo_demo:
+    fake:
+      text: 'Return rate by category for all products: returned items as a share of items sold, over the
+        stated window. The top three categories are listed first.'
+    expect:
+      must_contain: [*id001, categor, all products]

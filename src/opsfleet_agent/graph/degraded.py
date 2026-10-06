@@ -38,9 +38,11 @@ from opsfleet_agent.graph.budget import PartialAnswer
 from opsfleet_agent.graph.graph import _DELETE_RE as _GRAPH_DELETE_RE
 from opsfleet_agent.graph.graph import _REVISE_RE as _GRAPH_REVISE_RE
 from opsfleet_agent.graph.graph import (
+    COMMENT_FALLBACK_TEXT,
     CONFIRM_NODE,
     ERROR_TEXT,
     NOT_SAVED_TEXT,
+    PARTIAL_WITH_CONTEXT_TEXT,
     REVISING_TEXT,
     UNAVAILABLE_TEXT,
     AgentGraph,
@@ -57,8 +59,8 @@ log = logging.getLogger(__name__)
 
 AI_UNAVAILABLE_TEXT: Final = "The AI service is temporarily unavailable, please try again shortly."
 DEGRADED_NOTICE: Final = (
-    "Analysis is unavailable right now. You can still use /reports, /search and /open "
-    "on your saved reports."
+    "Analysis is unavailable right now. You can still use /reports, /search, /open and "
+    "/export on your saved reports."
 )
 QUOTA_CHECK_FAILED_TEXT: Final = (
     "Usage limits could not be checked, so I didn't run this. Please try again."
@@ -70,7 +72,9 @@ QUOTA_TEXT: Final = {
     "llm_day": "You have reached your daily question limit. Please try again tomorrow.",
     "bq_bytes_day": "You have reached your daily data-scan limit. Please try again tomorrow.",
 }
-QUOTA_NOTICE: Final = "Your saved reports are still available: /reports, /search and /open."
+QUOTA_NOTICE: Final = (
+    "Your saved reports are still available: /reports, /search, /open and /export."
+)
 # a turn the quota cut short but that still produced an answer or a draft (Mn3/Mn4)
 QUOTA_CUT_SHORT_NOTICE: Final = (
     "This turn was cut short by the limit, so the answer may be incomplete and a report "
@@ -81,7 +85,13 @@ QUOTA_DRAFT_KEPT_NOTICE: Final = "Your report draft is still pending: reply save
 _STATUS_PREFIXES: Final = (NOT_SAVED_TEXT, REVISING_TEXT)
 _CUT_SHORT: Final = frozenset({"answered", "error"})
 # the graph's own failure texts: nothing of value is lost when the quota text replaces them
-_GENERIC_TEXTS: Final = (ERROR_TEXT, UNAVAILABLE_TEXT, PartialAnswer(reason="").message)
+_GENERIC_TEXTS: Final = (
+    ERROR_TEXT,
+    UNAVAILABLE_TEXT,
+    PARTIAL_WITH_CONTEXT_TEXT,  # D-152 budget-hit template
+    COMMENT_FALLBACK_TEXT,  # D-152 comment reply template
+    PartialAnswer(reason="").message,
+)
 
 
 class QuotaExceeded(NonRetryableLLMError):

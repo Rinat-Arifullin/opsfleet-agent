@@ -52,7 +52,15 @@ STAGE_LABELS: Final[dict[str, str]] = {
     "force_answer": "Writing the answer…",
     "grounding": "Checking the numbers…",
     "report_writer": "Writing the report…",
+    "retry_writer": "Writing the report…",  # iteration 33: "retry report"
     "confirm_save": "Preparing the report…",
+    "library": "Working with your saved reports…",  # iteration 46
+    progress.TOOL_PREFIX + "list_reports": "Looking through your reports…",
+    progress.TOOL_PREFIX + "search_reports": "Searching your reports…",
+    progress.TOOL_PREFIX + "view_report": "Opening the report…",
+    progress.TOOL_PREFIX + "rename_report": "Renaming the report…",
+    progress.TOOL_PREFIX + "export_report": "Exporting the report…",
+    progress.TOOL_PREFIX + "set_preference": "Saving your preference…",
     "delete_preview": "Preparing the delete preview…",
     "confirm_delete": "Checking the confirmation…",
     "execute_delete": "Deleting…",

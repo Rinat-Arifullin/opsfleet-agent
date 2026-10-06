@@ -29,9 +29,16 @@ A draft number is grounded when it matches a grounding value:
   matched like "12%" (a +12% growth grounds it); a bare number never matches a fraction x100.
 
 Dates are not numbers: each must be a valid calendar date or month inside the data window,
-otherwise it counts as unmatched. Small bare integers (10 or less, no unit) are prose ("top 5")
-and are ignored. A four-digit number is a year after a strong date word (Q1, FY, a month) or in a
-table key;
+otherwise it counts as unmatched ("30 June 2026" and "June 30, 2026" alike). A month and day with
+no year ("June 30", "Jun 30th", "30 June", "30th of June", "April 1 to June 30", "June 1-30") is a
+date when the month is capitalised and the day has an ordinal or is followed by punctuation, the
+end of a line or a range word, or closes a range ("April 1 to June 30 sales"); the day must
+exist in that month ("June 31", "Feb 30" are labelled); with no year there is no window check.
+Before any other word the day stays a figure ("June 30 orders": fail closed). Small bare
+integers (10 or less, no unit) are prose ("top 5") and are ignored. A four-digit number is a
+year after a strong date word (Q1, FY, a month, "Q2 of", "second quarter of", "first half of";
+a bare "half of" is not one), in a table key or before a period word ("2026 is a partial
+period", "2026 YTD");
 after a weak one ("in", "since") it passes as an in-window year OR when it is a grounded number.
 A pure digit run glued to a letter ("A12345", "7f3a91c2") or a time ("10:30") is an identifier,
 skipped, unless the glue is a known currency, magnitude or count ("eur98765", "98765bnUSD"); a
@@ -95,6 +102,11 @@ _DATE_RES: Final = (
         rf"\b({_MONTH_RE})\.?(?:\s+(\d{{1,2}})(?:st|nd|rd|th)?,?)?\s+(\d{{4}})\b", re.IGNORECASE
     ),
 )
+# "30 June 2026", "30th of June, 2026": the day-first form of _DATE_RES[2]
+_DAY_FIRST_DATE_RE: Final = re.compile(
+    rf"(?<![\w.,$])(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?({_MONTH_RE})\.?,?\s+(\d{{4}})\b",
+    re.IGNORECASE,
+)
 _YEAR: Final = r"(?:19|20)\d{2}"
 _YEAR_TAIL: Final = r"(?![\w%]|[.,]\d|\s?(?:k|m|b)\b)"
 _STRONG: Final = rf"fy|fiscal|q[1-4]|h[12]|{_MONTH_RE}"
@@ -108,9 +120,53 @@ _YEAR_RES: Final = (
         re.IGNORECASE,
     ),
     re.compile(rf"(?<![\w.,$])fy(?P<y>{_YEAR}){_YEAR_TAIL}", re.IGNORECASE),
+    # "Q2 of 2026", "the second quarter of 2026", "first half of 2026": a bare "quarter of" or
+    # "half of" is not enough ("half of 2026 orders" is a count)
+    re.compile(
+        rf"(?<![\w.,$])(?:(?:first|second|third|fourth|1st|2nd|3rd|4th|last)\s+(?:quarter|half)"
+        rf"|q[1-4]|h[12])\s+of\s+(?P<y>{_YEAR})"
+        rf"(?:\s*(?:-|–|to|and)\s*(?P<y2>{_YEAR}))?{_YEAR_TAIL}",
+        re.IGNORECASE,
+    ),
     re.compile(rf"\((?P<y>{_YEAR})\)"),
     re.compile(rf"(?m)^[ \t|*•-]*(?P<y>{_YEAR})[ \t]*(?:[|:]|-\s)"),
+    # or before a period word: "2026 is a partial period", "2025 was a full year", "2026 YTD"
+    re.compile(
+        rf"(?<![\w.,$])(?P<y>{_YEAR})\s+(?:(?:is|was)\s+(?:(?:a|an|the|still)\s+)?"
+        rf"(?:(?:partial|incomplete|full|complete|current)\s+)?(?:year|period)\b"
+        rf"|ytd\b|year[- ]to[- ]date\b)",
+        re.IGNORECASE,
+    ),
 )
+# A month and day with no year ("June 30", "Jun. 30th", "30 June", "30th of June", "April 1 to
+# June 30", "June 1-30", "1-30 June"). The month must be capitalised ("may 15" is prose). The
+# day is a date only when it carries an ordinal or is followed by punctuation, the end of the
+# line or a range word, or closes a range ("April 1 to June 30 sales"); before any other word it
+# stays a figure ("June 30 orders": 30 may be a count, fail closed). The day must exist in that
+# month (Feb 29 allowed); "June 31" or "Feb 30" read as a date is an invalid date and labelled.
+# No year, so no window check.
+_CAP_MONTH_RE: Final = "|".join(
+    m[:3].capitalize() + "(?:" + m[3:] + ")?" if len(m) > 3 else m.capitalize() for m in _MONTHS
+)
+_ORD: Final = r"(?:st|nd|rd|th)"
+_RANGE: Final = r"[ \t]*(?:-|–|—|to|through|until|till)[ \t]*"
+_MONTH_DAY_RES: Final = (
+    re.compile(
+        rf"(?<![\w.,$])(?P<m>{_CAP_MONTH_RE})\.?[ \t]+(?P<d>\d{{1,2}})(?!\d)(?P<o>{_ORD})?"
+        rf"(?:{_RANGE}(?P<d2>\d{{1,2}})(?!\d)(?P<o2>{_ORD})?)?(?![\w%]|[.,]\d)"
+    ),
+    re.compile(
+        r"(?<![\w.,$%‒–—―−﹣－-])"
+        rf"(?P<d>\d{{1,2}})(?!\d)(?P<o>{_ORD})?"
+        rf"(?:{_RANGE}(?P<d2>\d{{1,2}})(?!\d)(?P<o2>{_ORD})?)?"
+        rf"[ \t]+(?:of[ \t]+)?(?P<m>{_CAP_MONTH_RE})(?!\w)"
+    ),
+)
+_MONTH_DAY_END: Final = re.compile(
+    r"[ \t]*(?:$|[-–—]|[.,;:!?)\]|*](?!\d)|(?:to|and|or|through|until|till)\b)", re.MULTILINE
+)
+_RANGE_RE: Final = re.compile(rf"{_RANGE}|[ \t]+and[ \t]+")
+_DAYS_IN_MONTH: Final = (31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
 # after a weak date word the number is ambiguous ("in 2024 sales rose", "since 2023 customers
 # placed 1,234"): it passes as an in-window year OR when it is a grounded number
 _WEAK_YEAR_RE: Final = re.compile(
@@ -276,6 +332,9 @@ def _dates_in(text: str) -> tuple[list[_Date], str]:
             g = m.groups()
             found.append((int(g[0]), int(g[1]), int(g[2]) if len(g) > 2 else None))
         out = rx.sub(blank, out)
+    for m in _DAY_FIRST_DATE_RE.finditer(out):
+        found.append((int(m.group(3)), _month_index(m.group(2)), int(m.group(1))))
+    out = _DAY_FIRST_DATE_RE.sub(blank, out)
     for m in _DATE_RES[2].finditer(out):
         day = int(m.group(2)) if m.group(2) else None
         found.append((int(m.group(3)), _month_index(m.group(1)), day))
@@ -286,7 +345,34 @@ def _dates_in(text: str) -> tuple[list[_Date], str]:
             if "y2" in rx.groupindex and m.group("y2"):
                 found.append((int(m.group("y2")), None, None))
         out = rx.sub(blank, out)
+    for rx in _MONTH_DAY_RES:
+        out = _month_days(rx, out, found)
     return found, out
+
+
+def _month_days(rx: re.Pattern[str], text: str, found: list[_Date]) -> str:
+    """Blank yearless month-day dates (see _MONTH_DAY_RES); an impossible day is recorded as an
+    out-of-window date so it is labelled. A day before a plain word is left to the number scan."""
+    parts: list[str] = []
+    pos = 0
+    prev_end = -1  # end of the last date: "April 1 to June 30 sales" closes a range
+    for m in rx.finditer(text):
+        month = _month_index(m.group("m"))
+        days = [m.group("d")] + ([m.group("d2")] if m.group("d2") else [])
+        end = m.end()
+        last_ord = m.group("o2") if m.group("d2") else m.group("o")
+        closes_range = prev_end >= 0 and _RANGE_RE.fullmatch(text, prev_end, m.start()) is not None
+        if not (last_ord or closes_range) and _MONTH_DAY_END.match(text, end) is None:
+            if not m.group("d2") or rx is _MONTH_DAY_RES[1]:
+                continue  # "June 30 orders", "1-30 June orders": the day may be a count
+            # "June 1-30 orders": only the first day is a date (it sits before a range word)
+            days, end = days[:1], m.end("o") if m.group("o") else m.end("d")
+        if any(not 1 <= int(d) <= _DAYS_IN_MONTH[month - 1] for d in days):
+            found.append((0, 0, 0))  # never in window: an impossible date is labelled
+        parts += [text[pos : m.start()], " " * (end - m.start())]
+        pos = prev_end = end
+    parts.append(text[pos:])
+    return "".join(parts)
 
 
 def _in_window(d: _Date, window: tuple[date, date]) -> bool:

@@ -1,10 +1,15 @@
-"""Light path for ``smalltalk`` and ``meta`` turns (FR-71, ADR-010, HLD §4.1, §4.5).
+"""Light path for ``smalltalk``, ``meta``, ``memory`` and ``comment`` turns (FR-71, ADR-010).
 
 * No SQL, no embedding, no Golden retrieval, no history: this module takes no BigQuery,
   embedding or store dependency, and the reply prompt holds the current message only.
 * ``meta`` (help, capabilities) is answered from static text plus the user's scope with no
-  model call (AC-11.6). ``smalltalk`` makes at most one ``light_reply`` call on the cheap model
-  with prompt layers 1 (safety core), 3 (scope) and 4 (persona) only.
+  model call (AC-11.6). The router labels (D-155) a question about the agent's conversation
+  memory ``memory`` and an opinion about an answer ``comment``: they get the static
+  :data:`MEMORY_TEXT` and :data:`COMMENT_FALLBACK_TEXT`, also with no model call. The graph
+  sends a ``comment`` that follows an answer to its brief contextual reply instead (D-152), so
+  this module answers a ``comment`` only when there is no previous answer.
+  ``smalltalk`` makes at most one ``light_reply`` call on the cheap model with prompt layers
+  1 (safety core), 3 (scope) and 4 (persona) only.
 * The output guard runs on every reply (the input guard ran before the router).
 * Any failure gives a templated reply; nothing here raises for provider errors.
 
@@ -20,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any, Final, Literal
 
 from opsfleet_agent.graph.budget import TURN_CAPS, TurnKind
+from opsfleet_agent.graph.intents import COMMENT_FALLBACK_TEXT, MEMORY_TEXT
 from opsfleet_agent.graph.llm import LLMSuccess, LLMWrapper
 from opsfleet_agent.guards.output import (
     MIN_PROTECTED_SNIPPET_CHARS,
@@ -27,14 +33,25 @@ from opsfleet_agent.guards.output import (
     check_output,
 )
 from opsfleet_agent.guards.pii import PiiDetector
+from opsfleet_agent.guards.plain_language import (
+    PLAIN_LANGUAGE_RULE,
+    PLAIN_LANGUAGE_SECTION,
+    SCHEMA_TERMS_REWRITTEN,
+    SQL_NOT_SHOWN_TEXT,
+    SQL_STRIPPED,
+    humanize_identifiers,
+    strip_sql,
+)
 from opsfleet_agent.persona import PERSONA_LABEL, SAFETY_PREAMBLE, Persona, assemble_prompt
 from opsfleet_agent.roles.router import LIGHT_LABELS, ChatMessage, Invoke, UserTurn
 from opsfleet_agent.session import Profile
 
 __all__ = [
     "CAPABILITIES_TEXT",
+    "COMMENT_FALLBACK_TEXT",
     "GREETING_TEMPLATE",
     "LIGHT_ROLE",
+    "MEMORY_TEXT",
     "LightResult",
     "build_light_messages",
     "run_light_path",
@@ -46,21 +63,29 @@ LIGHT_ROLE: Final = "light_path"
 LIGHT_PROMPT_VERSION: Final = "light-v1"
 MAX_LIGHT_REPLY_CHARS: Final = 1200
 
+# iter-live1: the tables named here are exactly ``ALLOWED_TABLES`` (a unit test pins it), and
+# the text names no personal-data column (no "email", "address", "name" words): a schema
+# question ("what data do you have access to?") is answered by this text, and its golden
+# rejects any PII column word.
 CAPABILITIES_TEXT: Final = (
-    "I'm a data analysis assistant for the store's e-commerce data: orders, order items, "
-    "products, distribution centers, web events and customers in aggregate.\n"
+    "I'm a data analysis assistant for the store's e-commerce data. I can use four tables: "
+    "orders, order items, products and users (customers, in aggregate only).\n"
     "I can:\n"
     "- answer questions such as revenue by category, top products or return rates;\n"
     "- compare periods, segments and trends;\n"
     "- write a report and save it to your library when you confirm;\n"
     "- list, open, search and delete your saved reports.\n"
-    "I don't share personal data such as customer names, emails or addresses, and I work "
-    "in English only."
+    "I don't have inventory, warehouse, marketing spend or website visit data, I don't share "
+    "customers' personal details such as names, contact details or addresses, "
+    "and I work in English only."
 )
 GREETING_TEMPLATE: Final = (
     "Hello! I can help you analyse the store's e-commerce data, for example revenue, "
     "top products or customer trends. What would you like to look at?"
 )
+
+# D-155: code-owned replies for the router labels that need no model call.
+LABEL_TEXTS: Final = {"memory": MEMORY_TEXT, "comment": COMMENT_FALLBACK_TEXT}
 
 _LIGHT_RULES: Final = (
     "You are replying to a greeting, thanks or other small talk. Reply in one to three "
@@ -91,7 +116,11 @@ def build_light_messages(
     if not isinstance(message, UserTurn):
         raise TypeError("message must be a UserTurn")
     system = assemble_prompt(
-        [("Scope", _scope_text(profile)), ("Light reply", _LIGHT_RULES)],
+        [
+            ("Scope", _scope_text(profile)),
+            ("Light reply", _LIGHT_RULES),
+            (PLAIN_LANGUAGE_SECTION, PLAIN_LANGUAGE_RULE),  # D-151
+        ],
         persona,
     )
     return [ChatMessage("system", system), ChatMessage("user", message.text)]
@@ -110,16 +139,30 @@ def run_light_path(
     tool_calls: Sequence[str] = (),
     detector: PiiDetector | None = None,
     tracer: Any = None,
+    static_reply: str | None = None,
+    static_fallback: str | None = None,
 ) -> LightResult:
-    """Answer a ``smalltalk`` or ``meta`` turn. ``tool_calls`` are the tool names recorded in
-    this turn so far (expected empty); the output guard blocks the answer if any is present."""
+    """Answer a light-label turn (``smalltalk``, ``meta``, ``memory``, ``comment``).
+
+    ``tool_calls`` are the tool names recorded in this turn so far (expected empty); the
+    output guard blocks the answer if any is present.
+
+    ``static_reply`` (D-151a) is a code-owned answer built by the caller, e.g. the reply to
+    "show me the SQL": it is used instead of the model and of the capabilities text.
+    ``static_fallback`` is the code-owned text used if the guard does not pass
+    ``static_reply`` (default: the D-151a "SQL is not shown" text)."""
     if label not in LIGHT_LABELS:
-        raise ValueError("run_light_path only handles smalltalk and meta")
+        raise ValueError("run_light_path only handles the light labels")
     calls_before = llm.budget.calls
     # The scope line is appended after the guard: it is code-built from the trusted profile,
     # and the NER would mask brand names that look like people without the catalogue allowlist.
-    suffix = f"\n\n{_scope_text(profile)}" if label == "meta" else ""
-    if label == "meta":
+    static = static_reply if isinstance(static_reply, str) and static_reply.strip() else None
+    suffix = f"\n\n{_scope_text(profile)}" if label == "meta" and static is None else ""
+    if static is not None:
+        draft, source = static, "static"
+    elif label in LABEL_TEXTS:  # D-155: router label, code-owned answer
+        draft, source = LABEL_TEXTS[label], "static"
+    elif label == "meta":
         draft, source = CAPABILITIES_TEXT, "static"
     else:
         draft, source = _light_reply(message, profile, persona, llm, model, invoke, fallback_model)
@@ -134,13 +177,21 @@ def run_light_path(
     )
     codes = frozenset(verdict.codes())
     if verdict.allowed and not verdict.text.strip():  # e.g. "<b></b>": nothing left to show
-        text, source = _template(label, profile), "template"
+        text, source = _template(label, profile, static, static_fallback), "template"
     elif verdict.allowed:
-        text = verdict.text + suffix
+        body = verdict.text
+        if source == "model":  # D-151: model-written text only, after the guard allowed it
+            no_sql = strip_sql(body)  # D-151a: a model reply never shows SQL
+            if no_sql != body:
+                codes = codes | {SQL_STRIPPED}
+            body = humanize_identifiers(no_sql)
+            if body != no_sql:
+                codes = codes | {SCHEMA_TERMS_REWRITTEN}
+        text = body + suffix
     elif UNEXPECTED_ACTION in codes:  # the turn did something it must not: fail closed
         text, source = verdict.text, "blocked"
     else:  # e.g. the model echoed instructions: a code-written reply is always safe
-        text, source = _template(label, profile), "template"
+        text, source = _template(label, profile, static, static_fallback), "template"
 
     result = LightResult(text, label, source, llm.budget.calls - calls_before, codes)
     if tracer is not None:
@@ -162,7 +213,13 @@ def run_light_path(
     return result
 
 
-def _template(label: str, profile: Profile) -> str:
+def _template(
+    label: str, profile: Profile, static: str | None = None, fallback: str | None = None
+) -> str:
+    if static is not None:  # D-151a: the guard did not pass the reply: the fixed short text
+        return fallback if isinstance(fallback, str) and fallback.strip() else SQL_NOT_SHOWN_TEXT
+    if label in LABEL_TEXTS:
+        return LABEL_TEXTS[label]
     if label == "meta":
         return f"{CAPABILITIES_TEXT}\n\n{_scope_text(profile)}"
     return GREETING_TEMPLATE

@@ -41,6 +41,10 @@ aggregate does not take:
   ``national id``, ``tax id``, ``driver's license``) any id with 6+ digits is ``<ID>``
   (``SSN 123456789``, ``passport X12345678``).
 * An IBAN (compact or in groups of four) that passes the mod-97 check is one ``<ID>``.
+* D-215: a saved-report id as the agent shows it (``R-`` + 32 lower-case hex digits,
+  ``REPORT_DISPLAY_ID``) is the agent's own reference, not PII, and is never masked: a
+  random id can hold a 13+ digit run that the rules above would otherwise cut out of it.
+  Only that exact token is exempt; digits next to it are judged as usual.
 
 Ordinary analytics text is left alone: years, ISO dates, prices (``$1,234.56``),
 percentages, counts and short SKUs.
@@ -275,6 +279,43 @@ _SSN = re.compile(r"(?<![\w.-])\d{3}([-. ])\d{2}\1\d{4}(?![\w-]|\.\d)")
 
 _YEAR = re.compile(r"(?:19|20)\d\d")
 
+#: D-215: a saved-report id in its display form (reports.library.display_id). Exempt from
+#: every digit rule here and from NER in ``pii`` (an id is never a name or a number).
+#: D-227: only a standalone token is exempt. It must start the text or follow whitespace or
+#: an opening bracket, quote, ``*`` or ``|``, and end the text or be followed by whitespace,
+#: a closing bracket, quote, ``*``, ``|``, sentence punctuation that is not glued to a word
+#: (``R-<id>, 4111`` is fine, ``R-<id>.com`` is not) or a ``.md`` file suffix. An id
+#: embedded in an email, a number or a word is ordinary text.
+REPORT_DISPLAY_ID = re.compile(
+    r"(?<![^\s(\[{\"'`*|])[Rr]-[0-9a-f]{32}"
+    r"(?=$|[\s)\]}\"'`*|]|[.,;:!?](?![\w@%+\-])|\.md(?![\w@.%+\-]))",
+    re.ASCII,
+)
+# The id is swapped for an inert letters-only sentinel while the patterns run, then restored.
+_SENTINEL = "\x00"
+_SENTINEL_RE = re.compile(r"\x00([a-z]+)\x00")
+# D-227: a held id with the blanks around it, replaced by one space for the rescan.
+_SENTINEL_GAP = re.compile(r"[ \t]*\x00[a-z]+\x00[ \t]*")
+#: D-227: at most this many ids are held per text; any further id is ordinary text.
+MAX_HELD_IDS = 500
+
+
+def _sentinel(i: int) -> str:
+    letters = ""
+    while True:
+        i, r = divmod(i, 26)
+        letters = chr(97 + r) + letters
+        if i == 0:
+            return f"{_SENTINEL}{letters}{_SENTINEL}"
+        i -= 1
+
+
+def _sentinel_index(letters: str) -> int:
+    n = 0
+    for c in letters:
+        n = n * 26 + (ord(c) - 96)
+    return n - 1
+
 
 def _digits(s: str) -> str:
     return "".join(c for c in s if c.isdecimal())
@@ -355,6 +396,19 @@ class _Scrubber:
         return self.mask(ID)
 
 
+def _card_like_payload(token: str) -> bool:
+    """D-227: an id whose hex payload carries a digit run the long-run rule would mask as a
+    card (13-19 digits passing Luhn) or as an id (20+ digits) is not exempt; it is masked like
+    any other text. ``store.reports.new_report_id`` never issues an id with a 13+ digit run,
+    so a real id is never masked; only a typed, crafted one is."""
+    return any(
+        len(r) > 19 or (len(r) >= 13 and _luhn_ok(r)) for r in _PAYLOAD_RUN.findall(token)
+    )
+
+
+_PAYLOAD_RUN = re.compile(r"\d{13,}")
+
+
 def _drop_partial_token(text: str) -> str:
     """Drop the trailing run of non-whitespace after a cut: it may be a bisected value
     whose remainder no longer matches any pattern. Linear scan, no regex backtracking."""
@@ -371,8 +425,35 @@ def scrub(text: str) -> ScrubResult:
     truncated = len(text) > MAX_SCRUB_CHARS
     if truncated:
         text = _drop_partial_token(text[:MAX_SCRUB_CHARS])
+    out = _normalise(text).replace(_SENTINEL, "")
+    ids: list[str] = []
+
+    def _hold(m: re.Match[str]) -> str:
+        if len(ids) >= MAX_HELD_IDS or _card_like_payload(m.group(0)):
+            return m.group(0)
+        ids.append(m.group(0))
+        return _sentinel(len(ids) - 1)
+
+    held = REPORT_DISPLAY_ID.sub(_hold, out)
     s = _Scrubber()
-    out = _normalise(text)
+    out = _scrub_patterns(held, s)
+    if ids:
+        # D-227: an id must not hide PII by splitting it ("4111 1111 1111 R-<id> 1111",
+        # "Zorbina R-<id> Quandleworth" for NER in ``pii``). Rescan with every id taken out;
+        # if masking then differs anywhere, the exemption is withdrawn for this text: the
+        # ids are dropped and the rescanned text is returned (fail closed).
+        s_without = _Scrubber()
+        without = _scrub_patterns(_SENTINEL_GAP.sub(" ", held), s_without)
+        if without != _SENTINEL_GAP.sub(" ", out):
+            out, s = without, s_without
+        else:
+            out = _SENTINEL_RE.sub(lambda m: ids[_sentinel_index(m.group(1))], out)
+    if truncated:
+        out += TRUNCATION_MARKER
+    return ScrubResult(text=out, findings=MappingProxyType(dict(s.counts)), truncated=truncated)
+
+
+def _scrub_patterns(out: str, s: _Scrubber) -> str:
     out = _EMAIL_STRONG.sub(s.email, out)
     out = _EMAIL_WORD.sub(s.email, out)
     out = _EMAIL_AT_DOTTED.sub(s.email, out)
@@ -385,10 +466,7 @@ def scrub(text: str) -> ScrubResult:
     out = _PHONE_NANP.sub(s.phone, out)
     out = _PHONE_NATIONAL.sub(s.phone, out)
     out = _SSN.sub(s.ssn, out)
-    out = _PHONE_EXT.sub(s.phone_ext, out)
-    if truncated:
-        out += TRUNCATION_MARKER
-    return ScrubResult(text=out, findings=MappingProxyType(dict(s.counts)), truncated=truncated)
+    return _PHONE_EXT.sub(s.phone_ext, out)
 
 
 def scrub_for_persistence(text: str, sink: Callable[[str], object]) -> ScrubResult:

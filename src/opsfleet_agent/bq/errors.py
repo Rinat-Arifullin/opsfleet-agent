@@ -140,6 +140,9 @@ _UNKNOWN_PATTERNS = (
     re.compile(r"Unrecognized name:\s*" + _IDENT),
     re.compile(r"Name\s+" + _IDENT + r"\s+not found inside"),
     re.compile(r"Field name\s+" + _IDENT + r"\s+does not exist"),
+    # Table only (D-22): the last segment of project:dataset.table. A missing dataset or
+    # project is not matched and stays BQ_RUNTIME.
+    re.compile(r"Not found:\s*Table\s+(?:[A-Za-z0-9_\-]+[:.])*" + _IDENT + r"\s+was not found"),
 )
 _TYPE_PATTERNS = re.compile(
     r"No matching signature|Could not cast|Bad \w+ value|Invalid cast|cannot be compared"

@@ -15,7 +15,9 @@ Two things live here, both only for the current session:
   merely contains the value ("orders table", "short-term"), cannot set one.
   Notes are sanitised (no URLs, code, instruction-like or policy-conflicting text), at most
   200 characters, at most 5 (``NOTE_REJECTED``). Persisting preferences across sessions is
-  iteration 39: :class:`PreferenceStore` is the seam, and nothing here writes to it.
+  iteration 39: :class:`PreferenceStore` is the seam (``store/preferences.py`` implements it,
+  ``/prefs`` writes through it), and :func:`render_preferences` turns validated values into
+  fixed code sentences for the lowest-precedence prompt block.
 
 A pending clarification (AC-23.2/23.3) is also session memory: the original question waits for
 the user's answer and is completed with it once, without asking again.
@@ -104,7 +106,10 @@ _SYNONYMS: Final[dict[str, dict[Any, tuple[str, ...]]]] = {
         ),
     },
 }  # fmt: skip
-_FIELDS: Final = tuple(_SYNONYMS)
+# Iteration 39b (D-240): a numeric field, the default list length for top-N and table answers.
+ROWS_MIN: Final = 1
+ROWS_MAX: Final = 50
+_FIELDS: Final = (*_SYNONYMS, "rows")
 
 _URL_RE: Final = re.compile(r"(?i)(https?:|www\.|://|\bftp:|[a-z0-9-]+\.(com|net|org|io)\b)")
 _CODE_RE: Final = re.compile(
@@ -253,7 +258,7 @@ class PreferenceResult:
 
 
 class PreferenceStore(Protocol):
-    """Seam for iteration 39 (persisted preferences). Nothing in iteration 15 calls it."""
+    """Seam for persisted preferences (iteration 39; ``store.preferences`` implements it)."""
 
     def save(self, user_id: str, preferences: Mapping[str, Any]) -> None: ...
 
@@ -261,7 +266,7 @@ class PreferenceStore(Protocol):
 @dataclass(frozen=True)
 class SessionMemory:
     churn_definition: str | None = None  # session restatement (A-4); None = default
-    preferences: Mapping[str, Any] = field(default_factory=dict)  # format/depth/charts
+    preferences: Mapping[str, Any] = field(default_factory=dict)  # format/depth/charts/rows
     notes: tuple[PreferenceNote, ...] = ()
     pending_clarification: PendingClarification | None = None
     # Snapshot of the scope the restatement was captured under (R4-L4): assembly applies it
@@ -277,10 +282,12 @@ class SessionMemory:
         return replace(self, pending_clarification=None)
 
     def persistable(self) -> dict[str, Any]:
-        """What iteration 39 may persist: preferences and notes. Never a restatement."""
+        """What iteration 39 persists: preferences and notes (with the scope snapshot each note
+        was written under, so FR-76 filtering still works in a later session). Never a
+        restatement and never a pending clarification."""
         return {
             "preferences": dict(self.preferences),
-            "notes": [n.text for n in self.notes],
+            "notes": [{"text": n.text, "scope": dict(n.scope_snapshot)} for n in self.notes],
         }
 
     def to_state(self) -> dict[str, Any]:
@@ -493,8 +500,7 @@ def set_preference(
             return PreferenceResult(False, memory, NOTE_REJECTED, "too_many_notes")
         new_note = PreferenceNote(cleaned, dict(scope_snapshot))
         return PreferenceResult(True, replace(memory, notes=(*memory.notes, new_note)))
-    values = _SYNONYMS.get(field or "")
-    if values is None or not _valid_value(field or "", value):
+    if field not in _FIELDS or not _valid_value(field or "", value):
         return PreferenceResult(False, memory, INVALID_ARGS, "bad_field_or_value")
     if not _value_in_message(field or "", value, message):
         return PreferenceResult(False, memory, VALUE_NOT_IN_MESSAGE, "value_not_in_message")
@@ -502,13 +508,22 @@ def set_preference(
     return PreferenceResult(True, replace(memory, preferences=prefs))
 
 
+def clamp_rows(value: int) -> int:
+    """The ``rows`` preference bound (D-240): a whole number in ROWS_MIN..ROWS_MAX."""
+    return max(ROWS_MIN, min(ROWS_MAX, int(value)))
+
+
 def _valid_value(field: str, value: Any) -> bool:
+    if field == "rows":
+        return type(value) is int and ROWS_MIN <= value <= ROWS_MAX
     if field == "charts":
         return isinstance(value, bool)
     return isinstance(value, str) and value in _SYNONYMS[field]
 
 
 def _value_in_message(field: str, value: Any, message: str) -> bool:
+    if field == "rows":  # the number itself, as a whole number, in the user's message
+        return re.search(rf"(?<![\w.]){value}(?![\w.])", _norm(message)) is not None
     if field == "charts":
         negated = _CHART_NEG_RE.search(_norm(message)) is not None or any(
             message_contains(message, p) for p in _SYNONYMS["charts"][False]
@@ -519,3 +534,41 @@ def _value_in_message(field: str, value: Any, message: str) -> bool:
             _stated_with_intent(message, p) for p in _SYNONYMS["charts"][True]
         )
     return any(_stated_with_intent(message, p) for p in _SYNONYMS[field][value])
+
+
+_FORMAT_SENTENCES = {
+    "table": "Prefer a table for lists and comparisons.",
+    "bullets": "Prefer bullet points.",
+    "prose": "Prefer short prose paragraphs.",
+}
+_DEPTH_SENTENCES = {
+    "brief": "Keep answers brief.",
+    "standard": "Use standard answer depth.",
+    "deep": "Give a deeper analysis with more breakdowns.",
+}
+
+
+def render_preferences(memory: SessionMemory) -> str:
+    """Validated preferences as fixed code sentences, or "" (iteration 39, AC-24.4).
+
+    Only enumerated values reach the prompt, and only through these sentences: no user text
+    is copied here (notes go as fenced, scope-filtered data in the context section).
+    """
+    prefs = memory.preferences
+    out: list[str] = []
+    fmt, depth, charts = prefs.get("format"), prefs.get("depth"), prefs.get("charts")
+    if fmt in _FORMAT_SENTENCES:
+        out.append(_FORMAT_SENTENCES[fmt])
+    if depth in _DEPTH_SENTENCES:
+        out.append(_DEPTH_SENTENCES[depth])
+    if charts is True:
+        out.append("Suggest a chart when it helps.")
+    elif charts is False:
+        out.append("Do not suggest charts.")
+    rows = prefs.get("rows")
+    if _valid_value("rows", rows):  # a validated int, never user text (D-240)
+        out.append(
+            f"For top-N, ranked and list answers, show at least {rows} rows (use LIMIT {rows} "
+            "or more) unless the question names its own number; the result row cap still applies."
+        )
+    return "\n".join(f"- {line}" for line in out)

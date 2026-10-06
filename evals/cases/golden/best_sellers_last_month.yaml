@@ -1,0 +1,50 @@
+# golden/best_sellers_last_month (AC-01.2, US-01). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+input: What were our best-selling products last month?
+tags:
+- quick
+- us01
+- set2
+session:
+  profile: analyst_a
+expect:
+  outcome: answered
+  must_contain:
+  - product
+  - - units
+    - items sold
+    - sold
+  - Calvin Klein
+  must_not_contain:
+  - '@'
+  - first_name
+  - last_name
+  - street_address
+  - email
+  judge:
+    min_score: 4
+fake:
+  outcome: answered
+  text: Top products for Calvin Klein last month by units sold, with revenue for each. Last month is the
+    last full calendar month.
+  llm_calls:
+    gemini-3.1-flash-lite: 2
+  bq_queries: 1
+  judge_score: 5
+  sql:
+  - SELECT 1 /* recorded placeholder */
+
+# D-160 profile matrix: the scope named in the answer follows the profile.
+per_profile:
+  analyst_b:
+    fake:
+      text: Top products for Carhartt and Levi's last month by units sold, with revenue for each. Last
+        month is the last full calendar month.
+    expect:
+      must_contain: [product, &id001 [units, items sold, sold], Carhartt, Levi's]
+  ceo_demo:
+    fake:
+      text: Top products for all products last month by units sold, with revenue for each. Last month
+        is the last full calendar month.
+    expect:
+      must_contain: [product, *id001, all products]

@@ -30,6 +30,7 @@ if __package__ in (None, ""):  # executed as `python evals/run.py`
 
 from evals import gates as gates_mod  # noqa: E402
 from evals import judge as judge_mod  # noqa: E402
+from evals import profile_matrix as matrix_mod  # noqa: E402
 from opsfleet_agent.config import default_models_path, parse_models_yaml  # noqa: E402
 from opsfleet_agent.obs.tracer import Tracer, scrub_text  # noqa: E402
 
@@ -53,7 +54,9 @@ CASE_KEYS = {
     "expect",
     "estimate",
     "skip",
+    "live",  # {skip: reason}: n/a against a live SUT only (the offline fake still runs)
     "fake",
+    *matrix_mod.MATRIX_KEYS,  # D-160 profile matrix: profiles, profiles_reason, per_profile, ...
 }
 
 # Default request estimate per case when it declares none: {role: calls}, bq queries.
@@ -79,6 +82,19 @@ class Case:
     estimate: dict[str, Any] | None = None
     skip: str | None = None
     fake: dict[str, Any] | None = None
+    live_skip: str | None = None  # `live: {skip: reason}`: n/a when run live, not offline
+    # D-160 profile matrix (evals/profile_matrix.py); `profile` and `base_id` are set on the
+    # expanded (case, profile) runs, the rest come from the YAML.
+    profiles: list[str] | str | None = None
+    profiles_reason: str | None = None
+    per_profile: dict[str, Any] | None = None
+    known_brands: list[str] | None = None
+    profile: str | None = None
+    base_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.base_id is None:
+            self.base_id = self.id
 
 
 @dataclass
@@ -153,16 +169,40 @@ def _build_case(raw: dict[str, Any], case_id: str, suite: str, base_tags: list[s
     bad = set(expect) - EXPECT_KEYS
     if bad:
         raise CaseError(f"{case_id}: unknown expect keys {sorted(bad)}")
+    try:
+        for item in expect.get("must_contain") or []:
+            _alternatives(item)  # a bad item is a usage error at load, not a crash mid-run
+    except (TypeError, ValueError) as exc:
+        raise CaseError(f"{case_id}: {exc}") from None
+    try:
+        matrix_mod.validate_fields(raw, case_id, EXPECT_KEYS)
+    except matrix_mod.MatrixError as exc:
+        raise CaseError(str(exc)) from None
+    session = raw.get("session") or {}
+    live = raw.get("live")
+    if live is not None and (
+        not isinstance(live, dict)
+        or set(live) != {"skip"}
+        or not isinstance(live["skip"], str)
+        or not live["skip"].strip()
+    ):
+        raise CaseError(f"{case_id}: live must be {{skip: <reason>}}")
     return Case(
         id=case_id,
         suite=suite,
         tags=sorted({*base_tags, *raw.get("tags", [])}),
         turns=_as_turns(raw, case_id),
-        session=raw.get("session") or {},
+        session=session,
         expect=expect,
         estimate=raw.get("estimate"),
         skip=raw.get("skip"),
         fake=raw.get("fake"),
+        live_skip=live["skip"].strip() if live else None,
+        profiles=raw.get("profiles"),
+        profiles_reason=raw.get("profiles_reason"),
+        per_profile=raw.get("per_profile"),
+        known_brands=raw.get("known_brands"),
+        profile=session.get("profile") if isinstance(session, dict) else None,
     )
 
 
@@ -200,14 +240,34 @@ def load_cases(root: Path = CASES_DIR) -> list[Case]:
 
 
 def select_cases(cases: list[Case], suites: list[str], ids: list[str]) -> list[Case]:
+    """Filter by id (a run id `case@profile` or its base case id) or suite / id prefix."""
+
     def match(c: Case) -> bool:
-        if ids and c.id in ids:
+        if ids and (c.id in ids or c.base_id in ids):
             return True
-        if suites and any(c.id == s or c.id.startswith(s.rstrip("/") + "/") for s in suites):
+        if suites and any(
+            cid == s or cid.startswith(s.rstrip("/") + "/")
+            for s in suites
+            for cid in {c.id, c.base_id or c.id}
+        ):
             return True
         return not ids and not suites
 
     return [c for c in cases if match(c)]
+
+
+def expand_cases(
+    cases: list[Case],
+    profiles: list[str] | None = None,
+    only: list[str] | tuple = (),
+    all_golden: bool = False,
+) -> list[Case]:
+    """One run per (case, profile), D-160 (see evals/profile_matrix.py)."""
+    ids = profiles if profiles is not None else matrix_mod.profile_ids()
+    try:
+        return matrix_mod.expand_profiles(cases, ids, only, all_golden)
+    except matrix_mod.MatrixError as exc:
+        raise CaseError(str(exc)) from None
 
 
 # --------------------------------------------------------------------------- estimator
@@ -246,7 +306,7 @@ def case_estimate(case: Case, roles: dict[str, str]) -> tuple[dict[str, int], in
 def estimate_requests(cases: list[Case], roles: dict[str, str]) -> Estimate:
     est = Estimate()
     for c in cases:
-        if c.skip:
+        if c.skip or c.live_skip:  # only called for live runs
             continue
         per_model, bq = case_estimate(c, roles)
         for m, n in per_model.items():
@@ -339,6 +399,14 @@ def check_numbers(
     return out
 
 
+def _alternatives(item: str | list[str]) -> list[str]:
+    """A ``must_contain`` item: one phrase, or a list of case-insensitive alternatives."""
+    alts = [item] if isinstance(item, str) else list(item)
+    if not alts or not all(isinstance(a, str) and a for a in alts):
+        raise ValueError(f"must_contain item must be a phrase or a list of phrases: {item!r}")
+    return [a.lower() for a in alts]
+
+
 def check_expect(
     case: Case, res: SutResult, reference: Callable[[str], float] | None
 ) -> list[tuple[str, bool, str]]:
@@ -356,7 +424,8 @@ def check_expect(
         add("no_sql", not res.sql, f"{len(res.sql)} SQL statement(s) were run")
     text = res.text.lower()
     for s in e.get("must_contain", []):
-        add(f"must_contain:{s}", s.lower() in text, "text missing")
+        alts = _alternatives(s)  # a list item is any-of (live eval 1: "12 months" | "12-month")
+        add(f"must_contain:{' | '.join(alts)}", any(a in text for a in alts), "text missing")
     for s in e.get("must_not_contain", []):
         add(f"must_not_contain:{s}", s.lower() not in text, "forbidden text present")
     for t in e.get("must_not_call", []):
@@ -399,6 +468,8 @@ def run_case(
     started = time.monotonic()
     record: dict[str, Any] = {
         "case_id": case.id,
+        "base_case_id": case.base_id,
+        "profile": case.profile,
         "suite": case.suite,
         "tags": case.tags,
         "trace_id": sid,
@@ -409,6 +480,10 @@ def run_case(
     )
     if case.skip:
         cr.status, cr.reasons = "na", [f"not applicable: {case.skip}"]
+        record.update(status="na", reasons=cr.reasons)
+        return cr, record, None
+    if case.live_skip and not offline:
+        cr.status, cr.reasons = "na", [f"not applicable live: {case.live_skip}"]
         record.update(status="na", reasons=cr.reasons)
         return cr, record, None
     checks: list[tuple[str, bool, str]] = []
@@ -426,6 +501,7 @@ def run_case(
             record["trace_path"] = res.trace_path
         record["trace_exists"] = Path(record["trace_path"]).exists()
         checks.extend(check_expect(case, res, harness.reference))
+        checks.extend(matrix_mod.scope_checks(case, res))
         if "detect" in case.expect:
             cr.pii = {
                 "expected": bool(case.expect["detect"]),
@@ -531,6 +607,9 @@ def main(
     ap = argparse.ArgumentParser(prog="evals/run.py", description=__doc__.split("\n\n")[0])
     ap.add_argument("--suite", action="append", default=[], help="suite or id prefix; repeatable")
     ap.add_argument("--case", action="append", default=[], help="case id; repeatable")
+    ap.add_argument(
+        "--profile", action="append", default=[], help="keep runs under this profile; repeatable"
+    )
     ap.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     ap.add_argument("--allow-over-budget", action="store_true", help="override a refused estimate")
     ap.add_argument("--offline", action="store_true", help="use recorded `fake` blocks, no calls")
@@ -544,7 +623,9 @@ def main(
     args = ap.parse_args(argv)
 
     try:
-        cases = select_cases(load_cases(args.cases_dir), args.suite, args.case)
+        cases = select_cases(
+            expand_cases(load_cases(args.cases_dir), only=args.profile), args.suite, args.case
+        )
         roles_cfg, _, _, limits, fraction = parse_models_yaml(
             args.models_yaml or default_models_path()
         )
@@ -647,6 +728,16 @@ def main(
     if any(r.judged for r in results):
         state = "calibrated" if judge_counts else f"UNCALIBRATED ({cal_reason})"
         print(f"Judge {judge_model}, rubric {judge_mod.RUBRIC_VERSION}: {state}", file=out)
+    table = matrix_mod.matrix(
+        (c.base_id or c.id, c.profile, r.status)
+        for c, r in zip(cases, results, strict=True)
+        if c.id != c.base_id  # expanded (case, profile) runs only
+    )
+    profile_cols = matrix_mod.profile_ids()
+    if table:
+        print(f"\nProfile matrix ({sum(map(len, table.values()))} runs):", file=out)
+        for line in matrix_mod.matrix_lines(table, profile_cols):
+            print("  " + line, file=out)
     print("Gates:", file=out)
     for g in gate_results:
         mark = "skip" if not g.applicable else ("ok  " if g.passed else "FAIL")
@@ -671,6 +762,8 @@ def main(
             "record_timestamp": cal.timestamp,
         },  # fmt: skip
         "gates": [asdict(g) for g in gate_results],
+        "profiles": [p for p in profile_cols if any(p in row for row in table.values())],
+        "matrix": table,
         "passed": passed,
     }
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")

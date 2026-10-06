@@ -169,6 +169,8 @@ LABEL_ROUTES: Final[Mapping[str, frozenset[str]]] = {
     "library": frozenset({"library_agent"}),
     "meta": frozenset({"light_path"}),
     "smalltalk": frozenset({"light_path"}),
+    "memory": frozenset({"light_path"}),  # D-155
+    "comment": frozenset({"light_path", "force_answer"}),  # D-155; D-152 reply after an answer
     "off_topic": frozenset(),
     "injection": frozenset(),
 }

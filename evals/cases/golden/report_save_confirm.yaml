@@ -10,8 +10,10 @@ tags:
 - multi_turn
 session:
   profile: analyst_a
+# A live save shows the id as R-<hex> (reports.library.display_id), so the R- check holds live
+# (docs/process/iter-live1-seed-ods.md OD-9).
 expect:
-  outcome: answered
+  outcome: report_saved
   must_contain:
   - saved
   - R-
@@ -28,7 +30,7 @@ estimate:
     library_agent: 1
   bq: 3
 fake:
-  outcome: answered
+  outcome: report_saved
   text: Report saved. ID R-DEMO-0002, title Q1 summary and Q2 actions.
   llm_calls:
     gemini-3.8-flash: 5

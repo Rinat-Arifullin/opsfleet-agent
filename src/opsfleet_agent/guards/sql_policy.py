@@ -139,8 +139,14 @@ __all__ = [
     "PII_COLUMNS",
     "PROJECT",
     "QI_COLUMNS",
+    "SCOPE_PATTERN_HINT",
+    "SOURCE_NOT_ALLOWED_HINT",
+    "AggregateOnlyPlan",
     "PolicyDecision",
     "Rule",
+    "aggregate_only_plan",
+    "allowed_sources_text",
+    "check_aggregate_only",
     "check_sql",
     "regenerate_sql",
 ]
@@ -225,10 +231,55 @@ _PII: Final = "pii"
 _RAWTS: Final = "rawts"
 #: A value computed from a QI (anything but a bare pass-through of a QI column).
 _QIEXPR: Final = "qiexpr"
+#: D-163: a customer key (``users.id``, ``orders.user_id``, ``order_items.user_id``). It marks
+#: a per-customer subquery (one row per customer) and ``COUNT(DISTINCT <customer key>)``.
+_USERKEY: Final = "userkey"
+#: D-172: a bare pass-through of a customer key (the column itself, an alias of it or a CTE
+#: column that only renames it). ``user_id * 100 + month`` keeps ``_USERKEY`` but not this,
+#: so it cannot pass as "one row per customer" or as ``COUNT(DISTINCT <customer key>)``.
+_BAREUSER: Final = "bareuser"
+_USER_KEYS: Final[MappingProxyType[str, frozenset[str]]] = MappingProxyType(
+    {
+        "users": frozenset({"id"}),
+        "orders": frozenset({"user_id"}),
+        "order_items": frozenset({"user_id"}),
+    }
+)
 #: ``DATE_TRUNC``/``TIMESTAMP_TRUNC``/``DATETIME_TRUNC`` units coarse enough for a signup
 #: timestamp (MONTH or coarser). WEEK, DAY and ISOYEAR are not allowed (fail closed).
 _COARSE_TS_UNITS: Final = frozenset({"MONTH", "QUARTER", "YEAR"})
 _EMPTY: Final[frozenset[str]] = frozenset()
+
+
+
+
+def allowed_sources_text() -> str:
+    """D-154: the allowed tables with their non-PII columns, sorted (no SQL, no PII names)."""
+    parts = []
+    for table in sorted(ALLOWED_TABLES):
+        cols = sorted(ALLOWED_TABLES[table] - PII_COLUMNS.get(table, _EMPTY))
+        parts.append(f"{table} ({', '.join(cols)})")
+    return "; ".join(parts)
+
+
+#: D-154: the ``source_not_allowed`` hint lists every allowed table and column, so the model
+#: can rewrite the query instead of giving up after a refused table.
+SOURCE_NOT_ALLOWED_HINT: Final = (
+    f"that table or source is not available. Rewrite the query using only these tables of "
+    f"{PROJECT}.{DATASET} and only their listed columns: {allowed_sources_text()}"
+)
+
+#: Live eval followup_why_march: the model copied the scope rewrite it saw in an earlier
+#: query (an ``@scope_brands`` parameter, ``UNNEST`` and ``__p``-style CTEs). The refusal
+#: is correct, the scope is code's job; this fixed hint says exactly what to write instead.
+SCOPE_PATTERN_HINT: Final = (
+    "query parameters (@name), UNNEST and CTE names starting with two underscores are not "
+    "available. Do not filter by brand yourself: the brand scope is applied automatically "
+    "to every query. Query the tables directly, for example join order_items to products "
+    "on products.id = order_items.product_id, and filter only on real columns such as "
+    "order_items.created_at and order_items.status. Allowed tables and columns: "
+    f"{allowed_sources_text()}"
+)
 
 
 # --------------------------------------------------------------------------- result
@@ -260,6 +311,8 @@ class Rule(StrEnum):
     QI_AT_ID_GRAIN = "qi_at_id_grain"
     SMALL_CELL_UNPLACEABLE = "small_cell_unplaceable"
     QI_DIFFERENCING = "qi_differencing"
+    CUSTOMER_GRAIN = "customer_grain"
+    BAND_COUNT_REQUIRED = "band_count_required"
 
 
 _HINTS: Final[MappingProxyType[Rule, str]] = MappingProxyType(
@@ -286,10 +339,7 @@ _HINTS: Final[MappingProxyType[Rule, str]] = MappingProxyType(
         Rule.CTE_SHADOWS_TABLE: (
             "rename the CTE: it may not reuse a table name or start with two underscores"
         ),
-        Rule.SOURCE_NOT_ALLOWED: (
-            "query only the tables orders, order_items, products and users of "
-            "bigquery-public-data.thelook_ecommerce"
-        ),
+        Rule.SOURCE_NOT_ALLOWED: SOURCE_NOT_ALLOWED_HINT,
         Rule.SELECT_STAR: "name the columns you need",
         Rule.UNRESOLVED_VALUE: (
             "select columns, literals or expressions over them; no table aliases, "
@@ -316,6 +366,19 @@ _HINTS: Final[MappingProxyType[Rule, str]] = MappingProxyType(
         Rule.QI_DIFFERENCING: (
             "compute one aggregate per query when grouping or filtering by customer "
             "attributes; do not combine, subtract or union several groupings or totals"
+        ),
+        Rule.CUSTOMER_GRAIN: (
+            "this question is answered with spend bands and customer counts only: compute "
+            "each customer's total in a subquery, then group those totals into spend bands "
+            "(CASE on the total) and return per band the number of customers and the share "
+            "of revenue; return no customer ids and no per-customer, per-order or per-item rows"
+        ),
+        Rule.BAND_COUNT_REQUIRED: (
+            "this query groups per-customer values into bands or groups: return each group's "
+            "number of customers as a named column, either COUNT(*) AS customers over the "
+            "per-customer subquery or COUNT(DISTINCT user_id) AS customers, with no QUALIFY and "
+            "no subquery in the outer query other than user_id IN (SELECT ...); groups with too "
+            "few customers are merged with other groups or hidden"
         ),
     }
 )
@@ -354,15 +417,16 @@ _ALLOW: Final = PolicyDecision(allowed=True, reason_code=Rule.OK, hint="")
 
 
 class _Reject(Exception):
-    """Internal: carries the rule only, never SQL text."""
+    """Internal: carries the rule (and optionally a fixed hint constant), never SQL text."""
 
-    def __init__(self, rule: Rule) -> None:
+    def __init__(self, rule: Rule, hint: str | None = None) -> None:
         super().__init__(rule.value)
         self.rule = rule
+        self.hint = hint
 
 
-def _deny(rule: Rule) -> PolicyDecision:
-    return PolicyDecision(allowed=False, reason_code=rule, hint=_HINTS[rule])
+def _deny(rule: Rule, hint: str | None = None) -> PolicyDecision:
+    return PolicyDecision(allowed=False, reason_code=rule, hint=hint or _HINTS[rule])
 
 
 # --------------------------------------------------------------------------- allowlists
@@ -447,12 +511,74 @@ def check_sql(sql: str) -> PolicyDecision:
     try:
         _check(sql)
     except _Reject as rej:
-        return _deny(rej.rule)
+        return _deny(rej.rule, rej.hint)
     except (SqlglotError, RecursionError):
         return _deny(Rule.SQL_SYNTAX)
     except Exception:  # noqa: BLE001 - fail closed on any analyser bug
         return _deny(Rule.UNSUPPORTED_SYNTAX)
     return _ALLOW
+
+
+@dataclass(frozen=True, slots=True)
+class AggregateOnlyPlan:
+    """Outcome of :func:`aggregate_only_plan`.
+
+    ``band_counts`` names the root output columns that hold a customer count (lower case).
+    It is non-empty exactly when the statement is *banded* (it groups per-customer values)
+    and allowed; ``run_sql`` then merges the bands whose count is below k (D-163, OD-3 /
+    D-172) when ``mergeable``, and hides them otherwise. ``mergeable`` holds only when the
+    bands provably hold disjoint sets of customers and every band label is a fixed band name.
+    For the merge, ``additive`` names the other root columns that are a plain ``SUM`` /
+    ``COUNT`` / ``COUNTIF`` (summed across merged bands) and ``labels`` the band-name columns
+    (joined); every other column of a merged row is emptied. ``row_local`` names the columns
+    computed from their own row only (no window); ``totals`` the columns whose windows are
+    all ``SUM(...) OVER ()`` (a share of the grand total). Once a band is merged, the other
+    window columns are emptied on every row; once a band is hidden, every window column is."""
+
+    decision: PolicyDecision
+    band_counts: tuple[str, ...] = ()
+    mergeable: bool = False
+    additive: tuple[str, ...] = ()
+    labels: tuple[str, ...] = ()
+    row_local: tuple[str, ...] = ()
+    totals: tuple[str, ...] = ()
+
+
+def aggregate_only_plan(sql: str) -> AggregateOnlyPlan:
+    """D-159 / D-163: the extra check for an aggregate-only (customer-ranking) turn.
+
+    Denies (:attr:`Rule.CUSTOMER_GRAIN`) a statement whose result is at row grain (one row
+    per customer, order or item, or plain table rows) or that returns an id column, also one
+    surfaced through MIN/MAX/ANY_VALUE.
+
+    D-163: a *banded* statement (one that computes per-customer values in a subquery, CTE or
+    window and aggregates them) must return a named customer-count column, or it is denied
+    (:attr:`Rule.BAND_COUNT_REQUIRED`). A customer count is ``COUNT(DISTINCT <customer key>)``
+    or ``COUNT(*)`` / ``COUNT(col)`` whose only source has one row per customer. Pure; fails
+    closed like :func:`check_sql`."""
+    try:
+        _check(sql)
+        analyzer = _Analyzer(_parse(sql))
+        if analyzer.returns_id_grain():
+            raise _Reject(Rule.CUSTOMER_GRAIN)
+        banded, counts = analyzer.band_count_columns()
+        if banded and not counts:
+            raise _Reject(Rule.BAND_COUNT_REQUIRED)
+        if not counts:
+            return AggregateOnlyPlan(_ALLOW)
+        mergeable, additive, labels, row_local, totals = analyzer.band_columns()
+    except _Reject as rej:
+        return AggregateOnlyPlan(_deny(rej.rule, rej.hint))
+    except (SqlglotError, RecursionError):
+        return AggregateOnlyPlan(_deny(Rule.SQL_SYNTAX))
+    except Exception:  # noqa: BLE001 - fail closed on any analyser bug
+        return AggregateOnlyPlan(_deny(Rule.UNSUPPORTED_SYNTAX))
+    return AggregateOnlyPlan(_ALLOW, counts, mergeable, additive, labels, row_local, totals)
+
+
+def check_aggregate_only(sql: str) -> PolicyDecision:
+    """The decision of :func:`aggregate_only_plan` (D-159, D-163)."""
+    return aggregate_only_plan(sql).decision
 
 
 def regenerate_sql(sql: str) -> str:
@@ -587,9 +713,9 @@ def _visible_ctes(table: exp.Table) -> set[str]:
 
 def _check_sources(root: exp.Expression) -> None:
     for node in _iter_nodes(root):
-        if isinstance(node, (exp.Parameter, exp.Placeholder, exp.SessionParameter)):
-            raise _Reject(Rule.SOURCE_NOT_ALLOWED)
-        if isinstance(node, (exp.Unnest, exp.Lateral, exp.TableSample)):
+        if isinstance(node, (exp.Parameter, exp.Placeholder, exp.SessionParameter, exp.Unnest)):
+            raise _Reject(Rule.SOURCE_NOT_ALLOWED, SCOPE_PATTERN_HINT)
+        if isinstance(node, (exp.Lateral, exp.TableSample)):
             raise _Reject(Rule.SOURCE_NOT_ALLOWED)
         if isinstance(node, exp.Table):
             _check_table(node)
@@ -609,7 +735,8 @@ def _check_table(table: exp.Table) -> None:
             raise _Reject(Rule.SOURCE_NOT_ALLOWED)
         return
     if name not in ALLOWED_TABLES and name not in _visible_ctes(table):
-        raise _Reject(Rule.SOURCE_NOT_ALLOWED)
+        hint = SCOPE_PATTERN_HINT if name.startswith("__") else None
+        raise _Reject(Rule.SOURCE_NOT_ALLOWED, hint)
 
 
 def _check_ctes(root: exp.Expression) -> None:
@@ -619,7 +746,9 @@ def _check_ctes(root: exp.Expression) -> None:
             raise _Reject(Rule.RECURSIVE_CTE)
         if isinstance(node, exp.CTE):
             name = node.alias
-            if not name or name.lower() in reserved or name.startswith("__"):
+            if name and name.startswith("__"):
+                raise _Reject(Rule.CTE_SHADOWS_TABLE, SCOPE_PATTERN_HINT)
+            if not name or name.lower() in reserved:
                 raise _Reject(Rule.CTE_SHADOWS_TABLE)
             alias = node.args.get("alias")
             if isinstance(alias, exp.TableAlias) and alias.columns:
@@ -859,6 +988,8 @@ class _Analyzer:
                 tags.add(_QI)
             if name in _ID_KEYS.get(table, _EMPTY):
                 tags.add(_IDKEY)
+            if name in _USER_KEYS.get(table, _EMPTY):
+                tags.update((_USERKEY, _BAREUSER))
             if table == "users" and name == "created_at":
                 tags.add(_RAWTS)
             return frozenset(tags)
@@ -876,16 +1007,19 @@ class _Analyzer:
                 raise _Reject(Rule.UNSUPPORTED_SYNTAX)
             return found
         if isinstance(node, _QUERY_NODES) and node is not self.root:
-            return frozenset().union(*self._analyze(self._scope_for(node)).output_list)
+            outputs = frozenset().union(*self._analyze(self._scope_for(node)).output_list)
+            return outputs - {_BAREUSER}
         if isinstance(node, _COUNTING) or isinstance(node, _WINDOW_ONLY):
             return _EMPTY
         children = frozenset().union(*(self.taint(c) for c in node.iter_expressions()))
+        if not isinstance(node, (exp.Alias, exp.Paren)):
+            children = children - {_BAREUSER}
         if _QI in children and not isinstance(node, (exp.Alias, exp.Paren)):
             children = children | {_QIEXPR}
         if _coarse_truncation(node):
             return children - {_RAWTS}
         if isinstance(node, _AGGREGATES) and not isinstance(node, _ID_PRESERVING_AGGS):
-            return children - {_IDKEY}
+            return children - {_IDKEY, _USERKEY}
         return children
 
     def _raw_taint(self, node: exp.Expression) -> frozenset[str]:
@@ -1060,6 +1194,193 @@ class _Analyzer:
                 return True
         return False
 
+    def returns_id_grain(self) -> bool:
+        """True when the root result is at row grain or carries an id column (D-159)."""
+        scopes = list(self.root_scope.traverse())
+        for scope in scopes:
+            self.scope_of_expr[id(scope.expression)] = scope
+        root_info = self._analyze(self.root_scope)
+        return root_info.row_grain or any(_IDKEY in t for t in root_info.output_list)
+
+    # -- D-163: customer bands
+
+    def band_count_columns(self) -> tuple[bool, tuple[str, ...]]:
+        """``(banded, count columns)`` of the root result (D-163).
+
+        *Banded*: a non-root query level has one row per customer (GROUP BY only customer
+        keys) or groups / de-duplicates by a customer key, or a window partitions by one. The
+        count columns are the named root outputs that count customers; for a set operation,
+        the positions that count customers in every branch (names from the first branch)."""
+        scopes = list(self.root_scope.traverse())
+        for scope in scopes:
+            self.scope_of_expr[id(scope.expression)] = scope
+        self._analyze(self.root_scope)
+        banded = any(
+            self._groups_by_customer(s) for s in scopes if s is not self.root_scope
+        ) or any(self._window_by_customer(n) for n in _iter_nodes(self.root))
+        if not banded:
+            return False, ()
+        root = self.root_scope.expression
+        branches = list(_branch_selects(root)) if isinstance(root, exp.SetOperation) else [root]
+        positions: set[int] | None = None
+        for branch in branches:
+            scope = self.root_scope if branch is root else self._scope_for(branch)
+            found = {
+                pos for pos, proj in enumerate(branch.expressions)
+                if self._is_customer_count(proj, scope)
+            }
+            positions = found if positions is None else positions & found
+        first = branches[0].expressions
+        names = sorted({first[p].alias_or_name.lower() for p in positions or ()} - {""})
+        return True, tuple(names)
+
+    def band_columns(
+        self,
+    ) -> tuple[bool, tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+        """``(mergeable, additive, labels, row_local, totals)`` of a banded root (D-172).
+
+        A subquery in a root projection, ``QUALIFY``, or a subquery in a root ``WHERE`` /
+        ``HAVING`` / ``ORDER BY`` other than ``<column> IN (SELECT ...)`` is refused
+        (``band_count_required``): it could count a small set of customers outside any band, or
+        decide which rows exist from a small set before the result-side check runs.
+        *Mergeable*: the bands hold disjoint sets of customers and are named by fixed labels.
+        That is proved only for a root SELECT with a
+        plain GROUP BY (no ROLLUP / CUBE / GROUPING SETS), no join, a single source that is one
+        row per customer, and every group key and every non-aggregate projection a band name
+        (a ``CASE`` / ``IF`` whose results are all constants), with at least one such label.
+        A raw value as the label (``GROUP BY spend``) would list each small band's value in
+        the merged label, so it is hidden instead. *Additive*: a named projection that is
+        ``SUM(x)``, ``COUNT(x)``, ``COUNT(*)`` or ``COUNTIF(x)``, not DISTINCT and not a
+        window: over disjoint groups the merged value is the sum."""
+        root = self.root_scope.expression
+        branches = list(_branch_selects(root)) if isinstance(root, exp.SetOperation) else [root]
+        width = len(branches[0].expressions)
+        local = set(range(width))
+        total = set(range(width))
+        if not isinstance(root, exp.Select) and _has_gating_subquery(root):
+            raise _Reject(Rule.BAND_COUNT_REQUIRED)
+        for branch in branches:
+            if branch.args.get("qualify") is not None or _has_gating_subquery(branch):
+                raise _Reject(Rule.BAND_COUNT_REQUIRED)
+            for pos, proj in enumerate(branch.expressions):
+                if any(isinstance(n, _QUERY_NODES) for n in proj.walk()):
+                    raise _Reject(Rule.BAND_COUNT_REQUIRED)
+                windows = [n for n in proj.walk() if isinstance(n, exp.Window)]
+                if windows:
+                    local.discard(pos)
+                if not all(_is_grand_total(w) for w in windows):
+                    total.discard(pos)
+        first = branches[0].expressions
+
+        def names(positions: set[int]) -> tuple[str, ...]:
+            return tuple(sorted({first[p].alias_or_name.lower() for p in positions} - {""}))
+
+        row_local, totals = names(local), names(total - local)
+        if not self._mergeable_shape(root):
+            return False, (), (), row_local, totals
+        additive: set[str] = set()
+        labels: set[str] = set()
+        for proj in root.expressions:
+            name = proj.alias_or_name.lower()
+            node = _strip_alias(proj)
+            if isinstance(node, exp.Sum | exp.Count | exp.CountIf):
+                if name and not isinstance(node.this, exp.Distinct) and not node.args.get(
+                    "distinct"
+                ):
+                    additive.add(name)
+            elif not _contains_aggregate(proj) and not any(
+                isinstance(n, exp.Window) for n in proj.walk()
+            ):
+                if not name or not _is_band_name(node):
+                    return False, (), (), row_local, totals
+                labels.add(name)
+        labels -= additive
+        return bool(labels), tuple(sorted(additive)), tuple(sorted(labels)), row_local, totals
+
+    def _mergeable_shape(self, root: exp.Expression) -> bool:
+        if not isinstance(root, exp.Select):
+            return False
+        group = root.args.get("group")
+        if group is None or group.args.get("all") or root.args.get("joins"):
+            return False
+        if any(isinstance(g, _GROUPING_SETS) for g in group.expressions):
+            return False
+        aliases = {
+            p.alias.lower(): p.this for p in root.expressions if isinstance(p, exp.Alias)
+        }
+        for key in group.expressions:
+            target = _group_key_target(key, root)
+            if isinstance(target, exp.Column) and not target.table:
+                target = aliases.get(target.name.lower(), target)
+            if not _is_band_name(_strip_alias(target)):
+                return False
+        sources = list(_selected_sources(self.root_scope).values())
+        return len(sources) == 1 and self._one_row_per_customer(sources[0])
+
+    def _group_keys(self, select: exp.Select) -> list[exp.Expression] | None:
+        group = select.args.get("group")
+        if group is None:
+            return None
+        if group.args.get("all"):
+            return [p for p in select.expressions if not _contains_aggregate(p)]
+        return [_group_key_target(k, select) for k in group.expressions]
+
+    def _groups_by_customer(self, scope: Scope) -> bool:
+        select = scope.expression
+        if not isinstance(select, exp.Select):
+            return False
+        keys = self._group_keys(select)
+        if keys is not None:
+            return any(_USERKEY in self.taint(k) for k in keys)
+        if select.args.get("distinct") is not None:
+            return any(_USERKEY in self.taint(p) for p in select.expressions)
+        return False
+
+    def _window_by_customer(self, node: exp.Expression) -> bool:
+        if not isinstance(node, exp.Window):
+            return False
+        return any(_USERKEY in self._raw_taint(p) for p in node.args.get("partition_by") or ())
+
+    def _one_row_per_customer(self, source: object, depth: int = 0) -> bool:
+        """A query level whose rows are distinct customers: GROUP BY only customer keys, or
+        plain rows (no join, no aggregate, no DISTINCT) of one such level. Bounded depth."""
+        if not isinstance(source, Scope) or depth > MAX_DEPTH:
+            return False
+        select = source.expression
+        if not isinstance(select, exp.Select):
+            return False
+        keys = self._group_keys(select)
+        if keys is not None:
+            return bool(keys) and all(_BAREUSER in self.taint(k) for k in keys)
+        if select.args.get("joins") or select.args.get("distinct") is not None:
+            return False
+        if any(_contains_aggregate(p) for p in select.expressions):
+            return False
+        sources = list(_selected_sources(source).values())
+        return len(sources) == 1 and self._one_row_per_customer(sources[0], depth + 1)
+
+    def _is_customer_count(self, proj: exp.Expression, scope: Scope) -> bool:
+        if not isinstance(proj, exp.Alias) or not proj.alias:
+            return False
+        node = proj.this
+        while isinstance(node, exp.Paren):
+            node = node.this
+        if not isinstance(node, exp.Count):
+            return False  # also a window COUNT(...) OVER (...): its node is the Window
+        arg = node.this
+        if isinstance(arg, exp.Distinct):
+            exprs = arg.expressions
+            return (
+                len(exprs) == 1
+                and isinstance(exprs[0], exp.Column)
+                and _BAREUSER in self.col_taint.get(id(exprs[0]), _EMPTY)
+            )
+        select = scope.expression
+        if not isinstance(select, exp.Select) or select.args.get("joins"):
+            return False
+        sources = list(_selected_sources(scope).values())
+        return len(sources) == 1 and self._one_row_per_customer(sources[0])
+
     def _check_grain(self, scopes: list[Scope]) -> None:
         root_info = self._analyze(self.root_scope)
         if self.references_qi and (
@@ -1078,6 +1399,7 @@ class _Analyzer:
 # --------------------------------------------------------------------------- helpers
 
 
+_GROUPING_SETS: Final = _classes("Rollup", "Cube", "GroupingSets")
 _TRUNCS: Final = _classes("DateTrunc", "TimestampTrunc", "DatetimeTrunc")
 _TS_WRAPPERS: Final = (exp.Paren, *_classes("Date", "TsOrDsToDate"))
 
@@ -1187,6 +1509,67 @@ def _contains_aggregate(node: exp.Expression) -> bool:
             return True
         stack.extend(current.iter_expressions())
     return False
+
+
+def _strip_alias(node: exp.Expression) -> exp.Expression:
+    if isinstance(node, exp.Alias):
+        node = node.this
+    while isinstance(node, exp.Paren):
+        node = node.this
+    return node
+
+
+def _is_band_name(node: exp.Expression) -> bool:
+    """D-172: a fixed band name, a ``CASE`` / ``IF`` whose every result is a constant."""
+    node = _strip_alias(node)
+    if isinstance(node, exp.Case):
+        results = [i.args.get("true") for i in node.args.get("ifs") or ()]
+        results.append(node.args.get("default"))
+        return bool(node.args.get("ifs")) and all(
+            r is None or _is_constant(r) for r in results
+        )
+    if isinstance(node, exp.If):
+        results = [node.args.get("true"), node.args.get("false")]
+        return all(r is None or _is_constant(r) for r in results)
+    return False
+
+
+def _has_gating_subquery(select: exp.Expression) -> bool:
+    """D-172: a subquery in ``WHERE`` / ``HAVING`` / ``ORDER BY`` other than the population
+    filter ``<column> IN (SELECT ...)``."""
+    for clause in ("where", "having", "order"):
+        node = select.args.get(clause)
+        if node is None:
+            continue
+        for query in (n for n in node.walk() if isinstance(n, _QUERY_NODES)):
+            ancestor, allowed = query.parent, False
+            while ancestor is not None and ancestor is not node:
+                if isinstance(ancestor, exp.In) and isinstance(ancestor.this, exp.Column):
+                    allowed = ancestor.args.get("query") is not None
+                    break
+                ancestor = ancestor.parent
+            if not allowed:
+                return True
+    return False
+
+
+def _is_grand_total(window: exp.Window) -> bool:
+    """D-172: ``SUM(<additive aggregate>) OVER ()``, the grand total of a column that adds up
+    over bands (a share's denominator). Merging keeps it; a total of anything else
+    (``SUM(MIN(x)) OVER ()``, ``SUM(IF(COUNT(*) = 1, ...)) OVER ()``) could single out a small
+    band."""
+    func = window.this
+    if not isinstance(func, exp.Sum) or isinstance(func.this, exp.Distinct):
+        return False
+    if any(window.args.get(a) for a in ("partition_by", "order", "spec")):
+        return False
+    inner = _strip_alias(func.this)
+    return (
+        isinstance(inner, exp.Sum | exp.Count | exp.CountIf)
+        and not isinstance(inner.this, exp.Distinct)
+        and not inner.args.get("distinct")
+        and not any(isinstance(n, exp.Window) for n in inner.walk())
+    )
 
 
 def _is_constant(node: exp.Expression) -> bool:

@@ -43,6 +43,7 @@ from opsfleet_agent.delete.token import (
     verify_proof,
 )
 from opsfleet_agent.obs.tracer import register_secret
+from opsfleet_agent.reports import fts
 from opsfleet_agent.reports.matcher import (
     MatchError,
     delete_candidates,
@@ -51,6 +52,7 @@ from opsfleet_agent.reports.matcher import (
     session_candidates,
 )
 from opsfleet_agent.store import audit as A
+from opsfleet_agent.store.vector_schema import VECTOR_KEY, VECTOR_TABLE
 
 logger = logging.getLogger(__name__)
 
@@ -127,11 +129,13 @@ _NL_RE: Final = re.compile(
     + _OBJECT_END
     + r"|(?:the\s+)?(?:this|current)\s+session(?:'s|s)?\s+(?:saved\s+)?reports?"
     + _OBJECT_END
-    + r"|(?:reports?\s+)?[0-9a-f]{32}\b"
+    + r"|(?:reports?\s+)?(?:R-)?[0-9a-f]{32}\b"
     r"))",
     re.I | re.A,
 )
-_ID_RE: Final = re.compile(r"\b[0-9a-f]{32}\b", re.I | re.A)  # stored lowercase (mn-3)
+# stored lowercase (mn-3); D-166: the displayed "R-" prefix (reports.library.display_id) is
+# accepted and dropped, so "delete R-<id>" selects the same report as "delete <id>"
+_ID_RE: Final = re.compile(r"\b(?:R-)?([0-9a-f]{32})\b", re.I | re.A)
 # mn-1: a negated or exclusive selector ("not from this session", "all except ...") is
 # never inverted or narrowed by guesswork: it is refused as too broad
 _NEGATION_RE: Final = re.compile(
@@ -694,6 +698,13 @@ def check_tool_request(
     return req, None
 
 
+def _has_table(conn: Any, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM main.sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone()
+    return row is not None
+
+
 def setup_delete(conn: Any, audit: Any, store: Any, *, clock: Callable[[], float] = time.time,
                  key: DeleteKey | None = None) -> DeleteService | None:  # fmt: skip
     """Register the ``saved_report`` kind on the live schema and build the service. Any
@@ -701,10 +712,19 @@ def setup_delete(conn: Any, audit: Any, store: Any, *, clock: Callable[[], float
     if conn is None or audit is None or store is None:
         return None
     try:
+        # Iteration 37: when the FTS index exists, its rows are deleted (and the index
+        # optimized) in the same audited transaction; a report must never survive as tokens.
+        fts_deps = ((fts.FTS_TABLE, fts.FTS_KEY),) if fts.has_index(conn) else ()
+        # Iteration 38: the report's vector row is a plain declared dependent: deleted in the
+        # same audited transaction (audit record first) and counted exactly.
+        vec_deps = ((VECTOR_TABLE, VECTOR_KEY),) if _has_table(conn, VECTOR_TABLE) else ()
         A.register_deletable(
-            A.DeletableKind(KIND, "saved_report", "report_id", owner_column="owner_user_id"),
+            A.DeletableKind(
+                KIND, "saved_report", "report_id", owner_column="owner_user_id",
+                dependents=vec_deps, fts_dependents=fts_deps,
+            ),
             conn=conn,
-        )
+        )  # fmt: skip
         return DeleteService(audit, store, clock=clock, key=key)
     except Exception as exc:  # noqa: BLE001
         logger.error("delete feature disabled: %s", type(exc).__name__)

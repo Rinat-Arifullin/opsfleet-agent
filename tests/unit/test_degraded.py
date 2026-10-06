@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from opsfleet_agent import commands
+from opsfleet_agent.commands.report_actions import owner_folder_name
 from opsfleet_agent.graph import graph as gr
 from opsfleet_agent.graph.degraded import (
     AI_UNAVAILABLE_TEXT,
@@ -28,6 +29,7 @@ from opsfleet_agent.graph.degraded import (
 from opsfleet_agent.graph.llm import TransientLLMError
 from opsfleet_agent.graph.resume import ResumeKind, close_interrupted_turn, resume_turn
 from opsfleet_agent.session import Session
+from opsfleet_agent.store.audit import AuditLog
 from opsfleet_agent.store.quota import QuotaLimits, QuotaStore
 from tests.unit.test_graph import PROFILE
 from tests.unit.test_library import ACME, _add
@@ -161,7 +163,9 @@ def test_draft_status_prefix_kept_when_llm_down_m3(make_env, conn) -> None:
         assert other.text.startswith(gr.NOT_SAVED_TEXT)
 
 
-def test_degraded_mode_lists_and_searches_reports_when_llm_down(make_env, store, conn) -> None:
+def test_degraded_mode_lists_and_searches_reports_when_llm_down(
+    make_env, store, conn, tmp_path
+) -> None:
     rid = _add(store, "k1", title="Synthetic orders overview", extra="needle-token")
     env = make_env(label="simple")
     quota = QuotaStore(conn)
@@ -175,9 +179,11 @@ def test_degraded_mode_lists_and_searches_reports_when_llm_down(make_env, store,
     # the same store the failing graph is wired to
     ctx = commands.CommandContext(
         user_id=PROFILE.user_id,
-        session_id=env.session.session_id,
+        session_id="0123456789abcdef0123456789abcdef",  # audit needs a real 32-hex session id
         report_store=env.graph.services.reports,
         scope=ACME,
+        audit_log=AuditLog(conn),
+        export_dir=tmp_path / "exports",
     )
     listed = commands.dispatch("/reports", ctx).text
     found = commands.dispatch("/search needle-token", ctx).text
@@ -187,8 +193,12 @@ def test_degraded_mode_lists_and_searches_reports_when_llm_down(make_env, store,
     assert "Synthetic orders overview" in found
     assert "Synthetic" in opened and "unavailable" not in opened.lower()
     assert down.calls == calls_before  # the library commands never touched an LLM
-    # export is not implemented yet (iteration 33): the stub says so (AC-21.14 export, OD-4)
-    assert "not available" in commands.dispatch("/export x", ctx).text.lower()
+    # iteration 33: export works with the LLM down too (AC-21.14 export clause)
+    exported = commands.dispatch(f"/export {rid}", ctx).text
+    assert exported.startswith("Exported") and (
+        tmp_path / "exports" / owner_folder_name(PROFILE.user_id) / f"R-{rid}.md"
+    ).is_file()
+    assert down.calls == calls_before
 
 
 def test_quota_blocks_after_limit(make_env, conn, store) -> None:
@@ -427,8 +437,10 @@ def test_quota_keeps_real_answer_when_writer_blocked_mn3(make_env, conn) -> None
     res = graph.run_turn(DRAFT_ASK, session=env.session)
 
     assert health.quota_reason == "llm_hour" and not _pending(env)
-    assert res.outcome == "answered" and res.text != QUOTA_TEXT["llm_hour"]
+    # iteration 33 (D-191): a blocked writer is report_failed, not answered; the answer stays
+    assert res.outcome == "report_failed" and res.text != QUOTA_TEXT["llm_hour"]
     assert "3 complete orders" in res.text  # the analysis answer is shown, not thrown away
+    assert gr.RETRY_HINT_TEXT in res.text  # retry report re-runs only the writer (iteration 33)
     assert QUOTA_TEXT["llm_hour"] in res.notice and res.notice.endswith(QUOTA_NOTICE)
 
 

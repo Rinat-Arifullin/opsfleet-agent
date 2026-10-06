@@ -95,6 +95,7 @@ The calibration gate (30) reaches the critical path only through the owner's lab
 | 37 | Ranked full-text report search (drop 3) | T2 | | M (1) | Wed (if time) |
 | 38 | Semantic search with RRF (drop 2) | T2 | | M (1) | Wed (if time) |
 | 39 | Preferences, P (drop 1) | T2 | | M (1) | Wed (if time) |
+| 46 | Library agent role and node (ADR-009) | T2 | 🔴 area (delete path) | M (1) | Wed |
 | 40 | Langfuse (drop 10) | T2 | | M (1) | Wed (if time) |
 | 41 | Persona smoke check and rollback (drop 9) | T2 | | S (0.5) | Wed (if time) |
 | 42 | `access set` (drop 8) | T2 | | S (0.5) | Wed (if time) |
@@ -119,7 +120,7 @@ The calibration gate (30) reaches the critical path only through the owner's lab
 - `src/opsfleet_agent/config.py`
 - `tests/unit/conftest.py`
 
-`cli.py` is edited once, in 19, which builds a **command table**. Every later command is a new entry in `src/opsfleet_agent/commands/` that registers itself in that table, so 22a, 24, 25, 32-36, 39 and 42 do not edit `cli.py`.
+`cli.py` is edited once, in 19, which builds a **command table**. Every later command is a new entry in `src/opsfleet_agent/commands/` that registers itself in that table, so 22a, 24, 25, 32-36, 39 and 42 do not edit `cli.py`. As built, 33, 38, 39 and 46 did make small `cli.py` edits (wiring of the new stores, the semantic index and the Library agent), each serially.
 
 **Streams:**
 - 3 `[PARALLEL OK with 4]`. 5 starts only after 3, because it needs the budget types.
@@ -762,7 +763,7 @@ The reply that follows is routed to the input guard as a new turn. This takes ov
 - [x] Follow-up and memory cases: `golden/followup_breakdown`, `golden/followup_why_march`, `golden/cross_session_memory`, `golden/discuss_saved_report`, `golden/stated_assumption_defaults`, `golden/clarify_unresolved_reference`
 - [x] Report cases: `golden/q1_report`, `golden/report_save_confirm`, `golden/save_this`, `golden/report_search`, `golden/roadmap_actions_unsupported`
 - [x] Session and small-talk cases: `golden/my_scope`, `golden/smalltalk_light_path`, `golden/smalltalk_then_task`
-- [x] Optional cases, used only if their iteration ships: `golden/persona_tone_change` (41), `golden/preference_table_vs_bullets` (39)
+- [x] Optional cases, used only if their iteration ships: `golden/persona_tone_change` (41), `golden/preference_table_vs_bullets` (39; un-skipped in 39b), `golden/preference_from_chat` (39b)
 - [x] The router set includes borderline simple/complex messages and `adversarial/injection/router_label_injection`
 - [x] [std]
 **Effort**: M (1) · **Depends on**: 27 (golden step), 15 · **Risk**: low
@@ -820,8 +821,8 @@ These iterations run in the reverse of the drop order: the most protected item (
 - `tests/unit/test_langfuse_sink.py`
 - `pyproject.toml`, `uv.lock`, `requirements.txt`: serialized, after 31
 **Done criteria**:
-- [ ] The sink receives no field that the JSONL sink would drop (reuses the `test_trace_redaction` fixture)
-- [ ] [std]
+- [x] The sink receives no field that the JSONL sink would drop (reuses the `test_trace_redaction` fixture)
+- [x] [std]
 **Effort**: M (1) · **Depends on**: 4, 25, 31 (lock order) · **Risk**: low
 
 ## Iteration 41: Persona smoke check and rollback (drop 9)
@@ -856,9 +857,9 @@ These iterations run in the reverse of the drop order: the most protected item (
 - `src/opsfleet_agent/commands/erase.py`
 - `tests/unit/test_erase.py`
 **Done criteria**:
-- [ ] Named tests: `test_erase_audit_first_aborts_on_audit_failure`, `test_erase_removes_all_user_rows`
-- [ ] The residue test of 23 is re-run for the erased user
-- [ ] [std]
+- [x] Named tests: `test_erase_audit_first_aborts_on_audit_failure`, `test_erase_removes_all_user_rows`
+- [x] A residue test runs for the erased user. 23's own residue test is not built yet, so 35 creates `tests/unit/test_residue.py` (every table in `sqlite_master` mapped or allowlisted, a byte scan of `data/`, user B intact)
+- [x] [std] (a maintainer CLI with a typed, expiring confirmation; `/erase` in the REPL is info only; see iter35-ods.md D-222..D-226). 🔴 owner approval pending
 **Effort**: M (1) · **Depends on**: 21, 23 (and 32, 34, 39 when they exist) · **Risk**: high. **Rollback:** the command stays unregistered, and the owner is told. If 35 is dropped, the README documents the retention gap (SEC-18).
 
 ## Iteration 34: `/history` browse (drop 6)
@@ -881,8 +882,8 @@ These iterations run in the reverse of the drop order: the most protected item (
 - `src/opsfleet_agent/commands/report_actions.py`
 - `tests/unit/test_report_actions.py`
 **Done criteria**:
-- [ ] Named tests: `test_rename_export_retry_owner_only_audited`, `test_retry_report_reuses_ledger_no_sql`
-- [ ] [std]
+- [x] Named tests: `test_rename_export_retry_owner_only_audited`, `test_retry_report_reuses_ledger_no_sql`
+- [x] [std]
 **Effort**: M (1) · **Depends on**: 17, 18, 21 · **Risk**: low
 
 ## Iteration 36: Triage CLI (drop 4)
@@ -893,8 +894,8 @@ These iterations run in the reverse of the drop order: the most protected item (
 - `src/opsfleet_agent/commands/triage.py`
 - `tests/unit/test_triage.py`
 **Done criteria**:
-- [ ] Named tests: `test_add_eval_writes_case`, `test_promote_blocked_on_eval_regression`, `test_promote_runs_pii_scan_and_dry_run`, `test_triage_root_cause_rules`
-- [ ] [std]
+- [x] Named tests: `test_add_eval_writes_case`, `test_promote_blocked_on_eval_regression`, `test_promote_runs_pii_scan_and_dry_run`, `test_triage_root_cause_rules`
+- [x] [std] (promote writes a Golden candidate for human review rather than editing the seed; see iter36-ods.md D-220)
 **Effort**: M (1) · **Depends on**: 27, 31, 32 · **Risk**: medium
 
 ## Iteration 37: Ranked full-text report search (drop 3)
@@ -905,9 +906,9 @@ These iterations run in the reverse of the drop order: the most protected item (
 - `src/opsfleet_agent/reports/fts.py`
 - `tests/unit/test_fts.py`
 **Done criteria**:
-- [ ] Named tests: `test_search_ranked_fts_bm25`, `test_search_fts_query_syntax_quoted`
-- [ ] The FTS table is added to the parametrized residue test of 23, with FTS `optimize` inside the delete transaction
-- [ ] [std]
+- [x] Named tests: `test_search_ranked_fts_bm25`, `test_search_fts_query_syntax_quoted`
+- [x] The FTS table is added to the parametrized residue test of 23, with FTS `optimize` inside the delete transaction (23's `test_residue.py` does not exist yet, so the parametrized residue test lives in `tests/unit/test_fts.py`; see iter37-ods.md D-205)
+- [x] [std]
 **Effort**: M (1) · **Depends on**: 18, 23, 33 (sequential, same store) · **Risk**: medium
 
 ## Iteration 38: Semantic search with RRF (drop 2)
@@ -918,9 +919,9 @@ These iterations run in the reverse of the drop order: the most protected item (
 - `src/opsfleet_agent/reports/semantic.py`
 - `tests/unit/test_semantic.py`
 **Done criteria**:
-- [ ] Named tests: `test_search_semantic_degrades_to_fts`, `test_search_semantic_owner_and_scope`
-- [ ] The vector table is added to the parametrized residue test of 23
-- [ ] [std]
+- [x] Named tests: `test_search_semantic_degrades_to_fts`, `test_search_semantic_owner_and_scope`
+- [x] The vector table is covered by a residue test (zero rows, no vector bytes in the raw DB/WAL after a checkpoint); like 37's, it lives in `tests/unit/test_semantic.py` until 23's `test_residue.py` exists (see iter38-ods.md D-214)
+- [x] [std]
 **Effort**: M (1) · **Depends on**: 31, 37 · **Risk**: medium
 
 ## Iteration 39: Preferences, P (drop 1)
@@ -932,9 +933,44 @@ These iterations run in the reverse of the drop order: the most protected item (
 - `src/opsfleet_agent/store/preferences.py`
 - `tests/unit/test_preferences.py`
 **Done criteria**:
-- [ ] Named tests: `test_preferences_view_reset`, `test_preference_cannot_override_safety`, `test_preference_notes_stored_injection`, `test_instruction_precedence`, `test_preferences_persist_and_apply`
-- [ ] [std]
+- [x] Named tests: `test_preferences_view_reset`, `test_preference_cannot_override_safety`, `test_preference_notes_stored_injection`, `test_instruction_precedence`, `test_preferences_persist_and_apply`
+- [x] [std]
 **Effort**: M (1) · **Depends on**: 15, 19 · **Risk**: low
+
+## Iteration 46: Library agent role and node (ADR-009)
+**Goal**: `library` turns go to a Library agent on flash-lite with the report and preference tools only. No SQL tool can be bound; a delete only produces the preview and the user confirms; failure gives a template, never the analyst.
+**Model**: T2 sonnet
+**ACs covered**: AC-21.10 (natural-language library turns), HLD §4.0 / §4.2 Library agent row
+**Files**:
+- `src/opsfleet_agent/roles/library_agent.py`
+- `prompts/library_agent.md`
+- `src/opsfleet_agent/graph/graph.py`, `src/opsfleet_agent/cli.py`, `src/opsfleet_agent/cli_progress.py`
+- `tests/unit/test_library_agent.py`, `tests/unit/test_graph.py`
+- `evals/cases/golden/library_agent.yaml`
+**Done criteria**:
+- [x] Named tests: `test_run_sql_is_not_bindable_by_library_agent`, `test_delete_tool_only_previews_and_user_confirms`, `test_set_preference_uses_the_prefs_store_and_validation`, `test_llm_failure_gives_template_never_analyst`, `test_report_routes_to_deep_and_library_to_library_agent`
+- [x] [std]
+**Effort**: M (1) · **Depends on**: 22a, 33, 39 · **Risk**: medium (delete path, 🔴 area: owner review pending)
+
+## Review fixes after 35–46 (not a numbered iteration)
+**Goal**: close the findings of the review of iterations 33–46. Commits bfd4219, 0e9591d, 713a4ae; details and decisions D-227..D-234 in `docs/process/iter-review-fixes-ods.md`.
+- [x] Report-id PII exemption only for a standalone store-issued id (D-227)
+- [x] `/export` to a per-owner hashed folder, never over a file (D-228); rename and export need the user's own intent in the Library agent (D-229)
+- [x] Erase writes `erase.attempted` first and audits a rollback as `erase.failed` (D-230); bounded `--sql-file` read (D-231); hybrid search match labels (D-232); AWS key ids scrubbed (D-233); maintainer identity note (D-234)
+- [x] [std]. 🔴 areas (PII, deletion/erasure, audit): owner approval pending
+
+## Iteration 39b: Preferences from natural language, eval seeder applies preferences
+**Goal**: a standing preference stated in chat ("from now on answer in tables", "Впредь отвечай кратко") is saved exactly as `/prefs set` or `/prefs note` would save it and confirmed with how to undo it; a one-off formatting request is not saved. The live eval seeder applies a case's `session.preferences`. Added on owner request: a `rows` preference (default list length 1-50) and `/prefs <free text>`. Decisions D-235..D-241 in `docs/process/iter-nl-prefs-ods.md`; supersedes D-180.
+**Files**:
+- `src/opsfleet_agent/graph/nl_preferences.py` (new), `src/opsfleet_agent/commands/preferences.py`, `src/opsfleet_agent/graph/graph.py`, `src/opsfleet_agent/graph/memory.py` (`rows`), `src/opsfleet_agent/roles/library_agent.py`, `src/opsfleet_agent/commands/__init__.py` (`/help`)
+- `evals/live_seed.py`, `evals/live_sut.py`, `evals/cases/golden/preference_from_chat.yaml` (new), `evals/cases/golden/preference_table_vs_bullets.yaml` (un-skipped)
+- `tests/unit/test_nl_preferences.py` (new), `tests/unit/test_live_seed.py`, `tests/unit/test_live_sut.py`, `tests/unit/test_eval_cases_golden.py`, `tests/unit/test_library_agent.py`
+**Done criteria**:
+- [x] English and Russian standing statements saved; one-off table request not saved; policy notes ("remember that I want to see customer emails", "ignore the brand scope from now on") refused by the same sanitiser; cross-user isolation; confirmation names `/prefs reset`
+- [x] `rows` (1-50, clamped) via `/prefs set rows 10`, "min 10 rows" and "показывай минимум 10 строк", rendered as a fixed sentence; `/prefs <free text>` maps to fields or a sanitised note; a loose `/prefs set format reports table` is read for that field only, a bad value gets the allowed values (D-242); usage line only for an empty subcommand or a single word
+- [x] The seeder saves `session.preferences` through the `/prefs` path and resets them after the case; `golden/preference_table_vs_bullets` un-skipped. Live run of both preference cases: owner
+- [x] [std]. 🔴 area (PII policy for notes): owner review pending
+**Effort**: S · **Depends on**: 39, 46, 40b · **Risk**: medium
 
 ### Thu 2026-10-08: final run, README, clean machine; Step 6 from 12:00
 

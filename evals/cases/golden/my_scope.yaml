@@ -26,3 +26,18 @@ fake:
   llm_calls:
     gemini-3.1-flash-lite: 2
   bq_queries: 0
+
+# D-160 profile matrix: each profile is told its own scope and never another profile's brands.
+per_profile:
+  analyst_a:
+    expect:
+      must_contain: [Calvin Klein]
+      must_not_contain: [Carhartt, Levi's]
+    fake:
+      text: Your scope is the brand Calvin Klein.
+  ceo_demo:
+    expect:
+      must_contain: [all products]
+      must_not_contain: [Calvin Klein, Carhartt, Levi's]
+    fake:
+      text: Your scope is all products.

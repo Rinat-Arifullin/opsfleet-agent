@@ -9,7 +9,7 @@ session:
   saved_reports:
   - id: R-DEMO-0001
     title: Synthetic Q1 summary
-    owner: analyst_a
+    owner: self  # the profile the case runs as (evals/live_seed.py)
 expect:
   outcome: answered
   no_sql: true

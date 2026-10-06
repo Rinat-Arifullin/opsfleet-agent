@@ -7,10 +7,15 @@ through ``terminal_safe`` before stdout.
 Report commands (all owner-only and scope-checked in ``reports.library``): ``/reports [words]``
 lists the user's own saved reports (titles only; the optional words use the delete matcher),
 ``/open <id | row n | title words>`` shows one, ``/search <words> [tag:x] [from:D] [to:D]``
-substring-searches them
-(iteration 18). ``/export`` belongs to 22a and stays a stub (OD-5 in iter19-ods.md).
+searches them
+(iteration 18; ranked FTS5 bm25 since iteration 37, substring fallback).
+``/rename``, ``/export`` and ``/retry`` (iteration 33, ``commands.report_actions``)
+rename a report, write it as a Markdown file under ``<data dir>/exports/<owner>/`` and re-run the
+report phase of this session's last failed report (no SQL).
 ``/delete`` (iteration 22a, ``commands.delete``) is registered at startup only when the delete
 service is ready; otherwise it stays unregistered (feature-off rollback path).
+``/erase`` (iteration 35, D-222) only explains the erasure process: erasure itself is the
+maintainer CLI ``commands.erase``, so no chat session can erase a user.
 """
 
 from __future__ import annotations
@@ -25,7 +30,6 @@ log = logging.getLogger(__name__)
 
 MAX_LINE_CHARS: Final = 4000  # bound on the argument text handed to a handler
 UNKNOWN_TEXT: Final = "Unknown command; type /help."
-NOT_AVAILABLE_TEXT: Final = "{name} is not available yet in this version."
 STORE_UNAVAILABLE_TEXT: Final = "This command is unavailable right now (local store not open)."
 EXAMPLE_QUESTIONS: Final = (
     "How many orders were completed last month?",
@@ -55,6 +59,14 @@ class CommandContext:
     # Iteration 22a: starts a two-phase delete on the graph and returns the reply text (the
     # preview, never a deletion). None while the delete feature is off (fail closed).
     delete_start: Callable[[str], str] | None = None
+    # Iteration 40: obs.langfuse_sink.LangfuseSink when Langfuse is configured, else None.
+    langfuse: Any = None
+    # Iteration 39: store.preferences.SQLitePreferenceStore; None = /prefs unavailable.
+    preference_store: Any = None
+    # Iteration 33: where /export writes (None = <data dir>/exports) and the PII detector the
+    # title guard uses (None = the process default).
+    export_dir: Path | None = None
+    detector: Any = None
 
 
 REPORTS_LIST_LIMIT: Final = 20
@@ -66,6 +78,8 @@ NO_MATCH_TEXT: Final = "No saved reports match."
 class CommandResult:
     text: str
     exit: bool = False
+    # Iteration 33: a fixed message the CLI runs as a chat turn (``/retry`` -> "retry report").
+    turn: str | None = None
 
 
 @dataclass(frozen=True)
@@ -74,14 +88,12 @@ class Command:
     usage: str
     help: str
     handler: Callable[[str, CommandContext], CommandResult]
-    stub: bool = field(default=False)
 
 
 def _help(_args: str, _ctx: CommandContext) -> CommandResult:
     lines = ["Commands:"]
     for cmd in COMMANDS.values():
-        suffix = " (not available yet)" if cmd.stub else ""
-        lines.append(f"  {cmd.usage:<34} {cmd.help}{suffix}")
+        lines.append(f"  {cmd.usage:<34} {cmd.help}")
     lines.append("Example questions:")
     lines += [f"  {q}" for q in EXAMPLE_QUESTIONS]
     lines.append("Ctrl-C cancels a running answer; Ctrl-C twice at the prompt quits.")
@@ -112,6 +124,25 @@ def _feedback(args: str, ctx: CommandContext) -> CommandResult:
     return CommandResult(text)
 
 
+def _prefs(args: str, ctx: CommandContext) -> CommandResult:
+    if ctx.preference_store is None:
+        return CommandResult(STORE_UNAVAILABLE_TEXT)
+    from opsfleet_agent.commands.preferences import handle_prefs
+
+    try:
+        text = handle_prefs(
+            args,
+            store=ctx.preference_store,
+            user_id=ctx.user_id,
+            scope=ctx.scope,
+            tracer=ctx.tracer,
+        )
+    except Exception as exc:  # a store failure never crashes the REPL
+        log.error("prefs failed: %s", type(exc).__name__)
+        return CommandResult("Could not read or save preferences right now.")
+    return CommandResult(text)
+
+
 def _trace(args: str, ctx: CommandContext) -> CommandResult:
     if ctx.trace_dir is None:
         return CommandResult(STORE_UNAVAILABLE_TEXT)
@@ -121,10 +152,25 @@ def _trace(args: str, ctx: CommandContext) -> CommandResult:
     if not turn:
         return CommandResult("Usage: /trace [turn_id] (no answered turn yet).")
     try:
-        return CommandResult(render_trace(ctx.trace_dir, turn, ctx.session_id))
+        text = render_trace(ctx.trace_dir, turn, ctx.session_id)
     except Exception as exc:
         log.error("trace failed: %s", type(exc).__name__)
         return CommandResult("Could not read the trace right now.")
+    return CommandResult(text + _langfuse_line(ctx, turn))
+
+
+def _langfuse_line(ctx: CommandContext, turn: str) -> str:
+    """Iteration 40: the Langfuse trace id (and UI link) of the turn, when tracing is on."""
+    if ctx.langfuse is None:
+        return ""
+    try:
+        trace_id = ctx.langfuse.trace_id_for(turn)
+        if not trace_id:
+            return ""
+        url = ctx.langfuse.trace_url(trace_id)
+    except Exception:  # noqa: BLE001 - optional line, never breaks /trace
+        return ""
+    return f"\nLangfuse trace: {trace_id}" + (f" ({url})" if url else "")
 
 
 def _audit(args: str, ctx: CommandContext) -> CommandResult:
@@ -193,31 +239,89 @@ _SEARCH_USAGE: Final = "Usage: /search <words> [tag:<tag>] [from:YYYY-MM-DD] [to
 
 
 def _search(args: str, ctx: CommandContext) -> CommandResult:
-    """Substring search over the user's own in-scope reports. The only state kept is the id
-    listing for "/open <n>"; it is never a delete target (AC-21.11)."""
+    """Hybrid search over the user's own in-scope reports: FTS bm25 ranks fused with semantic
+    (embedding) ranks by RRF (iteration 38, AC-21.13/14). Degrades to the ranked full-text
+    search, then to the word match, when the embedding or the index is unavailable; the path
+    that ran is recorded in the trace (never the query text). The only state
+    kept is the id listing for "/open <n>"; it is never a delete target (AC-21.11)."""
     if ctx.report_store is None:
         return CommandResult(STORE_UNAVAILABLE_TEXT)
     from opsfleet_agent.reports import library
 
     try:
         res = library.search_reports(
-            ctx.report_store, ctx.user_id, ctx.scope, **library.parse_search_args(args)
-        )
+            ctx.report_store, ctx.user_id, ctx.scope, mode="semantic",
+            **library.parse_search_args(args),
+        )  # fmt: skip
     except library.LibraryError as exc:
         return CommandResult(f"{_SEARCH_USAGE}\n{exc}.")
     except Exception as exc:
         log.error("report search failed: %s", type(exc).__name__)
         return CommandResult("Could not search your reports right now.")
+    _trace_search(ctx, res)
     ctx.listing[:] = [e.report_id for e in res.entries]
-    header = f"Matching reports (newest first, {library.count_text(res)} in total):"
+    order = "best match first" if res.path in library.RANKED_PATHS else "newest first"
+    header = f"Matching reports ({order}, {library.count_text(res)} in total):"
     return CommandResult(library.render_list(res, header=header, empty=NO_MATCH_TEXT))
 
 
-def _stub(name: str) -> Callable[[str, CommandContext], CommandResult]:
-    def handler(_args: str, _ctx: CommandContext) -> CommandResult:
-        return CommandResult(NOT_AVAILABLE_TEXT.format(name=name))
+def _trace_search(ctx: CommandContext, res: Any) -> None:
+    """Which search path ran (ranked, substring or the fallback); never the query text."""
+    if ctx.tracer is None:
+        return
+    try:
+        ctx.tracer.record(
+            "tool", "search_reports", tool="search_reports", outcome="ok",
+            search_path=res.path, rows=len(res.entries), truncated=res.truncated_scan,
+            semantic_unavailable=bool(getattr(res, "semantic_unavailable", False)),
+        )  # fmt: skip
+    except Exception as exc:  # noqa: BLE001 - tracing never breaks the command
+        log.error("search trace failed: %s", type(exc).__name__)
 
-    return handler
+
+def _rename(args: str, ctx: CommandContext) -> CommandResult:
+    if ctx.report_store is None:
+        return CommandResult(STORE_UNAVAILABLE_TEXT)
+    from opsfleet_agent.commands.report_actions import handle_rename
+
+    try:
+        return CommandResult(handle_rename(args, ctx, detector=ctx.detector))
+    except Exception as exc:  # a store failure never crashes the REPL
+        log.error("report rename failed: %s", type(exc).__name__)
+        return CommandResult("Could not rename that report right now.")
+
+
+def _export(args: str, ctx: CommandContext) -> CommandResult:
+    if ctx.report_store is None:
+        return CommandResult(STORE_UNAVAILABLE_TEXT)
+    from opsfleet_agent.commands.report_actions import handle_export
+
+    try:
+        return CommandResult(handle_export(args, ctx, export_dir=ctx.export_dir))
+    except Exception as exc:
+        log.error("report export failed: %s", type(exc).__name__)
+        return CommandResult("Could not export that report right now.")
+
+
+RETRY_TURN_TEXT: Final = "retry report"
+ERASE_INFO_TEXT: Final = (
+    "Erasing your data is done by the support team, not from the chat: ask a maintainer to "
+    "run the erase command for your user id. It removes your saved reports, preferences, "
+    "feedback, quotas, sessions, local traces and export files, and keeps only a "
+    "pseudonymous audit record. Nothing was deleted now."
+)
+
+
+def _retry(args: str, _ctx: CommandContext) -> CommandResult:
+    """AC-21.15: one retry of the report phase, run by the graph as a fixed turn (no SQL)."""
+    if args.strip():
+        return CommandResult("Usage: /retry (re-runs the last failed report of this session)")
+    return CommandResult("", turn=RETRY_TURN_TEXT)
+
+
+def _erase(_args: str, _ctx: CommandContext) -> CommandResult:
+    """D-222: information only. No chat path can erase a user (SEC-18)."""
+    return CommandResult(ERASE_INFO_TEXT)
 
 
 def _table() -> dict[str, Command]:
@@ -230,17 +334,38 @@ def _table() -> dict[str, Command]:
             "Rate the last answer.",
             _feedback,
         ),
-        Command("/trace", "/trace [turn_id]", "Show the trace of a turn.", _trace),
+        Command(  # D-151a: developer/support tool (AC-16.2); may show sanitized SQL
+            "/trace", "/trace [turn_id]", "Developer: show the debug trace of a turn.", _trace
+        ),
         Command("/audit", "/audit [--session|--user]", "Show your audit events.", _audit),
         Command("/persona", "/persona", "Show the active persona version.", _persona),
+        Command(
+            "/prefs",
+            "/prefs [set <key> <value>|note|reset|<your words>]",
+            "View or change answer preferences: format, depth, charts, rows (1-50), notes. "
+            "Or say it: '/prefs give me min 10 rows in tables', 'from now on answer in tables'.",
+            _prefs,
+        ),
         Command("/reports", "/reports [words]", "List your saved reports.", _reports),
         Command("/open", "/open <id|n|title>", "Open a saved report.", _open),
-        Command("/search", "/search <words> [tag:x]", "Search saved reports.", _search),
+        Command(
+            "/search",
+            "/search <words> [tag:x] [from:D] [to:D]",
+            "Search saved reports by words and meaning, best match first.",
+            _search,
+        ),
+        Command(
+            "/rename", '/rename <id|n|"title"> <new title>', "Rename a saved report.", _rename
+        ),  # fmt: skip
+        Command(
+            "/export",
+            "/export <id|n|title> [name.md]",
+            "Write a saved report as Markdown to your data/exports folder (never overwrites).",
+            _export,
+        ),  # fmt: skip
+        Command("/retry", "/retry", "Retry the last failed report (no new queries).", _retry),
+        Command("/erase", "/erase", "How to have all your data erased (support only).", _erase),
     ]
-    for name, usage, text in (
-        ("/export", "/export <report_id>", "Export a saved report."),
-    ):
-        cmds.append(Command(name, usage, text, _stub(name), stub=True))
     return {c.name: c for c in cmds}
 
 

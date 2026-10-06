@@ -341,10 +341,9 @@ def test_cli_commands(monkeypatch, capsys, factory):
     assert "Example questions:" in out
     assert AUDIT_UNAVAILABLE in out  # no audit log wired in this fake runtime
     assert "Active persona: builtin-0000abcd" in out
-    assert commands.NOT_AVAILABLE_TEXT.format(name="/export") in out  # still a stub (22a)
-    assert commands.NOT_AVAILABLE_TEXT.format(name="/open") not in out  # live since iteration 18
-    # no store in this fake runtime: /reports, /open, /search and /feedback
-    assert out.count(commands.STORE_UNAVAILABLE_TEXT) == 4
+    assert "not available yet" not in out  # no command is a stub (/export live since iter 33)
+    # no store in this fake runtime: /reports, /open, /search, /export and /feedback
+    assert out.count(commands.STORE_UNAVAILABLE_TEXT) == 5
     assert commands.UNKNOWN_TEXT in out and "secret-ish" not in out
     assert commands.STORE_UNAVAILABLE_TEXT in out  # /feedback with no store
     sid = re.search(r"Session: ([0-9a-f]{32})", out).group(1)

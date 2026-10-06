@@ -13,7 +13,7 @@ import os
 import re
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -89,7 +89,12 @@ SPAN_FIELDS: dict[str, tuple[str, ...]] = {
         "limiter_wait_ms",
         "tool_calls",
     ),
-    "tool": ("tool", "outcome", "error_code", "args_keys", "rows", "truncated"),
+    "tool": (
+        "tool", "outcome", "error_code", "args_keys", "rows", "truncated",
+        "search_path",  # iteration 37: ranked | substring | substring_fallback
+        # iteration 38: + hybrid | hybrid_substring; the embedding was unavailable (degraded)
+        "semantic_unavailable",
+    ),
     "guard": ("rule_hits", "verdict", "rule", "redaction_count", "grounding_flags"),
     "sql": (
         "purpose",
@@ -113,10 +118,12 @@ SPAN_FIELDS: dict[str, tuple[str, ...]] = {
 LLM_TEXT_FIELDS = ("prompt_redacted", "completion_redacted")
 
 _EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
-# Unregistered credential shapes: Google API keys, OAuth access tokens, bearer tokens,
+# Unregistered credential shapes: Google API keys, OAuth access tokens, AWS key ids, bearer tokens,
 # and key/token query or assignment parameters.
 _API_KEY_SHAPE = re.compile(r"AIza[0-9A-Za-z_-]{35}")
 _OAUTH_TOKEN = re.compile(r"ya29\.[0-9A-Za-z_.~+/=-]+")
+# D-233: AWS access key ids (long-term AKIA, temporary ASIA): 4-letter prefix + 16 [0-9A-Z].
+_AWS_KEY_ID = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
 _BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
 _KV_PARAM = re.compile(
     r"(?i)\b((?:[a-z0-9_-]*(?:key|token|secret|password|passwd|signature))=)[^&\s\"',;]+"
@@ -146,6 +153,7 @@ def scrub_text(text: str, max_len: int = MAX_STR) -> str:
             text = text.replace(form, SECRET)
     text = _API_KEY_SHAPE.sub(SECRET, text)
     text = _OAUTH_TOKEN.sub(SECRET, text)
+    text = _AWS_KEY_ID.sub(SECRET, text)
     text = _BEARER.sub(f"Bearer {SECRET}", text)
     text = _KV_PARAM.sub(lambda m: m.group(1) + SECRET, text)
     text = _EMAIL.sub("[email]", text)
@@ -282,6 +290,9 @@ class Tracer:
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.capture_llm_text = capture_llm_text
         self.max_str = max_str
+        # Optional second sink (iteration 40: Langfuse). It receives the already cleaned span
+        # (allowlisted, SQL sanitized, sensitive keys dropped) and must never break a record.
+        self.extra_sink: Callable[[dict[str, Any]], None] | None = None
 
     @property
     def path(self) -> Path:
@@ -327,6 +338,11 @@ class Tracer:
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as f:
             f.write(json.dumps(clean, ensure_ascii=False, default=str) + "\n")
+        if self.extra_sink is not None:
+            try:
+                self.extra_sink(clean)
+            except Exception:  # noqa: BLE001 - an optional sink never breaks the trace or turn
+                pass
         return clean
 
     @contextmanager

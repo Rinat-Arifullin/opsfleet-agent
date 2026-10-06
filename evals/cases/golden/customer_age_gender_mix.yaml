@@ -1,0 +1,52 @@
+# golden/customer_age_gender_mix (AC-01.2, US-01). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+input: What does our customer base look like by age group and gender?
+tags:
+- quick
+- us01
+- demographics
+- set2
+session:
+  profile: analyst_a
+expect:
+  outcome: answered
+  must_contain:
+  - age
+  - - gender
+    - female
+    - women
+    - male
+  - Calvin Klein
+  must_not_contain:
+  - '@'
+  - first_name
+  - last_name
+  - street_address
+  - email
+  judge:
+    min_score: 4
+fake:
+  outcome: answered
+  text: Customers who bought Calvin Klein items, by age group and gender, as customer counts over the
+    stated window. No individual customers are shown.
+  llm_calls:
+    gemini-3.1-flash-lite: 2
+  bq_queries: 1
+  judge_score: 5
+  sql:
+  - SELECT 1 /* recorded placeholder */
+
+# D-160 profile matrix: the scope named in the answer follows the profile.
+per_profile:
+  analyst_b:
+    fake:
+      text: Customers who bought Carhartt and Levi's items, by age group and gender, as customer counts
+        over the stated window. No individual customers are shown.
+    expect:
+      must_contain: [age, &id001 [gender, female, women, male], Carhartt, Levi's]
+  ceo_demo:
+    fake:
+      text: Customers who bought all products items, by age group and gender, as customer counts over
+        the stated window. No individual customers are shown.
+    expect:
+      must_contain: [age, *id001, all products]

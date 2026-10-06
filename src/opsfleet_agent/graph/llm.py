@@ -2,13 +2,16 @@
 
 Provider-agnostic: callers pass one callable per model (primary, fallback). Each callable makes
 exactly one provider request and receives the attempt timeout in seconds. The ladder is
-primary -> up to 3 retries (backoff 1 s, 2 s, 4 s plus jitter) -> fallback once -> ForceAnswer.
+primary -> up to 2 retries (backoff 1 s, 2 s plus jitter; D-6) -> fallback once -> ForceAnswer.
+Once a primary model has used up its retries on provider errors, later calls in the same turn
+go straight to their fallback: the wrapper lives for one turn, so this resets on the next one.
 Every attempt draws from the TurnBudget (turn cap, role sub-cap, 6 retries per turn, deadline).
 Clock, sleep and jitter are injectable so tests never sleep.
 """
 
 from __future__ import annotations
 
+import logging
 import random
 import time
 from collections.abc import Callable, Mapping
@@ -25,7 +28,7 @@ from opsfleet_agent.graph.budget import (
     TurnBudget,
 )
 
-BACKOFFS_S: tuple[float, ...] = (1.0, 2.0, 4.0)  # at most 3 retries per call
+BACKOFFS_S: tuple[float, ...] = (1.0, 2.0)  # at most 2 retries per call (D-6)
 MAX_CALL_RETRIES = len(BACKOFFS_S)
 MAX_ATTEMPT_TIMEOUT_S = 60.0
 MIN_USEFUL_TIMEOUT_S = 10.0
@@ -63,10 +66,15 @@ def classify_error(exc: BaseException) -> Exception:
     # httpx timeout/connect errors, matched by class name so httpx need not be imported.
     if any(c.__name__ in TRANSIENT_CLASS_NAMES for c in type(exc).__mro__):
         return TransientLLMError(type(exc).__name__)
-    # google-genai APIError (and subclasses) expose the HTTP status as `.code`.
-    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
-    if isinstance(code, int) and code in TRANSIENT_STATUS:
-        return TransientLLMError(f"http_{code}")
+    # langchain-core ModelError subclasses (e.g. GoogleRateLimitError for a 429) say so directly.
+    if getattr(exc, "is_retryable", False) is True:
+        return TransientLLMError(type(exc).__name__)
+    # google-genai APIError (and subclasses) expose the HTTP status as `.code`; langchain wraps
+    # it with `raise ... from e`, so the status may sit on the cause.
+    for err in (exc, exc.__cause__):
+        code = getattr(err, "code", None) or getattr(err, "status_code", None)
+        if isinstance(code, int) and code in TRANSIENT_STATUS:
+            return TransientLLMError(f"http_{code}")
     return NonRetryableLLMError(type(exc).__name__)
 
 
@@ -77,7 +85,8 @@ class LLMResponse:
     tokens_out: int = 0
 
 
-Attempt = Callable[[float], LLMResponse]  # arg: attempt timeout in seconds
+# arg: attempt timeout in seconds; None = no per-attempt timeout (D-149, local provider only)
+Attempt = Callable[[float | None], LLMResponse]
 
 
 @dataclass(frozen=True)
@@ -173,6 +182,7 @@ class LLMWrapper:
         self._clock = clock
         self._sleep = sleep
         self._jitter = jitter
+        self._degraded: set[str] = set()  # primaries that failed this turn: skipped from now on
 
     def _usable_s(self, role: str) -> float:
         reserve = 0.0 if role == FORCE_ANSWER_ROLE else FORCE_RESERVE_S
@@ -193,7 +203,10 @@ class LLMWrapper:
             return blocked
         attempts = 0
         last_block: BudgetExhausted | None = None
-        for n in range(MAX_CALL_RETRIES + 1):
+        has_fallback = fallback is not None and fallback_model is not None
+        skip_primary = has_fallback and primary_model in self._degraded
+        primary_failed = False
+        for n in range(0 if skip_primary else MAX_CALL_RETRIES + 1):
             if n > 0:
                 backoff = BACKOFFS_S[n - 1]
                 blocked = self.budget.check_retry(role)
@@ -213,6 +226,9 @@ class LLMWrapper:
             attempts += 1
             if isinstance(res, (LLMSuccess, LLMFailure)):
                 return _with_attempts(res, attempts)
+            primary_failed = True
+        if primary_failed and has_fallback:
+            self._degraded.add(primary_model)
         # Retries are used up (or not allowed): the fallback gets exactly one attempt.
         if fallback is not None and fallback_model is not None:
             blocked = self.budget.check_attempt(role)
@@ -252,7 +268,8 @@ class LLMWrapper:
         usable = self._usable_s(role)  # re-check: the limiter wait may have eaten the deadline
         if usable < MIN_ATTEMPT_TIMEOUT_S:
             return BudgetExhausted(ExhaustedReason.DEADLINE, role)
-        timeout = min(MAX_ATTEMPT_TIMEOUT_S, usable)
+        # D-149: an unbounded budget (local provider) passes no per-attempt timeout at all.
+        timeout = min(MAX_ATTEMPT_TIMEOUT_S, usable) if self.budget.time_bounded else None
         self.budget.consume_attempt(role, is_retry=is_retry)
         t0 = self._clock()
         try:
@@ -297,6 +314,26 @@ def _with_attempts(res: LLMSuccess | LLMFailure, attempts: int) -> LLMSuccess | 
     return res
 
 
+GENAI_MODELS_LOGGER = "google_genai.models"
+AFC_ADVICE_PREFIX = "Direct use of automatic function calling (AFC)"
+
+
+class _DropAfcAdvice(logging.Filter):
+    """Drops the SDK's one-off AFC advice, which breaks the CLI spinner line. It does not
+    apply here: langchain passes function declarations, not callables, so the SDK makes a
+    single request and our graph runs every tool. Other SDK warnings pass."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not record.getMessage().startswith(AFC_ADVICE_PREFIX)
+
+
+def silence_afc_advice() -> None:
+    """Attach :class:`_DropAfcAdvice` to the google-genai models logger. Idempotent."""
+    logger = logging.getLogger(GENAI_MODELS_LOGGER)
+    if not any(isinstance(f, _DropAfcAdvice) for f in logger.filters):
+        logger.addFilter(_DropAfcAdvice())
+
+
 def build_chat_model(
     model: str,
     api_key: str,
@@ -311,6 +348,7 @@ def build_chat_model(
     """
     from langchain_google_genai import ChatGoogleGenerativeAI
 
+    silence_afc_advice()
     kwargs: dict[str, Any] = {"model": model, "api_key": api_key, "max_retries": 1}
     if thinking_level is not None:
         kwargs["thinking_level"] = thinking_level

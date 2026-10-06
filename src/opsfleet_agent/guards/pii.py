@@ -117,6 +117,7 @@ unscrubbed text back (fail closed).
 
 from __future__ import annotations
 
+import copy
 import logging
 import re
 import threading
@@ -154,9 +155,14 @@ SPACY_LABEL_MAP: dict[str, str] = {
     "FAC": "LOCATION",
 }
 MAX_ALLOWLIST_TERMS = 50_000
+#: D-153: derived (scope-brand) detectors kept per base detector.
+MAX_DERIVED_DETECTORS = 32
 MAX_TERM_CHARS = 200
 
 __all__ = [
+    "CATALOGUE_CATEGORIES",
+    "CATALOGUE_DEPARTMENTS",
+    "REPORT_TERMS",
     "ADDRESS",
     "ENTITY_TYPES",
     "MIN_SCORE",
@@ -172,6 +178,7 @@ __all__ = [
     "build_allowlist",
     "default_detector",
     "ensure_model_available",
+    "extend_allowlist",
     "scrub_output",
     "set_default_detector",
 ]
@@ -277,6 +284,30 @@ SCHEMA_TERMS: tuple[str, ...] = (
 )  # fmt: skip
 
 
+#: D-171: section headings of an analytical answer. spaCy tags some of them as PERSON
+#: ("Takeaways:" in a live run), and the masked heading then leaks into later turns through
+#: the history. Part of every allowlist, like ``SCHEMA_TERMS``.
+REPORT_TERMS: tuple[str, ...] = (
+    "Takeaway", "Takeaways", "Key Takeaway", "Key Takeaways", "Summary", "Executive Summary",
+    "Insight", "Insights", "Key Insights", "Note", "Notes", "Highlight", "Highlights",
+    "Key Highlights", "Observation", "Observations", "Finding", "Findings", "Key Findings",
+    "Recommendation", "Recommendations", "Conclusion", "Conclusions", "Overview", "Trend",
+    "Trends", "Caveat", "Caveats", "Next Steps", "Breakdown", "Bottom Line",
+)  # fmt: skip
+
+
+#: D-167: the product categories and departments of thelook_ecommerce (a fixed public
+#: catalogue). spaCy tags some of them as PERSON ("Swim"), so every CLI allowlist has them.
+CATALOGUE_CATEGORIES: tuple[str, ...] = (
+    "Accessories", "Active", "Blazers & Jackets", "Clothing Sets", "Dresses",
+    "Fashion Hoodies & Sweatshirts", "Intimates", "Jeans", "Jumpsuits & Rompers", "Leggings",
+    "Maternity", "Outerwear & Coats", "Pants", "Pants & Capris", "Plus", "Shorts", "Skirts",
+    "Sleep & Lounge", "Socks", "Socks & Hosiery", "Suits", "Suits & Sport Coats", "Sweaters",
+    "Swim", "Tops & Tees", "Underwear",
+)  # fmt: skip
+CATALOGUE_DEPARTMENTS: tuple[str, ...] = ("Men", "Women")
+
+
 def build_allowlist(
     brands: Iterable[str] = (),
     categories: Iterable[str] = (),
@@ -284,14 +315,14 @@ def build_allowlist(
 ) -> BrandAllowlist:
     """Build the allowlist from catalogue values. Pure: no I/O, the inputs are injected.
 
-    ``SCHEMA_TERMS`` are always included. Values are folded like ``pii_regex`` folds and
-    compared case-insensitively. Empty or word-less values are skipped. More than
-    ``MAX_ALLOWLIST_TERMS`` distinct terms, or a term longer than ``MAX_TERM_CHARS``,
-    raises ``ValueError`` (a catalogue that large is a bug, not something to truncate
-    silently).
+    ``SCHEMA_TERMS`` and ``REPORT_TERMS`` are always included. Values are folded like
+    ``pii_regex`` folds and compared case-insensitively. Empty or word-less values are
+    skipped. More than ``MAX_ALLOWLIST_TERMS`` distinct terms, or a term longer than
+    ``MAX_TERM_CHARS``, raises ``ValueError`` (a catalogue that large is a bug, not
+    something to truncate silently).
     """
     seen: dict[tuple[str, ...], str] = {}
-    for source in (SCHEMA_TERMS, brands, categories, departments):
+    for source in (SCHEMA_TERMS, REPORT_TERMS, brands, categories, departments):
         for raw in source:
             if not isinstance(raw, str):
                 continue
@@ -318,6 +349,11 @@ def build_allowlist(
 
 
 EMPTY_ALLOWLIST = build_allowlist()
+
+
+def extend_allowlist(base: BrandAllowlist, brands: Iterable[str]) -> BrandAllowlist:
+    """D-153: ``base`` plus ``brands`` (same folding and limits as ``build_allowlist``)."""
+    return build_allowlist(brands=(*base.terms, *brands))
 
 
 # --- model singleton ----------------------------------------------------------------
@@ -560,6 +596,12 @@ _PIECE_BREAK = re.compile(r"[,;|\n\t]")
 _ALPHA_WORD = re.compile(r"[^\W\d_]+")
 _SEGMENT = re.compile(r"[^.!?\n]+")
 _CAPS_RUN = re.compile(r"(?<!\w)[A-Z][A-Z'\u2019\-]+(?:[ \t]+[A-Z][A-Z'\u2019\-]+)+(?!\w)")
+# D-215: a saved-report id as the agent shows it (pii_regex.REPORT_DISPLAY_ID). spaCy tags
+# some random ids as PERSON (about 1 in 10 in a short sentence), which would show the user
+# "<PERSON>" instead of the id. An id is never a name, so it is cut out of every spaCy
+# piece; the rest of the piece (a real name next to the id) is judged as usual. Cue hits
+# are unaffected.
+_REPORT_ID = pii_regex.REPORT_DISPLAY_ID
 
 
 _SPACY = "SpacyRecognizer"
@@ -700,6 +742,27 @@ def _spacy_pieces(text: str, start: int, end: int) -> list[tuple[int, int]]:
     return pieces
 
 
+def _minus_report_ids(text: str, a: int, b: int) -> list[tuple[int, int, bool]]:
+    """The parts of ``text[a:b]`` outside report-id tokens (D-215) that still contain a
+    letter, trimmed of the separators left at their edges, as (start, end, was_cut)."""
+    ids = [(m.start(), m.end()) for m in _REPORT_ID.finditer(text, max(0, a - 34), b + 34)]
+    ids = [(x, y) for x, y in ids if x < b and y > a]
+    if not ids:
+        return [(a, b, False)]
+    out: list[tuple[int, int]] = []
+    cur = a
+    for x, y in [*ids, (b, b)]:
+        lo, hi = cur, min(x, b)
+        while lo < hi and not text[lo].isalnum():
+            lo += 1
+        while hi > lo and not text[hi - 1].isalnum():
+            hi -= 1
+        if hi > lo and any(c.isalpha() for c in text[lo:hi]):
+            out.append((lo, hi, True))
+        cur = max(cur, y)
+    return out
+
+
 def _outside_placeholders(
     spans: list[tuple[str, int, int]], text: str
 ) -> list[tuple[str, int, int]]:
@@ -752,6 +815,39 @@ class PiiDetector:
         defaults = getattr(model, "Defaults", None)
         self._stop_words = frozenset(getattr(defaults, "stop_words", ()) or ())
         self._lexicon = _lexicon(model)
+        self._derived: dict[frozenset[str], PiiDetector] = {}
+        self._derived_lock = threading.Lock()
+
+    def with_brands(self, brands: Iterable[str]) -> PiiDetector:
+        """D-153: a detector whose allowlist also holds ``brands`` (the session's scope
+        brands). Brands are matched exactly, case-insensitively and as a whole phrase, like
+        every allowlist term; terms never combine, so a person name that only shares a word
+        with a brand ("Marlowe Klein" next to "Calvin Klein") is still masked. Shares the
+        loaded model; returns ``self`` when nothing is new. Bounded cache of derived
+        detectors (``MAX_DERIVED_DETECTORS``)."""
+        if isinstance(brands, str):
+            raise TypeError("brands must be an iterable of brand names, not a string")
+        if "_derived" not in vars(self):
+            # A wrapper subclass that never ran PiiDetector.__init__ (it delegates mask and
+            # detect elsewhere) has no allowlist of its own to extend: use it as is.
+            return self
+        new = frozenset(
+            b for b in brands if isinstance(b, str) and b.strip() and not self.allowlist.is_term(b)
+        )
+        if not new:
+            return self
+        with self._derived_lock:
+            hit = self._derived.get(new)
+            if hit is not None:
+                return hit
+        derived = copy.copy(self)  # shares the analyzer and its lock (one model, one lock)
+        derived.allowlist = extend_allowlist(self.allowlist, sorted(new))
+        derived._derived = {}
+        derived._derived_lock = threading.Lock()
+        with self._derived_lock:
+            if len(self._derived) >= MAX_DERIVED_DETECTORS:
+                self._derived.clear()
+            return self._derived.setdefault(new, derived)
 
     def _spacy_results(self, text: str) -> list[tuple[int, int, bool]]:
         """spaCy PERSON spans as (start, end, from_recased) over the text, a flattened
@@ -806,6 +902,13 @@ class PiiDetector:
                     return True
         return False
 
+    def _id_neighbour(self, piece: str) -> bool:
+        """D-215: what is left of a spaCy span after a report id is cut out of it is dropped
+        when it is one English word ("Renamed R-<id>"): spaCy tagged the id, not a name.
+        Two or more words, or a word outside the lexicon ("Fenwick"), are still judged."""
+        words = _ALPHA_WORD.findall(piece)
+        return len(words) == 1 and self._common(words[0])
+
     def _recased_name(self, text: str, a: int, piece: str) -> bool:
         """A name found only after recasing a lower-case or ALL-CAPS segment is kept
         when it has two or more words and either follows a person cue ("the buyer was
@@ -831,8 +934,12 @@ class PiiDetector:
         # spaCy-only hits: allowlist (one term covering the whole piece) and the
         # product-noun filter apply here and only here.
         for start, end, recased in self._spacy_results(text):
-            for a, b in _spacy_pieces(text, start, end):
+            for a, b, cut in (
+                p for s, e in _spacy_pieces(text, start, end) for p in _minus_report_ids(text, s, e)
+            ):
                 piece = text[a:b]
+                if cut and self._id_neighbour(piece):
+                    continue  # D-215: "Renamed" was tagged only together with the id
                 caseless = recased or piece.isupper() or piece.islower()
                 if caseless and not self._recased_name(text, a, piece):
                     continue
@@ -840,6 +947,36 @@ class PiiDetector:
                     continue
                 spans.append((PERSON, *self._widen(text, a, b)))
         return _merge(_outside_placeholders(spans, text))
+
+    def _bridged_by_id(self, text: str) -> tuple[str, list[tuple[str, int, int]]] | None:
+        """D-227: NER rescan with every report id taken out ("Zorbina R-<id> Quandleworth"
+        becomes "Zorbina Quandleworth"). If a name found there spans a place where an id
+        was, the id exemption is withdrawn for this text: the text without ids and its
+        spans are returned (fail closed). ``None`` when the ids hide nothing."""
+        if _REPORT_ID.search(text) is None:
+            return None
+        parts: list[str] = []
+        joins: list[int] = []
+        cur = 0
+        length = 0
+        for m in _REPORT_ID.finditer(text):
+            lo, hi = m.start(), m.end()
+            while lo > cur and text[lo - 1] in " \t":
+                lo -= 1
+            while hi < len(text) and text[hi] in " \t":
+                hi += 1
+            parts.append(text[cur:lo])
+            length += lo - cur
+            joins.append(length)
+            parts.append(" ")
+            length += 1
+            cur = hi
+        parts.append(text[cur:])
+        without = "".join(parts)
+        spans = self._ner_spans(without)
+        if any(a < j and b > j + 1 for _, a, b in spans for j in joins):
+            return without, spans
+        return None
 
     def mask(self, text: str) -> MaskResult:
         """Mask PII in ``text``. Raises ``PiiDetectorError`` on any failure, including
@@ -855,7 +992,11 @@ class PiiDetector:
                 body = out[: len(out) - len(pii_regex.TRUNCATION_MARKER)]
                 cut = body.rfind("\n")
                 out = (body[:cut] if cut > 0 else body) + pii_regex.TRUNCATION_MARKER
-            for t, a, b in sorted(self._ner_spans(out), key=lambda s: -s[1]):
+            spans = self._ner_spans(out)
+            joined = self._bridged_by_id(out)
+            if joined is not None:
+                out, spans = joined
+            for t, a, b in sorted(spans, key=lambda s: -s[1]):
                 out = out[:a] + TOKENS[t] + out[b:]
             findings = tuple(
                 Finding(m.group(0)[1:-1], m.start(), m.end()) for m in _PLACEHOLDER.finditer(out)

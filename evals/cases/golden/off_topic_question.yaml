@@ -1,0 +1,27 @@
+# golden/off_topic_question (AC-11.1). Synthetic; no live figures are hard-coded.
+# Offline `fake` is the recorded result; a live run uses the real SUT.
+# Off-topic questions get the code-owned off-topic reply and no query.
+input: What's the weather going to be like in Paris tomorrow?
+tags:
+- refusal
+- light
+- set2
+session:
+  profile: analyst_a
+expect:
+  outcome: refused
+  no_sql: true
+  must_contain:
+  - - e-commerce
+    - store
+estimate:
+  llm:
+    router: 1
+  bq: 0
+fake:
+  outcome: refused
+  text: 'I can only help with analysis of the store''s e-commerce data. Try, for example: "What was revenue
+    by product category last month?"'
+  llm_calls:
+    gemini-3.1-flash-lite: 1
+  bq_queries: 0

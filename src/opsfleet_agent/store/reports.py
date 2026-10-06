@@ -13,12 +13,21 @@ Rules enforced here, in code:
   :meth:`store_items` hand out only fenced or fence-on-render forms. The raw body is for the
   owner's own display (iteration 19's view command), never for a prompt.
 
-No delete method: deletion is iteration 22a's audited flow (audit record first).
+No delete method: deletion is iteration 22a's audited flow (audit record first). The only
+update is :meth:`ReportStore.rename` (iteration 33), owner-checked and guarded.
+
+Iteration 37 (AC-21.13): the FTS5 index (``reports.fts``) is written in the same transaction
+as the insert and the rename; :meth:`ReportStore.ranked_search` is owner-filtered in SQL.
+
+Iteration 38 (AC-21.13/14): an optional :attr:`ReportStore.semantic` index
+(``reports.semantic.SemanticIndex``) embeds a report AFTER its save or rename transaction has
+committed; an embedding failure is logged and counted, never fails the save (D-209).
 """
 
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -27,14 +36,21 @@ from typing import Any, Final
 
 from opsfleet_agent.graph.context import KIND_REPORT, StoreItem, fence_untrusted
 from opsfleet_agent.obs import tracer as tr
+from opsfleet_agent.reports import fts
 from opsfleet_agent.reports.schema import missing_sections
 from opsfleet_agent.store.db import StoreError, write_tx
 from opsfleet_agent.store.reports_schema import REPORTS_MIGRATION
+from opsfleet_agent.store.vector_schema import VECTOR_MIGRATION
 
 __all__ = ["MAX_BODY_CHARS", "ReportError", "ReportStore", "SavedReport", "ensure_schema"]
 
 MAX_BODY_CHARS: Final = 60_000
 MAX_LIST: Final = 200
+#: D-227: a report id never carries a run of 13+ decimal digits, so the PII guard (which
+#: does not exempt an id whose payload looks like a card or long number) never masks a real
+#: id; a typed id with such a run is masked like any other text.
+_DIGIT_RUN: Final = re.compile(r"\d{13,}")
+MAX_ID_TRIES: Final = 64
 # guard(body) -> (allowed, text_to_store); the graph passes a closure over check_output
 BodyGuard = Callable[[str], tuple[bool, str]]
 
@@ -68,13 +84,21 @@ _COLS: Final = (
     "sql_used, scope_snapshot, data_window, tags, model_used, persona_version, draft_hash, "
     "idempotency_key, created_at"
 )
+_S_COLS: Final = ", ".join("s." + c.strip() for c in _COLS.split(","))
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    """Idempotent (the same DDL as migration 3, for a connection not opened by open_store)."""
+    """Idempotent (the same DDL as migrations 3, 5 and 6, for a connection not opened by
+    open_store). The FTS index is created (and backfilled) only when this SQLite supports it;
+    the vector table is DDL only (vectors are backfilled lazily by search, D-210)."""
     with write_tx(conn):
         for stmt in REPORTS_MIGRATION:
             conn.execute(stmt)
+        for stmt in VECTOR_MIGRATION:
+            conn.execute(stmt)
+        if fts.fts5_supported() and not fts.has_index(conn):
+            for stmt in fts.FTS_MIGRATION:
+                conn.execute(stmt)
 
 
 def _req(name: str, value: Any, max_len: int = 200) -> str:
@@ -109,10 +133,39 @@ def _as_text(value: Any) -> str:
     return json.dumps(value, sort_keys=True, default=str)
 
 
+def new_report_id() -> str:
+    """A random uuid4 hex id with no 13+ digit run (about 1 in 45 draws is redrawn)."""
+    for _ in range(MAX_ID_TRIES):
+        rid = uuid.uuid4().hex
+        if _DIGIT_RUN.search(rid) is None:
+            return rid
+    raise ReportError("could not draw a report id")
+
+
 class ReportStore:
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: sqlite3.Connection, semantic: Any = None) -> None:
         self.conn = conn
+        # reports.semantic.SemanticIndex or None (semantic search off; FTS only)
+        self.semantic = semantic
         ensure_schema(conn)
+
+    def _embed(self, rec: SavedReport) -> None:
+        """Embed one report outside any transaction. Never raises (D-209)."""
+        if self.semantic is None:
+            return
+        try:
+            self.semantic.index(self.conn, rec)
+        except Exception:  # noqa: BLE001 - SemanticIndex.index already never raises
+            pass
+
+    def semantic_search(
+        self, owner_user_id: str, candidates: Sequence[SavedReport], text: str
+    ) -> list[tuple[str, float]] | None:
+        """Cosine ranking of ``candidates`` (the owner's in-scope rows) for ``text``; None when
+        semantic search is off or unavailable (the caller degrades to FTS / word match)."""
+        if self.semantic is None:
+            return None
+        return self.semantic.search(self.conn, str(owner_user_id), candidates, text)
 
     def save(
         self,
@@ -168,7 +221,7 @@ class ReportStore:
         }
         clean_sql = [_guarded(guard, str(s), "SQL", MAX_BODY_CHARS) for s in sql_used]
         values = (
-            uuid.uuid4().hex, owner, sid, tid, title, body,
+            new_report_id(), owner, sid, tid, title, body,
             json.dumps(clean_sections, sort_keys=True),
             json.dumps(clean_sql),
             json.dumps(dict(scope_snapshot), sort_keys=True),
@@ -193,7 +246,12 @@ class ReportStore:
             ).fetchone()
             if row is None or row[1] != owner:  # a key owned by someone else: never handed out
                 raise ReportError("idempotency key conflict")
-        return _row(row), created
+            rec = _row(row)
+            if created and fts.has_index(self.conn):  # same transaction: index and row agree
+                fts.index_report(self.conn, rec.report_id, rec.title, rec.body_markdown, rec.tags)
+        if created:  # iteration 38: after the commit, never inside it
+            self._embed(rec)
+        return rec, created
 
     def get(self, report_id: str, owner_user_id: str) -> SavedReport | None:
         """The owner's report (another user's id returns None, never the row)."""
@@ -210,6 +268,52 @@ class ReportStore:
             (str(idempotency_key), str(owner_user_id)),
         ).fetchone()
         return _row(row) if row else None
+
+    def rename(
+        self, report_id: str, owner_user_id: str, title: str, guard: BodyGuard
+    ) -> SavedReport | None:
+        """Iteration 33 (AC-21.12): set the owner's report title. None when the id is not the
+        owner's (another user's report is "not found", never touched). The title passes the
+        same guard and secret scrub as at save time; the caller validates length and
+        control characters first."""
+        new_title = _guarded(guard, _req("title", title, 200), "title", 200)
+        if not new_title.strip():
+            raise ReportError("title is required")
+        with write_tx(self.conn):
+            cur = self.conn.execute(
+                "UPDATE saved_report SET title=? WHERE report_id=? AND owner_user_id=?",
+                (new_title, str(report_id), str(owner_user_id)),
+            )
+            if cur.rowcount != 1:
+                return None
+            if fts.has_index(self.conn):  # iteration 37: re-index the title in the same tx
+                fts.reindex_title(self.conn, str(report_id), new_title)
+            row = self.conn.execute(
+                f"SELECT {_COLS} FROM saved_report WHERE report_id=? AND owner_user_id=?",
+                (str(report_id), str(owner_user_id)),
+            ).fetchone()
+        if row is None:
+            return None
+        rec = _row(row)
+        self._embed(rec)  # iteration 38: re-embed the new title, after the commit
+        return rec
+
+    def ranked_search(self, owner_user_id: str, match: str) -> list[SavedReport] | None:
+        """Iteration 37 (AC-21.13): the owner's reports matching the FTS5 expression ``match``
+        (built by :func:`reports.fts.build_match`, never raw user text), best bm25 first, over
+        the owner's newest ``MAX_LIST`` reports (the same row source as the substring search).
+        The owner filter is in SQL: another user's row is never returned. None when there is
+        no index or SQLite refuses the query (the caller falls back to the substring search)."""
+        if not fts.has_index(self.conn):
+            return None
+        owner = str(owner_user_id)
+        try:
+            rows = self.conn.execute(
+                fts.ranked_sql(_S_COLS), (str(match), owner, owner, MAX_LIST)
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return None
+        return [_row(r) for r in rows[:MAX_LIST]]
 
     def get_fenced(self, report_id: str, owner_user_id: str) -> str | None:
         """The body as fenced untrusted data, for a prompt (SEC-13). PII-scrubbed and capped."""

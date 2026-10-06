@@ -539,6 +539,20 @@ def test_unknown_column_identifier_only_if_in_sql_outside_literals():
         _assert_clean(out)
 
 
+def test_table_not_found_is_unknown_column():
+    """D-22: a missing table maps to UNKNOWN_COLUMN; a missing dataset does not."""
+    sql = "SELECT COUNT(*) FROM `bigquery-public-data.thelook_ecommerce.orderz`"
+    exc = gexc.NotFound(
+        "Not found: Table bigquery-public-data:thelook_ecommerce.orderz was not found in location"
+    )
+    out = map_bq_exception(exc, sql=sql, stage=Stage.DRY_RUN)
+    assert out.code is ErrorCode.UNKNOWN_COLUMN and out.identifier == "orderz"
+    hidden = map_bq_exception(exc, sql="SELECT 1", stage=Stage.DRY_RUN)
+    assert hidden.code is ErrorCode.UNKNOWN_COLUMN and hidden.identifier is None
+    ds = gexc.NotFound("Not found: Dataset bigquery-public-data:thelook_ecomm was not found")
+    assert map_bq_exception(ds, sql=sql, stage=Stage.DRY_RUN).code is ErrorCode.BQ_RUNTIME
+
+
 def test_failure_does_not_keep_exception():
     out = map_bq_exception(_bad_request(SENTINEL), sql=SQL, stage=Stage.EXECUTE)
     assert set(vars(out)) == {"code", "stage", "error_class", "identifier", "bytes_estimated"}

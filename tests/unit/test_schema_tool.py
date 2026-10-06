@@ -19,6 +19,7 @@ from opsfleet_agent.tools.schema_tool import (
     column_kind,
     get_schema,
     list_tables,
+    schema_section,
 )
 
 SENTINEL = "SENTINEL-schema-7f3a"
@@ -211,3 +212,24 @@ def test_get_schema_hides_pii_columns_case_insensitively(monkeypatch: pytest.Mon
 def test_id_keys_match_sql_policy() -> None:
     """L-8: a public copy of a reviewed guard's private constant; drift fails here."""
     assert dict(ID_KEYS) == dict(sql_policy._ID_KEYS)
+
+
+def test_schema_section_lists_tables_without_pii_or_provider_text() -> None:
+    client = FakeMetaClient()
+    text = schema_section(cache(client))
+    for table in ALLOWED_TABLES:
+        assert f"- {table} ({TABLE_DESCRIPTIONS[table]}, about 1000 rows)" in text
+    assert "id INTEGER [key]" in text and "sale_price FLOAT [metric]" in text
+    for hidden in PII_COLUMNS["users"]:
+        assert f"{hidden} " not in text
+    # provider descriptions are untrusted text and stay out of the prompt
+    assert EMAIL not in text and "Contact address" not in text and "x" * 50 not in text
+    assert all(ref.rsplit(".", 1)[-1] in ALLOWED_TABLES for ref in client.calls)
+
+
+def test_schema_section_marks_unavailable_tables() -> None:
+    text = schema_section(cache(FakeMetaClient(fail=gexc.ServiceUnavailable(SENTINEL))))
+    assert text.count("columns: unavailable now; call get_schema for this table") == len(
+        ALLOWED_TABLES
+    )
+    assert "about" not in text and SENTINEL not in text

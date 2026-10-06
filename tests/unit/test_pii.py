@@ -6,7 +6,9 @@ All people, streets and brands here are synthetic.
 from __future__ import annotations
 
 import dataclasses
+import random
 import threading
+import uuid
 from pathlib import Path
 
 import pytest
@@ -387,3 +389,59 @@ def test_truncated_table_drops_bisected_last_row(bare_detector: PiiDetector) -> 
     result = bare_detector.mask(text)
     assert result.truncated
     assert "Zorbina" not in result.text and "Quandle" not in result.text
+
+
+# --- D-215: saved-report display ids are never masked ------------------------------------------
+
+#: Ids that were masked before D-215: as <PERSON> by spaCy, as <ID> by the long-digit-run
+#: rule, and as "<PERSON> R-<id>" (spaCy tagged "Renamed" together with the id).
+_KNOWN_BAD_IDS = (
+    "3099fdf5ab99454aa901e35cd47d380d",
+    "97f2a70223664676947f81435add92d1",
+    "78255d6807924986bb968a437d5c8dfc",
+)
+_ID_TEMPLATES = (
+    "Your report R-{h} is Quarterly Widgets.",
+    'Saved report "Quarterly Widgets" (id R-{h}).',
+    "  1. R-{h}  2026-01-02  Quarterly Widgets",
+    "Renamed R-{h} to: Weekly Widgets",
+    "Report R-{h}, created 2026-01-02, Quarterly Widgets",
+)
+
+
+def _report_ids(n: int) -> list[str]:
+    rng = random.Random(215)
+    return [uuid.UUID(int=rng.getrandbits(128), version=4).hex for _ in range(n)]
+
+
+@pytest.mark.parametrize("h", _KNOWN_BAD_IDS)
+def test_known_report_ids_survive_the_output_guard(detector: PiiDetector, h: str) -> None:
+    for tpl in _ID_TEMPLATES:
+        text = tpl.format(h=h)
+        assert detector.mask(text).text == text
+
+
+def test_report_display_ids_never_masked_over_many_ids(detector: PiiDetector) -> None:
+    bad = [
+        text
+        for h in _report_ids(300)
+        for text in (tpl.format(h=h) for tpl in _ID_TEMPLATES)
+        if detector.mask(text).text != text
+    ]
+    assert bad == []
+
+
+def test_name_next_to_a_report_id_is_still_masked(detector: PiiDetector) -> None:
+    for h in _KNOWN_BAD_IDS:
+        for text in (f"Name: Marlowe Finch, report R-{h}", f"Dear Marlowe Finch, see R-{h}."):
+            out = detector.mask(text).text
+            assert "Marlowe" not in out and "Finch" not in out and f"R-{h}" in out
+
+
+def test_report_id_between_name_parts_does_not_hide_the_name(detector: PiiDetector) -> None:
+    # D-227: the id is cut out and the name is judged whole.
+    for h in _KNOWN_BAD_IDS:
+        out = detector.mask(f"The buyer was Zorbina R-{h} Quandleworth").text
+        assert "Zorbina" not in out and "Quandleworth" not in out
+        email = detector.mask(f"write to zorbina+R-{h}@example.com").text
+        assert "zorbina" not in email and "<EMAIL>" in email

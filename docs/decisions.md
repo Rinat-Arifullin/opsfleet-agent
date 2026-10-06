@@ -94,7 +94,7 @@ The ADRs below were written by the architect from the approved digest (`docs/pro
     - SDK retries are disabled: `max_retries=1` means a single attempt (0 would mean the Google default of 5 retries).
     - `bind_tools` is applied to the primary and the fallback model before wrapping, so the fallback sees the same tools.
     - Each attempt's timeout is min(60 s, remaining turn time). Every attempt is counted against the turn's LLM-call budget.
-    - Primary: up to 3 retries per call and 6 per turn, backoff 1 s, 2 s and 4 s plus jitter, on 429, 5xx and timeouts only. A retry starts only if the backoff plus a 10 s minimum attempt fits in the remaining time.
+    - Primary: up to 2 retries per call and 6 per turn, backoff 1 s and 2 s plus jitter (D-6, owner 2026-10-05), on 429, 5xx and timeouts only. A retry starts only if the backoff plus a 10 s minimum attempt fits in the remaining time.
     - Fallback: flash-lite, a single attempt, under the same rule.
     - Then `force_answer` if a call and time remain, otherwise a templated message.
     - Tests: `test_retry_wrapper_bounded` (asserts attempt count and wall time under a fake clock with always-failing models) and `test_sdk_single_attempt`.
@@ -129,7 +129,7 @@ The ADRs below were written by the architect from the approved digest (`docs/pro
      - (b) user or order grain: no quasi-identifier in the projection, ORDER BY or window partition; a quasi-identifier filter is allowed only if a separate capped population check returns at least k users;
      - (c) windows over a quasi-identifier, nested aggregates or correlated quasi-identifiers: rejected (`small_cell_unplaceable`).
 
-     "Top customers by spend" (user_id grain, no quasi-identifier) stays allowed, with an eval case;
+     "Top customers by spend" (user_id grain, no quasi-identifier) stays allowed by the base policy; since D-159 (2026-10-05) a customer-ranking turn is answered with spend bands and counts only (see the ADR-013 note);
   6. dry-run plus `maximum_bytes_billed`, session budget and row cap;
   7. a result scrubber;
   8. an output guard (PII, scope label, grounding), plus the action allowlist per role and router label and the answer injection scan (FR-75), failing closed;
@@ -305,7 +305,7 @@ The ADRs below were written by the architect from the approved digest (`docs/pro
 - **Note (rev. 4.3, R3-L31, R3-L32):** SDK and model facts the call wrapper assumes.
   - `thinking_level` and `thinking_budget` are mutually exclusive in a request; `config/models.yaml` sets exactly one of them per model.
   - Function (tool) responses are matched to their calls by `call_id`.
-  - In `langchain-google-genai`, `max_retries=1` means one attempt. The retry ladder lives in our wrapper, not in the client: primary → one retry on 429, 5xx or timeout → fallback model once → fail. The fallback call counts against the role's sub-cap (R3-M6).
+  - In `langchain-google-genai`, `max_retries=1` means one attempt. The retry ladder lives in our wrapper, not in the client: primary → up to 2 retries on 429, 5xx or timeout (1 s, 2 s; D-6) → fallback model once → fail. The fallback call counts against the role's sub-cap (R3-M6).
   - Model ids were checked against the provider's model list on 2026-10-04: `gemini-3.8-flash` and `gemini-3.1-flash-lite` are both listed; the flash-lite line has a published shutdown date in 2027 and a named successor, both to be recorded in `config/models.yaml` comments. The pro-class model is available as a preview id only and stays behind the eval gate. The "ID to verify" markers are resolved.
 
 - **2026-10-04 owner decision:** adopt the supervisor + 5 roles topology, with explicit failure behaviour, bounded retries and per-role quality control (ADR-009). HLD revision 3 and requirements budgets (10 Q&A / 14 report) updated; re-review requested before G2.
@@ -376,6 +376,11 @@ The ADRs below were written by the architect from the approved digest (`docs/pro
   - FR-70 is the differencing guard for aggregates, M in the prototype, in its session and per-user cross-session forms (rev. 4.4); id-grain differencing is handled here, not by FR-70.
   - Some legitimate questions ("top customers in California") are answered as aggregates or refused with a reason; the refusal is templated and audited like other policy rejections.
   - HLD §5.2 row 5 and requirements FR-70 are updated to match (by their owners, not in this file).
+- **Note (D-159, owner, 2026-10-05; OD-14 of iteration D-156/D-157):** for customer rankings ("top 10 customers by spend", "which clients spent the most") the owner chose **bands only**: the answer gives spend bands, customer counts and aggregates such as each band's share of revenue, never individual customers, customer IDs or per-customer rows. This replaces the D-157 answer shape (opaque customer IDs). PII variants keep the PII refusal.
+  - Scope is **narrow**: only turns that `input_guard` detects as customer rankings (`is_customer_ranking_request`) are marked `aggregate_only`. Option A above and the base policy are unchanged for every other turn, so an id-grain query outside a ranking turn is still allowed under its existing rules (OD-1 in `docs/process/iter-d159-ods.md`).
+  - Enforced in **code**: on such a turn `run_sql` calls `check_aggregate_only`, which refuses a statement whose output is at id grain (grouped by an id key, or ungrouped table rows) or that returns an id column, with `SQL_POLICY` rule `customer_grain` and a bands hint. The refusal is retryable and bounded by the existing consecutive-failure limit. An answer that names customer IDs is retried once, then replaced by the bounded force-answer path or the fixed template.
+  - The analyst gets the `Customer ranking` rule (bands under $100, $100 to $499, $500 to $999, $1,000 and over; bands under k = 5 customers merged). Since D-163 / D-172 the k rule is code: `run_sql` merges all bands under k into one row (with the smallest band at or above k if still too small, so the result does not depend on row order) when the bands are provably disjoint and fixed-name (one row per customer below the root, no joins, no grouping sets, `CASE` / `IF` labels with constant results) and hides them otherwise; only counts and plain `SUM` / `COUNT` columns are added, the merged row is labelled `other bands`, other columns of a merged band are left empty, window columns that could reveal a merged or hidden band are emptied, and `QUALIFY` or a row-gating subquery in the outer query is refused.
+  - Tests: `tests/unit/test_d159_customer_bands.py`, `tests/unit/test_d157_top_customers.py`; eval `golden/top_customers`.
 
 ## ADR-014: Report residue and backups
 

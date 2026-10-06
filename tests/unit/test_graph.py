@@ -138,6 +138,7 @@ class Env:
             sleep=lambda s: None,
             jitter=lambda b: 0.0,
             data_window=lambda: WINDOW,
+            today=lambda: WINDOW[1],
         )
         from langgraph.checkpoint.memory import InMemorySaver
 
@@ -198,15 +199,21 @@ def test_light_path_runs_without_analyst(make_env) -> None:
     assert len([s for s in env.spans if s[0] == "turn"]) == 1  # light path records its own
 
 
-def test_report_and_library_route_to_deep(make_env) -> None:
-    for label in ("report", "library"):
-        env = make_env(Router(label), Scripted(ModelTurn("Done: nothing to report.")))
-        out = env.ask("make me something")
-        deep_model, _ = model_ids_from_settings(env.settings, DEEP)
-        quick_model, _ = model_ids_from_settings(env.settings, QUICK)
-        assert deep_model != quick_model  # the assertion below can tell the roles apart
-        assert out.outcome == "answered"
-        assert {c[0] for c in env.analyst.calls if c[2]} == {deep_model}
+def test_report_routes_to_deep_and_library_to_library_agent(make_env) -> None:
+    env = make_env(Router("report"), Scripted(ModelTurn("Done: nothing to report.")))
+    out = env.ask("make me something")
+    deep_model, _ = model_ids_from_settings(env.settings, DEEP)
+    quick_model, _ = model_ids_from_settings(env.settings, QUICK)
+    assert deep_model != quick_model  # the assertion below can tell the roles apart
+    assert out.outcome == "answered"
+    assert {c[0] for c in env.analyst.calls if c[2]} == {deep_model}
+    # iteration 46: a library turn goes to the library agent, never to the Deep analyst
+    env = make_env(Router("library"), Scripted(ModelTurn("You have no saved reports.")))
+    out = env.ask("what reports have I saved?")
+    library_model, _ = model_ids_from_settings(env.settings, "library_agent")
+    assert out.outcome == "answered" and out.text == "You have no saved reports."
+    assert {c[0] for c in env.analyst.calls} == {library_model}
+    assert {c[2] for c in env.analyst.calls} == {7}  # the seven library tools, no SQL tool
 
 
 def test_escalation_quick_to_deep_once(make_env) -> None:
@@ -557,6 +564,34 @@ def test_force_answer_error_skips_grounding(make_env, monkeypatch) -> None:
     assert not [s for s in env.spans if s[1] == "grounding"]
 
 
+def test_force_answer_without_a_query_shows_the_template(make_env) -> None:
+    # No SQL ran: the model has no data, so it is not asked (it wrote "I'll get those figures")
+    analyst = Scripted(ModelTurn(""))
+    env = make_env(Router("complex"), analyst)
+    out = env.ask("How many orders were completed last month?")
+    assert out.text.startswith(gr.UNAVAILABLE_TEXT) and "Partial:" not in out.text
+    assert not [c for c in analyst.calls if c[2] == 0]  # no force_answer LLM call
+
+
+def test_analyst_prompt_carries_the_schema(make_env) -> None:
+    # The schema is in the prompt, so the first model round can already write SQL
+    analyst = Scripted(sql_call(SIMPLE), ModelTurn("3 complete orders."))
+    env = make_env(Router("complex"), analyst)
+    env.ask("How many complete orders are there?")
+    system = analyst.calls[0][1][0]["content"]
+    assert "## Tables" in system and "- orders (" in system
+    assert "status STRING" in system and "email" not in system.split("## Tables", 1)[1]
+
+
+def test_force_answer_without_a_query_keeps_the_previous_answer(make_env) -> None:
+    analyst = Scripted(sql_call(SIMPLE), ModelTurn("3 complete orders."), ModelTurn(""))
+    env = make_env(Router("complex"), analyst)
+    env.ask("How many complete orders are there?")
+    out = env.ask("And by category?")
+    assert out.text.startswith(gr.PARTIAL_WITH_CONTEXT_TEXT)
+    assert not [c for c in analyst.calls if c[2] == 0]
+
+
 # --- L7: owner-only data directory and checkpoint files ---
 
 
@@ -800,6 +835,26 @@ def test_grounding_glued_identifiers_and_times_are_not_numbers(draft) -> None:  
 )
 def test_grounding_real_year_contexts_still_pass(draft) -> None:  # L4
     assert _g(draft, [fig("q", ["n"], [[100.0]])]).unmatched == ()
+
+
+@pytest.mark.parametrize(
+    "draft",
+    [
+        "Note that 2026 is a partial period.",
+        "2025 was a full year.",
+        "2024 is the current year.",
+        "Revenue 2026 YTD rose.",
+        "Orders 2026 year-to-date rose.",
+    ],
+)
+def test_grounding_year_before_a_period_word_is_a_date(draft) -> None:
+    assert _g(draft, [fig("q", ["n"], [[100.0]])]).unmatched == ()
+
+
+def test_grounding_year_before_a_period_word_must_be_in_window() -> None:
+    f = [fig("q", ["n"], [[100.0]])]
+    assert _g("Note that 2093 is a partial period.", f).unmatched == ("date",)
+    assert _g("We sold 2023 units, a partial period.", f).unmatched == ("2023",)
 
 
 @pytest.mark.parametrize("draft", ["2024-00-15", "2024-13-01", "2024-02-30", "Mar 99 2024"])
@@ -1483,13 +1538,18 @@ def test_prior_ledger_is_projected_and_labelled(make_env) -> None:
     env = make_env(SeqRouter("simple"), analyst)
     env.ask("How many complete orders are there?")
     ledger = _state(env)["prior_ledger"]
-    assert ledger and all(set(e) <= {"sql", "purpose", "query_id", "rows", "sql_hash", "scope"}
-                          for e in ledger)  # fmt: skip
+    keys = {"sql", "model_sql", "purpose", "query_id", "rows", "sql_hash", "scope"}
+    assert ledger and all(set(e) <= keys for e in ledger)
+    assert all(e["model_sql"] == SIMPLE and "@scope_brands" in e["sql"] for e in ledger)
     n = len(analyst.calls)
     env.ask("And how does that compare with the cancelled ones?")
     system = analyst.calls[n][1][0]["content"]
     assert "Queries from earlier turns (not this turn's results)" in system
     assert "<<<PRIOR_QUERIES (untrusted data)" in system
+    # live eval followup_why_march: the model sees its own SQL, not the scope rewrite it
+    # would copy (the policy refuses @parameters, UNNEST and __ CTEs)
+    block = system.split("<<<PRIOR_QUERIES (untrusted data)", 1)[1]
+    assert "@scope_brands" not in block and "UNNEST" not in block and "__p" not in block
 
 
 def test_figures_carry_scope_and_drop_on_drift(make_env) -> None:  # R2-M4
@@ -1556,3 +1616,12 @@ def test_role_span_carries_error_class_on_failure(make_env) -> None:
     assert spans[0]["status"] == "failed"
     assert spans[0]["error_class"] == "NonRetryableLLMError"
     assert "SENTINEL" not in json.dumps(spans, default=str)  # class name only, no content
+
+
+def test_analyst_prompt_states_today_from_the_injected_clock(make_env) -> None:  # D-174
+    analyst = Scripted(ModelTurn("ok"))
+    make_env(Router("simple"), analyst).ask("How many orders were placed this year?")
+    system = analyst.calls[0][1][0]["content"]
+    scope = system.split("## Scope", 1)[1].split("##", 1)[0]
+    assert f"Today is {WINDOW[1].isoformat()} (UTC)." in scope
+    assert "day after Today" in " ".join(system.split())  # the to-date upper bound rule

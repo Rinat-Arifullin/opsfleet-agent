@@ -32,6 +32,7 @@ __all__ = [
     "column_kind",
     "get_schema",
     "list_tables",
+    "schema_section",
 ]
 
 INVALID_ARGS: Final = "INVALID_ARGS"
@@ -183,3 +184,22 @@ def get_schema(
             }
         )
     return {"ok": True, "data": {"table": table, "columns": columns}}
+
+
+def schema_section(cache: TableMetadataCache) -> str:
+    """The tables and columns as one prompt block, so the analyst can skip list_tables and
+    get_schema (two model rounds of its budget). Built from the same tool outputs, so PII
+    columns stay hidden; provider descriptions (untrusted text) are left out.
+    A table whose metadata is unavailable is named with a hint to call ``get_schema``."""
+    lines = []
+    for t in list_tables(cache)["data"]:
+        name, rows = t["table"], t["approx_rows"]
+        size = f", about {rows} rows" if isinstance(rows, int) else ""
+        lines.append(f"- {name} ({t['description']}{size})")
+        res = get_schema({"table": name}, cache)
+        if not res["ok"]:
+            lines.append("  columns: unavailable now; call get_schema for this table")
+            continue
+        cols = ", ".join(f"{c['column']} {c['type']} [{c['kind']}]" for c in res["data"]["columns"])
+        lines.append(f"  columns: {cols}")
+    return "\n".join(lines)

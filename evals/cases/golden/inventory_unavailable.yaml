@@ -1,6 +1,7 @@
 # golden/inventory_unavailable (AC-04.2, US-04). Synthetic; no live figures are hard-coded.
 # Offline `fake` is the recorded result; a live run uses the real SUT.
 input: Can you tell me about inventory levels?
+# D-165: the router labels it simple; the analyst says what is missing (no regex override).
 tags:
 - quick
 - us04

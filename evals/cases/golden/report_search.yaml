@@ -26,6 +26,11 @@ session:
     created: relative:-30d
     tags:
     - returns
+# Live seeding (evals/live_seed.py) stores the reports, but the library search is reached only
+# through /search, not a graph turn, and a seed cannot backdate `created`
+# (docs/process/iter-live1-seed-ods.md OD-4, OD-5).
+live:
+  skip: report search is a slash command the live graph does not route to, and seeded reports cannot be backdated
 expect:
   outcome: answered
   no_sql: true
@@ -45,3 +50,7 @@ fake:
   llm_calls:
     gemini-3.1-flash-lite: 2
   bq_queries: 0
+
+# D-160 profile matrix: opted out of the default (all profiles).
+profiles: [analyst_a]
+profiles_reason: the session's saved-report fixtures are owned by analyst_a; another profile would test report ownership, not this behaviour

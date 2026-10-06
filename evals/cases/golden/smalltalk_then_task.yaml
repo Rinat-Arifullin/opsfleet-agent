@@ -36,3 +36,16 @@ fake:
   - SELECT 1 /* recorded placeholder */
   tools:
   - run_sql
+
+# D-160 profile matrix: the scope named in the answer follows the profile.
+per_profile:
+  analyst_b:
+    expect:
+      must_contain: [revenue, last month, Carhartt, Levi's]
+    fake:
+      text: Revenue last month for Carhartt and Levi's, scope and revenue definition stated.
+  ceo_demo:
+    expect:
+      must_contain: [revenue, last month, all products]
+    fake:
+      text: Revenue last month across all products, scope and revenue definition stated.

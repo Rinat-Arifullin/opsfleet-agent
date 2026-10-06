@@ -20,7 +20,8 @@ Contract:
   no exception text); ``AgentGraph.run_turn`` wraps ``invoke`` the same way;
 * the supervisor never dispatches a role twice per turn (quick -> deep once, via
   ``TurnBudget.try_escalate``); every LLM call goes through the budgeted ``LLMWrapper``;
-* ``library`` runs on the deep analyst for now (seam: 15/22a add the library and delete nodes);
+* iteration 46: ``library`` runs the ``library_agent`` node (no SQL tools; a delete it asks for
+  only starts ``delete_preview`` -> ``confirm_delete``; a failure is a templated message);
 * iteration 17: a ``report`` turn that ran SQL continues after grounding with
   ``report_writer`` (writer -> verifier -> output guard) and ``confirm_save``, which pauses on
   ``interrupt()``. The user's next message answers it (``AgentGraph.run_turn``): save stores the
@@ -41,8 +42,8 @@ import time
 import unicodedata
 import uuid
 from collections.abc import Callable, Collection, Mapping
-from dataclasses import dataclass, field
-from datetime import date
+from dataclasses import dataclass, field, replace
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Annotated, Any, Final, TypedDict
 
@@ -54,9 +55,11 @@ from langgraph.types import Command, interrupt
 
 from opsfleet_agent.bq.client import BigQueryRunner
 from opsfleet_agent.bq.schema import TableMetadataCache
+from opsfleet_agent.commands.preferences import apply_nl_preference
 from opsfleet_agent.config import ConfigError, Settings
 from opsfleet_agent.delete import flow as delete_flow
 from opsfleet_agent.golden.seed import Hit, to_store_items
+from opsfleet_agent.graph.assumptions import ASSUMPTIONS_ADDED, assumptions_footer
 from opsfleet_agent.graph.budget import (
     FORCE_ANSWER_ROLE,
     RECURSION_LIMIT,
@@ -76,15 +79,47 @@ from opsfleet_agent.graph.context import (
     snapshot_of,
     tag_scope,
 )
+from opsfleet_agent.graph.fixed_replies import (
+    FIXED_KEY,
+    contains_marker,
+    fixed_kind,
+    is_marker,
+    static_texts,
+)
 from opsfleet_agent.graph.grounding import check_grounding, extract_figures, merge_figures
+from opsfleet_agent.graph.intents import (
+    COMMENT_FALLBACK_TEXT,
+    CUSTOMER_BANDS_NOTICE,
+    CUSTOMER_BANDS_RULE,
+    CUSTOMER_BANDS_SECTION,
+    asks_for_customer_pii,
+    is_customer_ranking_request,
+    is_sql_request,
+    mentions_customer_id,
+    mentions_customers,
+)
 from opsfleet_agent.graph.llm import Limiters, LLMSuccess, LLMWrapper
-from opsfleet_agent.graph.memory import SessionMemory
-from opsfleet_agent.guards.input import check_input
-from opsfleet_agent.guards.output import REFUSAL_TEXT, ROLE_TOOLS, check_output
+from opsfleet_agent.graph.memory import SessionMemory, render_preferences
+from opsfleet_agent.graph.nl_preferences import detect_preference
+from opsfleet_agent.graph.providers import is_local
+from opsfleet_agent.guards.echo import ECHO_REJECTED, ECHO_RETRY_RULE, is_echo
+from opsfleet_agent.guards.echo import normalise as normalise_echo
+from opsfleet_agent.guards.input import NON_ENGLISH, PII_REQUEST, REFUSALS, check_input
+from opsfleet_agent.guards.output import REFUSAL_TEXT, ROLE_TOOLS, OutputVerdict, check_output
+from opsfleet_agent.guards.plain_language import (
+    PLAIN_LANGUAGE_RULE,
+    PLAIN_LANGUAGE_SECTION,
+    SCHEMA_TERMS_REWRITTEN,
+    SQL_STRIPPED,
+    humanize_identifiers,
+    sql_request_reply,
+    strip_sql,
+)
 from opsfleet_agent.guards.scope import ProductScope
 from opsfleet_agent.obs import progress
 from opsfleet_agent.persona import Persona, assemble_prompt
-from opsfleet_agent.reports.schema import missing_sections
+from opsfleet_agent.reports.library import display_id
+from opsfleet_agent.reports.schema import REQUIRED_SECTIONS, missing_sections
 from opsfleet_agent.roles.analyst import (
     DEEP,
     QUICK,
@@ -95,6 +130,14 @@ from opsfleet_agent.roles.analyst import (
     build_system_prompt,
     run_analyst,
     serialise_envelope,
+)
+from opsfleet_agent.roles.library_agent import (
+    LIBRARY_ROLE,
+    LIBRARY_UNAVAILABLE_TEXT,
+    build_library_prompt,
+    library_protected_snippets,
+    make_library_executors,
+    run_library_agent,
 )
 from opsfleet_agent.roles.light_path import run_light_path
 from opsfleet_agent.roles.report_writer import REPORT_ROLE_SUBCAPS, WRITER_ROLE, produce_report
@@ -115,7 +158,7 @@ from opsfleet_agent.tools.run_sql import (
     RunSqlTurn,
     _injects_parameters,
 )
-from opsfleet_agent.tools.schema_tool import get_schema, list_tables
+from opsfleet_agent.tools.schema_tool import get_schema, list_tables, schema_section
 
 __all__ = [
     "CHECKPOINT_FILE",
@@ -136,6 +179,7 @@ AES_KEY_ENV: Final = "LANGGRAPH_AES_KEY"
 HISTORY_TURNS: Final = 12  # last 12 turns verbatim (HLD §4.1 step 1)
 MAX_HISTORY_MESSAGES: Final = 2 * HISTORY_TURNS
 MAX_HISTORY_CHARS: Final = 4000
+MAX_DESCRIBED_QUERIES: Final = 6  # D-151a: prior queries the "show me the SQL" reply describes
 MAX_PRIOR_LEDGER: Final = 20  # prior-turn ledger entries kept in state (context.MAX_PRIOR_LEDGER)
 DEFAULT_WINDOW_START: Final = date(2019, 1, 1)
 ERROR_TEXT: Final = "Something went wrong while handling that. Please try again."
@@ -143,18 +187,47 @@ UNAVAILABLE_TEXT: Final = (
     "I could not complete the analysis within the limits for one question. "
     "Please try a narrower question."
 )
+# D-152: the budget-hit template when the force answer could not run but an earlier answer in
+# this session is in context: point back to it instead of a bare "could not complete".
+PARTIAL_WITH_CONTEXT_TEXT: Final = (
+    "I ran out of time for this question before I could check it against the data, so I "
+    "have nothing new to add yet. My previous answer above still stands. You can ask a "
+    "narrower follow-up, for example about one product or one period."
+)
+# D-157: router labels a customer-ranking request may get by mistake (the PII wording in the
+# router prompt); such a request is relabelled in code.
+CUSTOMER_OVERRIDE_LABELS: Final = frozenset({"injection", "off_topic"})
+ECHO_ERROR_CLASS: Final = "echo"  # D-156: the analyst repeated an earlier reply twice
+CUSTOMER_ID_ERROR_CLASS: Final = "customer_id"  # D-159: a ranking answer named customer IDs twice
+CUSTOMER_ID_REJECTED: Final = "customer_id_in_answer"
+MAX_PREVIOUS_ANSWER_CHARS: Final = 1500  # the force answer sees one earlier answer, trimmed
 _FORCE_RULES: Final = (
     "The analysis was cut short. Write a brief answer for the user that says what was "
-    "found, if anything, and what is missing. Use only the queries listed below. "
+    "found, if anything, and what is missing. Use only the queries listed below and the "
+    "previous answer, if one is given. "
     "Do not state any number you were not given. Do not call tools."
 )
-_QA_ROLE_SUBCAPS: Final = {**LIGHT_ROLE_SUBCAPS, QUICK: 6, DEEP: 6, FORCE_ANSWER_ROLE: 1}
+_COMMENT_RULES: Final = (
+    "The user made a comment or stated an opinion about your previous answer; it is not a "
+    "new data request. Reply in two to four short sentences: agree, or add a caveat, using "
+    "only the previous answer and the user's message, then suggest one concrete check you "
+    "could run on the data. Do not state any number that is not in the previous answer or "
+    "the user's message. Do not call tools."
+)
+_QA_ROLE_SUBCAPS: Final = {
+    **LIGHT_ROLE_SUBCAPS, QUICK: 6, DEEP: 6, FORCE_ANSWER_ROLE: 1, LIBRARY_ROLE: 6,
+}  # fmt: skip
 # iteration 17: a report turn runs under the REPORT caps (14 calls, 180 s) + writer/verifier subcaps
 _REPORT_ROLE_SUBCAPS: Final = {**_QA_ROLE_SUBCAPS, **REPORT_ROLE_SUBCAPS}
 CONFIRM_NODE: Final = "confirm_save"
 DELETE_CONFIRM_NODE: Final = "confirm_delete"  # iteration 22a
 DELETE_EXECUTE_NODE: Final = "execute_delete"  # iteration 22a
-REPORT_PROMPT: Final = "Reply save to store this report, revise <what to change>, or cancel."
+# live1: the options are capitalised as the user sees them (the reply match is case-blind)
+REPORT_PROMPT: Final = "Reply Save to store this report, Revise <what to change>, or Cancel."
+PARTIAL_REPORT_NOTE: Final = (
+    "Partial analysis: some queries for this report could not be completed, so it covers "
+    "only the results that were retrieved."
+)
 SAVE_DISABLED_TEXT: Final = "Saving reports is turned off right now, so this report was not saved."
 SAVE_FAILED_TEXT: Final = "The report could not be saved; nothing was stored. Please ask again."
 CANCELLED_TEXT: Final = "Cancelled: the report draft was not saved."
@@ -162,7 +235,7 @@ NOT_SAVED_TEXT: Final = "The report draft was not saved."
 REVISING_TEXT: Final = "Revising the report draft (the previous draft was not saved)."
 DELETE_WHILE_PENDING_TEXT: Final = (
     "A report draft is waiting for your answer, so nothing can be deleted now. "
-    "Reply save, revise <what to change>, or cancel first."
+    "Reply Save, Revise <what to change>, or Cancel first."
 )
 NOTHING_TO_SAVE_TEXT: Final = "There is no earlier answer in this session to save as a report."
 CANCELLED_NOTHING_TO_SAVE_TEXT: Final = (
@@ -192,6 +265,23 @@ _SAVE_LAST_RE: Final = re.compile(
     r"^\s*save (?:this|that|the last answer|the answer)(?: as a report)?\s*[.!]?\s*$",
     re.I | re.A,
 )
+# iteration 33 (FR-40, AC-21.15): "retry report" re-runs only the writer and verifier of the
+# session's last failed or unsaved report on its stored ledger; no SQL, bounded attempts.
+RETRY_NODE: Final = "retry_writer"
+RETRY_LIMIT: Final = 3  # retries of one failed report; a new analysis turn resets it
+RETRY_MESSAGE: Final = "retry report"  # the history entry of a retry turn (code-owned text)
+MAX_RETRY_ANALYSIS_CHARS: Final = 6000  # report_writer.MAX_ANALYSIS_CHARS
+RETRY_HINT_TEXT: Final = (
+    "Report could not be generated; the analysis is above. Say *retry report*."
+)
+NO_RETRY_TEXT: Final = (
+    "There is no failed or unsaved report in this session to retry. Ask for a new report."
+)
+RETRY_FAILED_TEXT: Final = (
+    "The report could still not be generated; nothing was saved. You can say *retry report* "
+    "again or ask for a new report."
+)
+_RETRY_RE: Final = re.compile(r"^\s*retry(?: the)? report\s*[.!]?\s*$", re.I | re.A)
 _AES_LENGTHS: Final = (16, 24, 32)
 
 
@@ -286,6 +376,7 @@ class TurnState(TypedDict, total=False):
     outcome: str
     error: bool
     grounding_blocked: bool  # the guard blocked the draft before grounding: finalize refuses
+    fixed_reply: str  # D-156: kind of code-owned static reply this turn shows ("" = none)
     context_message: str  # load_context's message to answer (a resolved clarification merged)
     history: Annotated[list[dict[str, Any]], _append_history]  # {"role", "text", "scope"}
     figures: Annotated[list[dict[str, Any]], merge_figures]
@@ -305,6 +396,13 @@ class TurnState(TypedDict, total=False):
     # iteration 22a: the pending delete (ids, sha256(token), binding fields, step). Not in
     # _TURN_RESET: it lives from the preview turn to the confirmation turn. Never the token.
     pending_action: dict[str, Any]
+    # D-162: sticky aggregate-only mode. Set by the first customer-ranking turn of the session
+    # and never cleared: every later turn runs run_sql in bands-only mode. Not in _TURN_RESET.
+    aggregate_only: bool
+    # iteration 33: the session's last failed or unsaved report (question, analysis, scrubbed
+    # ledger, scope, attempts) that "retry report" re-runs. Not in _TURN_RESET: a later
+    # analysis turn replaces or clears it in finalize; a save clears it.
+    failed_report: dict[str, Any]
 
 
 _TURN_RESET: Final[dict[str, Any]] = {
@@ -322,6 +420,7 @@ _TURN_RESET: Final[dict[str, Any]] = {
     "outcome": "",
     "error": False,
     "grounding_blocked": False,
+    "fixed_reply": "",
     "context_message": "",
     "report": {},  # iteration 17: a draft lives one turn (until confirm_save resolves it)
     "golden_refs": [],  # D-117: retrieved per turn
@@ -344,6 +443,7 @@ class GraphServices:
     sleep: Callable[[float], object] = time.sleep
     jitter: Callable[[float], float] | None = None
     data_window: Callable[[], tuple[date, date]] | None = None
+    today: Callable[[], date] = lambda: datetime.now(UTC).date()  # D-174: the prompt's "Today"
     reports: Any = None  # iteration 17: store.reports.ReportStore; None = saving disabled
     # D-96: brands for the context name check (assemble_context drops an item naming a known
     # brand outside the scope). Offline source until the catalogue query lands (OD-12).
@@ -352,6 +452,13 @@ class GraphServices:
     golden_index: Any = None
     # iteration 22a: delete.flow.DeleteService; None = delete disabled (fail closed)
     delete: Any = None
+    # iteration 39: store.preferences.SQLitePreferenceStore, the per-user source of truth for
+    # preferences and notes (read every turn). None = session memory only.
+    preferences: Any = None
+    # iteration 46 (D-196): the audit log the library agent's rename/export write to (None:
+    # the delete service's log), and the export folder (None: the default exports folder)
+    audit: Any = None
+    export_dir: Path | None = None
 
     def window(self) -> tuple[date, date]:
         if self.data_window is not None:
@@ -387,6 +494,8 @@ class TurnContext:
     forced_label: str | None = None  # iteration 17: "revise" re-runs the turn as a report
     delete_request: Any = None  # iteration 22a: a parsed delete selector routes START -> preview
     delete_turn: int = 0  # iteration 22a: the session's user-turn number (confirm = preview + 1)
+    report_failed: bool = False  # iteration 33: the writer produced no draft on a report turn
+    retry: bool = False  # iteration 33: a "retry report" turn routes START -> retry_writer
 
     def __post_init__(self) -> None:
         self.sql_turn = RunSqlTurn(self.turn_id, sql_counter=self.budget)
@@ -412,7 +521,10 @@ def _new_context(
     services: GraphServices, raw_text: str, session: Session, sql_session: RunSqlSession, tid: str
 ) -> TurnContext:
     s = services.settings
-    budget = TurnBudget(TurnKind.QA, clock=services.clock, role_subcaps=dict(_QA_ROLE_SUBCAPS))
+    budget = TurnBudget(
+        TurnKind.QA, clock=services.clock, role_subcaps=dict(_QA_ROLE_SUBCAPS),
+        time_bounded=not is_local(s),  # D-149: no wall-clock limits for the local provider
+    )  # fmt: skip
     rpm = {m: lim.rpm for m, lim in s.limits.items()}
     limiters = Limiters(rpm, s.limiter_fraction, clock=services.clock, sleep=services.sleep)
     extra = {"jitter": services.jitter} if services.jitter is not None else {}
@@ -468,6 +580,9 @@ def _str_map(obj: Any) -> dict[str, str | None] | None:
 
 _LEDGER_STR: Final = ("sql", "query_id", "sql_hash", "executed_sql_hash")
 _LEDGER_KEYS: Final = frozenset((*_LEDGER_STR, "purpose", "rows"))
+# The model's own statement (shown back instead of the scoped one); optional, so a snapshot
+# written before it was recorded is still valid.
+_LEDGER_OPTIONAL: Final = "model_sql"
 
 
 def _ledger(obj: Any) -> list[dict[str, Any]] | None:
@@ -478,8 +593,9 @@ def _ledger(obj: Any) -> list[dict[str, Any]] | None:
     for e in entries:
         rows = e.get("rows")
         if (
-            set(e) != _LEDGER_KEYS
+            set(e) - {_LEDGER_OPTIONAL} != _LEDGER_KEYS
             or not all(isinstance(e[k], str) for k in _LEDGER_STR)
+            or not isinstance(e.get(_LEDGER_OPTIONAL, ""), str)
             or not (e["purpose"] is None or isinstance(e["purpose"], str))
             or not isinstance(rows, int)
             or isinstance(rows, bool)
@@ -508,6 +624,8 @@ def _restore_ctx(ctx: TurnContext, snap: Any) -> bool:
     b = snap.get("budget")
     if isinstance(b, dict) and b.get("kind") == TurnKind.REPORT.value:
         _promote_report(ctx)  # iteration 17: a report turn resumes under the REPORT caps
+    elif isinstance(b, dict) and b.get("kind") == TurnKind.RETRY_REPORT.value:
+        _switch_budget(ctx, TurnKind.RETRY_REPORT)  # iteration 33: a retry draft resumes
     budget_ok = ctx.budget.restore(b)
     sql = snap.get("sql") if isinstance(snap.get("sql"), dict) else {}
     seen, statements = _str_map(sql.get("seen")), _str_map(sql.get("statements"))
@@ -548,6 +666,8 @@ def _restore_ctx(ctx: TurnContext, snap: Any) -> bool:
         setattr(t, f, sql[f])
     for f in _SQL_COUNTS:
         setattr(t, f, sql[f])
+    if ctx.sql_session.aggregate_only:  # D-162: a resumed turn of a sticky session
+        t.aggregate_only = True
     ctx.tool_names[:] = names
     ctx.new_figures[:] = figures
     ctx.guard_codes |= set(codes)
@@ -560,11 +680,21 @@ def _promote_report(ctx: TurnContext) -> None:
 
     Idempotent. The new budget continues the QA counters (``restore`` never lowers them), the
     start time and the usage records, and replaces the budget everywhere it is referenced."""
+    _switch_budget(ctx, TurnKind.REPORT)
+
+
+def _switch_budget(ctx: TurnContext, kind: TurnKind) -> None:
+    """Switch the turn to the ``kind`` caps (REPORT or RETRY_REPORT) with the report role
+    subcaps, keeping every count. Idempotent. Iteration 33: a retry turn starts as QA (no call
+    yet) and switches to RETRY_REPORT (8 calls, 0 SQL) before the graph runs."""
     old = ctx.budget
-    if old.kind is TurnKind.REPORT:
+    if old.kind is kind:
         return
-    new = TurnBudget(TurnKind.REPORT, clock=old._clock, role_subcaps=dict(_REPORT_ROLE_SUBCAPS))
-    new.restore({**old.snapshot(), "kind": TurnKind.REPORT.value})
+    new = TurnBudget(
+        kind, clock=old._clock, role_subcaps=dict(_REPORT_ROLE_SUBCAPS),
+        time_bounded=old.time_bounded,
+    )  # fmt: skip
+    new.restore({**old.snapshot(), "kind": kind.value})
     new._start = old._start
     new.usage = old.usage
     ctx.budget = ctx.llm.budget = ctx.sql_turn.sql_counter = new
@@ -613,14 +743,34 @@ def _delete_spans(ctx: TurnContext, st: Any, pid: object) -> None:
                 message=delete_flow.UNSAFE_TEXT)  # fmt: skip
 
 
+def _turn_detector(ctx: TurnContext) -> Any:
+    """D-153: the PII detector for this turn, with the session's scope brands allowlisted
+    (an all-products scope uses the known brands). A brand in scope is never masked as a
+    person; a duck-typed detector without ``with_brands`` (tests) is used as is."""
+    base = ctx.services.detector
+    extend = getattr(base, "with_brands", None)
+    if base is None or extend is None:
+        return base
+    scope = ctx.sql_session.scope
+    brands = ctx.services.known_brands if scope.all_products else scope.brands
+    return extend(tuple(brands or ()))
+
+
 def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, Any]]]:
     sv = ctx.services
     settings = sv.settings
 
     def input_guard(state: TurnState) -> dict[str, Any]:
-        decision = check_input(ctx.raw_text, detector=sv.detector)
+        decision = check_input(ctx.raw_text, detector=_turn_detector(ctx))
         if not decision.allowed or decision.scrubbed is None:
             _record(ctx, "guard", "input", verdict="refuse", rule=decision.rule)
+            if decision.rule == NON_ENGLISH and decision.scrubbed and not ctx.forced_label:
+                # D-236: a non-English message that is ONLY a standing format/depth/charts
+                # preference ("отвечай таблицами") is saved; every other rule ran first and
+                # found nothing. Notes and mixed messages keep the English-only refusal.
+                pref = _nl_preference_only(ctx, decision.scrubbed)
+                if pref is not None:
+                    return pref
             text = decision.refusal or REFUSAL_TEXT
             return {"route": "refuse", "final_text": text, "outcome": "refused", "label": "refused"}
         ctx.notice = decision.pii_notice
@@ -628,6 +778,11 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
             "message": decision.scrubbed,
             "pii_notice": decision.pii_notice or "",
         }
+        # D-162: once a turn of this session was a customer ranking, every later turn stays
+        # aggregate-only (no reset within the session; a new session starts clear).
+        sticky = bool(state.get("aggregate_only")) or ctx.sql_session.aggregate_only
+        if sticky:
+            ctx.sql_session.aggregate_only = ctx.sql_turn.aggregate_only = True
         model, fb = model_ids_from_settings(settings, "router")
         prev = _previous_user(state, ctx.sql_session.scope)
         rd = route(
@@ -635,22 +790,66 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
             llm=ctx.llm, model=model, invoke=sv.router_invoke, fallback_model=fb, tracer=ctx.tracer,
         )  # fmt: skip
         update.update(label=rd.label, route=rd.route, is_english=rd.is_english)
+        refusal: str | None = None
         if ctx.forced_label and rd.route != "refuse":  # iteration 17: "revise" stays a report
             update.update(label=ctx.forced_label, route="full")
-        if rd.route == "refuse":
-            update.update(final_text=rd.refusal_text or REFUSAL_TEXT, outcome="refused")
+        elif rd.route != "refuse" and is_sql_request(decision.scrubbed):
+            # D-151a: "show me the SQL" never shows SQL; the light path gives the code-owned
+            # reply that describes the data used in business words (no analyst, no query).
+            update.update(label="meta", route="light")
+            _record(ctx, "router", "intent", label="meta", route="light", sql_request=True)
+        elif rd.label in CUSTOMER_OVERRIDE_LABELS and is_customer_ranking_request(
+            decision.scrubbed
+        ):
+            # D-157: "who are our top 10 customers by spend?" is a data question, answered with
+            # spend bands (D-159, below); the SQL policy and the output guard block direct
+            # identifiers whatever the label.
+            if asks_for_customer_pii(decision.scrubbed):
+                update.update(label=rd.label, route="refuse")
+                refusal = REFUSALS[PII_REQUEST]
+                _record(ctx, "router", "intent", label=rd.label, override="customer_pii")
+            else:
+                update.update(label="simple", route="full")
+                _record(ctx, "router", "intent", label="simple", route="full",
+                        override="customer_ranking")  # fmt: skip
+        if update["route"] == "full" and is_customer_ranking_request(decision.scrubbed):
+            # D-159: a customer ranking, whatever the label, is answered with spend bands and
+            # customer counts only. run_sql refuses id-grain queries for the rest of the turn.
+            ctx.sql_turn.aggregate_only = True
+            ctx.sql_session.aggregate_only = True  # D-162: sticky for the rest of the session
+            update["aggregate_only"] = True
+            ctx.notice = ctx.notice or CUSTOMER_BANDS_NOTICE
+        elif sticky and update["route"] == "full" and mentions_customers(decision.scrubbed):
+            # D-162: a follow-up about customers ("show their IDs") is still answered in bands
+            ctx.notice = ctx.notice or CUSTOMER_BANDS_NOTICE
+        if update["route"] == "refuse":
+            update.update(final_text=refusal or rd.refusal_text or REFUSAL_TEXT, outcome="refused")
+        elif not ctx.forced_label:
+            _nl_preference(ctx, decision.scrubbed, update)
         return update
 
     def light(state: TurnState) -> dict[str, Any]:
         model, fb = model_ids_from_settings(settings, "light_path")
+        static_reply = None
+        if is_sql_request(state["message"]):  # D-151a: describe the in-scope prior queries
+            scope = ctx.sql_session.scope
+            sqls = [
+                e["sql"] for e in state.get("prior_ledger") or []
+                if isinstance(e.get("sql"), str) and covers(scope, e.get("scope"))
+            ][-MAX_DESCRIBED_QUERIES:]  # fmt: skip
+            static_reply = sql_request_reply(sqls)
         res = run_light_path(
             UserTurn(state["message"]), state["label"], profile=ctx.profile, persona=ctx.persona,
             llm=ctx.llm, model=model, invoke=sv.router_invoke, fallback_model=fb,
-            tool_calls=tuple(ctx.tool_names), detector=sv.detector, tracer=ctx.tracer,
+            tool_calls=tuple(ctx.tool_names), detector=_turn_detector(ctx), tracer=ctx.tracer,
+            static_reply=static_reply,
         )  # fmt: skip
         ctx.guard_codes |= set(res.guard_codes)
         outcome = "blocked" if res.source == "blocked" else "answered"
-        return {"final_text": res.text, "outcome": outcome, "role": "light_path"}
+        update = {"final_text": res.text, "outcome": outcome, "role": "light_path"}
+        if res.source in ("static", "template"):  # D-156: flag the code-owned reply in history
+            update["fixed_reply"] = fixed_kind(res.text) or res.source
+        return update
 
     def load_context(state: TurnState) -> dict[str, Any]:
         if state.get("label") == "report":
@@ -682,6 +881,12 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
             # R2-M1: "1" after a clarification is routed light by the router, but it completes
             # an analytic question. The original label is unknown: fail-open label (Deep).
             update.update(route="full", label="complex")
+        elif _is_comment(state, a):
+            # D-152/D-155: a statement about the previous answer ("so it is worth promoting",
+            # router label `comment`) gets one brief reply from that answer, not an analyst
+            # loop. With no previous answer the route stays light (static fallback text).
+            update.update(status="comment", route="full")
+            _record(ctx, "router", "intent", label=state.get("label"), route="comment")
         return update
 
     def _assemble(
@@ -695,7 +900,7 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
             summary=state.get("history_summary") or None,
             prior_ledger=state.get("prior_ledger") or [],
             store_items=golden,  # D-117 Golden examples; seam: saved report bodies (19)
-            memory=SessionMemory.from_state(state.get("memory")),
+            memory=_with_stored_preferences(ctx, SessionMemory.from_state(state.get("memory"))),
             known_brands=sv.known_brands,  # D-96
         )
 
@@ -733,19 +938,48 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
 
     def _analyst(role: str, state: TurnState) -> dict[str, Any]:
         lo, hi = sv.window()
+        today = sv.today().isoformat()
         a = _assembled(state)  # iteration 15: scope-filtered, fenced context (FR-76)
-        system = build_system_prompt(
-            role, scope_label=ctx.profile.scope_label, persona=ctx.persona,
-            window=(lo.isoformat(), hi.isoformat()),
-            prior_queries=ctx.sql_turn.ledger if role == DEEP else (),
-            context_section=a.prompt_section(),
-        )  # fmt: skip
-        messages = [
-            {"role": "system", "content": system},
-            *a.history,
-            {"role": "user", "content": a.message},
-        ]
-        res = run_analyst(role, _deps(), messages)
+        tables = schema_section(sv.cache)  # metadata cache only: no query, no bytes
+
+        def messages(extra: tuple[tuple[str, str], ...] = ()) -> list[dict[str, Any]]:
+            system = build_system_prompt(
+                role, scope_label=ctx.profile.scope_label, persona=ctx.persona,
+                window=(lo.isoformat(), hi.isoformat()),
+                prior_queries=ctx.sql_turn.ledger if role == DEEP else (),
+                context_section=a.prompt_section(), extra_rules=extra, tables=tables,
+                today=today, preferences=render_preferences(a.memory),
+            )  # fmt: skip
+            return [
+                {"role": "system", "content": system},
+                *a.history,
+                {"role": "user", "content": a.message},
+            ]
+
+        ranking = ctx.sql_turn.aggregate_only  # D-159: a customer-ranking turn
+        bands = ((CUSTOMER_BANDS_SECTION, CUSTOMER_BANDS_RULE),) if ranking else ()
+        res = run_analyst(role, _deps(), messages(bands))
+        if bands and res.status == "ok" and mentions_customer_id(res.output):
+            # D-159: a ranking answer that names customers by ID is never shown. One bounded
+            # retry with the bands rule; a second one goes to the force-answer fallback.
+            _record(ctx, "guard", "customer_id", verdict="retry", role=role,
+                    rule_hits=[CUSTOMER_ID_REJECTED])  # fmt: skip
+            res = run_analyst(role, _deps(), messages((*bands, ("Retry", CUSTOMER_BANDS_RULE))))
+            if res.status == "ok" and mentions_customer_id(res.output):
+                _record(ctx, "guard", "customer_id", verdict="block", role=role,
+                        rule_hits=[CUSTOMER_ID_REJECTED])  # fmt: skip
+                return {"status": "partial", "draft": "", "error_class": CUSTOMER_ID_ERROR_CLASS,
+                        "role": role}  # fmt: skip
+        if res.status == "ok" and _is_echo(state, res.output):
+            # D-156: the answer repeats an earlier reply. One bounded retry with a corrective
+            # rule; a second echo goes to the force-answer fallback and is never shown.
+            _record(ctx, "guard", "echo", verdict="retry", role=role, rule_hits=[ECHO_REJECTED])
+            res = run_analyst(role, _deps(), messages((*bands, ("Retry", ECHO_RETRY_RULE))))
+            if res.status == "ok" and _is_echo(state, res.output):
+                _record(ctx, "guard", "echo", verdict="block", role=role,
+                        rule_hits=[ECHO_REJECTED])  # fmt: skip
+                return {"status": "partial", "draft": "", "error_class": ECHO_ERROR_CLASS,
+                        "role": role}  # fmt: skip
         return {
             "status": res.status,
             "draft": res.output,
@@ -756,8 +990,13 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
     def force_answer(state: TurnState) -> dict[str, Any]:
         if state.get("status") == "ok":
             return {}
-        text = _force_text(ctx, state)
-        return {"draft": text, "role": FORCE_ANSWER_ROLE, "status": "partial"}
+        comment = state.get("status") == "comment"
+        # D-156: after an echo the earlier answer is not offered again (it was what got copied)
+        echoed = state.get("error_class") == ECHO_ERROR_CLASS
+        previous = "" if echoed else _previous_answer(_assembled(state))
+        text = _force_text(ctx, state, previous, comment=comment)
+        status = "comment" if comment else "partial"
+        return {"draft": text, "role": FORCE_ANSWER_ROLE, "status": status}
 
     def grounding(state: TurnState) -> dict[str, Any]:
         scope = ctx.sql_session.scope
@@ -787,19 +1026,58 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
     def report_writer(state: TurnState) -> dict[str, Any]:
         # A report needs a grounded analysis that ran SQL; otherwise finalize shows the
         # analysis answer as before (nothing to confirm, nothing saved).
+        # live1: a partial analysis (the analyst gave up after some queries succeeded) still
+        # gets a report draft over what it found, with a code-owned note saying so; a blocked,
+        # comment, customer-ID or echo outcome never does.
         ledger = [dict(e) for e in ctx.sql_turn.ledger]
-        if not ledger or state.get("status") != "ok" or state.get("grounding_blocked"):
+        status = state.get("status")
+        if (
+            not ledger
+            or status not in ("ok", "partial")
+            or state.get("grounding_blocked")
+            or not str(state.get("draft") or "").strip()
+            or state.get("error_class") in (CUSTOMER_ID_ERROR_CLASS, ECHO_ERROR_CLASS)
+        ):
             return {}
         scope = ctx.sql_session.scope
         figures = merge_figures(scoped_figures(state.get("figures"), scope), ctx.new_figures)
         rep = _build_report(
             ctx, question=state.get("context_message") or state.get("message", ""),
             analysis=state.get("draft", ""), ledger=ledger, figures=figures,
+            extra_notes=(PARTIAL_REPORT_NOTE,) if status == "partial" else (),
         )  # fmt: skip
         if rep is None:
+            ctx.report_failed = True  # iteration 33: finalize offers "retry report"
             return {}
         text = f"{rep['markdown']}\n\n{REPORT_PROMPT}"
         return {"report": rep, "route": "report", "final_text": text, "outcome": "report_pending"}
+
+    def retry_writer(state: TurnState) -> dict[str, Any]:
+        # Iteration 33 (FR-40, AC-21.15): only code routes here ("retry report", checked in
+        # AgentGraph._run). Writer + verifier + output guard on the stored scrubbed ledger of
+        # the session's last failed or unsaved report; no analyst, no run_sql (0 SQL cap).
+        scope = ctx.sql_session.scope
+        marker = _retry_marker(state.get("failed_report"), scope)
+        if marker is None:  # re-checked: _run validated it, but state is the source of truth
+            return {"route": "retry", "label": "report", "final_text": NO_RETRY_TEXT,
+                    "outcome": "refused"}  # fmt: skip
+        attempts = marker["attempts"] + 1
+        kept = {**marker, "attempts": attempts}
+        _record(ctx, "role", RETRY_NODE, agent=RETRY_NODE, retries=attempts, sql=0)
+        memory = _with_stored_preferences(ctx, SessionMemory.from_state(state.get("memory")))
+        rep = _build_report(
+            ctx, question=marker["question"], analysis=marker["analysis"],
+            ledger=[dict(e) for e in marker["ledger"]],
+            figures=scoped_figures(state.get("figures"), scope),
+            extra_notes=(PARTIAL_REPORT_NOTE,) if marker["partial"] else (),
+            preferences=render_preferences(memory),
+        )  # fmt: skip
+        if rep is None:
+            return {"route": "retry", "label": "report", "final_text": RETRY_FAILED_TEXT,
+                    "outcome": "report_failed", "failed_report": kept}  # fmt: skip
+        text = f"{rep['markdown']}\n\n{REPORT_PROMPT}"
+        return {"report": rep, "route": "report", "label": "report", "final_text": text,
+                "outcome": "report_pending", "failed_report": kept}  # fmt: skip
 
     def confirm_save(state: TurnState) -> dict[str, Any]:
         # Re-runs from the top on resume (LangGraph), so everything before interrupt() is
@@ -819,6 +1097,44 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
         if decision == "revise":
             return {"final_text": REVISING_TEXT, "outcome": "report_cancelled"}
         return {"final_text": CANCELLED_TEXT, "outcome": "report_cancelled"}
+
+    # --- iteration 46: library agent (saved reports and preferences; no SQL tools) ----------
+
+    def library(state: TurnState) -> dict[str, Any]:
+        a = _assembled(state)
+        message = state["message"]  # the scrubbed text: never the raw input
+
+        def request_delete(req: delete_flow.DeleteRequest) -> None:
+            ctx.delete_request = req  # D-197: only previews; the user's next turn confirms
+
+        audit = sv.audit if sv.audit is not None else getattr(sv.delete, "audit", None)
+        executors = make_library_executors(
+            store=sv.reports, audit=audit, owner=ctx.profile.user_id,
+            scope=ctx.sql_session.scope, session_id=ctx.session_id, turn_id=ctx.turn_id,
+            user_message=message, tools_used=lambda: list(ctx.tool_names),
+            pending=state.get("pending_action") or None,
+            request_delete=request_delete if sv.delete is not None and ctx.can_confirm else None,
+            preferences=sv.preferences, scope_snapshot=snapshot_of(ctx.sql_session.scope),
+            detector=_turn_detector(ctx), export_dir=sv.export_dir, tracer=ctx.tracer,
+        )  # fmt: skip
+        deps = AnalystDeps(
+            llm=ctx.llm, invoke=sv.analyst_invoke, executors=executors,
+            models={LIBRARY_ROLE: model_ids_from_settings(settings, LIBRARY_ROLE)},
+            tracer=ctx.tracer, on_tool_name=lambda name: _tool_requested(ctx, name),
+        )  # fmt: skip
+        system = build_library_prompt(
+            scope_label=ctx.profile.scope_label, persona=ctx.persona,
+            context_section=a.prompt_section(), preferences=render_preferences(a.memory),
+        )  # fmt: skip
+        messages = [{"role": "system", "content": system}, *a.history,
+                    {"role": "user", "content": a.message}]  # fmt: skip
+        res = run_library_agent(deps, messages)
+        if ctx.delete_request is not None:  # delete_preview shows the preview and pauses
+            return {"status": "ok", "draft": "", "role": LIBRARY_ROLE}
+        if res.status != "ok" or not res.output:  # D-198: a template, never an analyst
+            return {"route": "library", "final_text": LIBRARY_UNAVAILABLE_TEXT,
+                    "outcome": "error", "role": LIBRARY_ROLE}  # fmt: skip
+        return {"status": "ok", "draft": res.output, "error_class": "", "role": LIBRARY_ROLE}
 
     # --- iteration 22a: two-phase delete (preview -> interrupt -> confirm -> execute) -------
 
@@ -880,7 +1196,9 @@ def _make_nodes(ctx: TurnContext) -> dict[str, Callable[[TurnState], dict[str, A
         "force_answer": force_answer,
         "grounding": grounding,
         "report_writer": report_writer,  # iteration 17
+        RETRY_NODE: retry_writer,  # iteration 33
         CONFIRM_NODE: confirm_save,  # iteration 17
+        "library": library,  # iteration 46
         "delete_preview": delete_preview,  # iteration 22a
         DELETE_CONFIRM_NODE: confirm_delete,
         DELETE_EXECUTE_NODE: execute_delete,
@@ -932,13 +1250,89 @@ def _golden_from_refs(ctx: TurnContext, refs: Any) -> list[StoreItem]:
 # --- iteration 17: report helpers ----------------------------------------------------------------
 
 
-def _report_guard(ctx: TurnContext, text: str):
-    """The output guard for a report body (the writer calls no tools: ``tool_calls=()``)."""
+_KNOWN_HEADINGS: Final = frozenset((*REQUIRED_SECTIONS, "Verification notes"))
+_LABEL_PREFIXES: Final = ("Scope: ", "Data window: ")
+_MAX_GUARD_LINES: Final = 400  # a rendered body is far shorter (MAX_ITEMS per section)
+
+
+def _guard_text(ctx: TurnContext, text: str) -> OutputVerdict:
     return check_output(
         text, role=WRITER_ROLE, label="report", tool_calls=(),
         protected_snippets=analyst_protected_snippets(ctx.persona),
-        detector=ctx.services.detector,
+        detector=_turn_detector(ctx),
     )  # fmt: skip
+
+
+def _split_owned(line: str) -> tuple[str, str]:
+    """(code-owned prefix, guarded content) of one rendered body line."""
+    if line.startswith("## ") and line[3:].strip() in _KNOWN_HEADINGS:
+        return line, ""
+    if line.startswith("# "):
+        return "# ", line[2:]
+    for prefix in _LABEL_PREFIXES:
+        if line.startswith(prefix):
+            return prefix, line[len(prefix) :]
+    return "", line
+
+
+def _report_guard(ctx: TurnContext, text: str) -> OutputVerdict:
+    """The output guard for a report body (the writer calls no tools: ``tool_calls=()``).
+
+    live1: the structure is code-owned, so only the content is guarded. The heading lines and
+    the "# ", "Scope: " and "Data window: " labels are kept as rendered and never shown to the
+    NER: a live model masked "Data" of "Data window" as a person, the body then lacked a
+    required section and every report was refused. Every content line (title and label
+    values included) still goes through the full guard; a block anywhere blocks the body."""
+    if not isinstance(text, str) or not text.strip():
+        return _guard_text(ctx, text)
+    if text.strip() in _KNOWN_HEADINGS:  # the store re-guards each section name
+        return OutputVerdict(True, text, ())
+    lines = text.split("\n")
+    if len(lines) > _MAX_GUARD_LINES:
+        return _guard_text(ctx, text)
+    parts = [_split_owned(line) for line in lines]
+    if not any(prefix for prefix, _ in parts):
+        return _guard_text(ctx, text)
+    verdict = _guard_text(ctx, "\n".join(content for _, content in parts))
+    if not verdict.allowed:
+        return verdict
+    events = list(verdict.events)
+    guarded = verdict.text.split("\n")
+    if len(guarded) != len(parts):  # the guard changed the line count: guard line by line
+        guarded, events = [], []
+        for _, content in parts:
+            if not content.strip():
+                guarded.append(content)
+                continue
+            v = _guard_text(ctx, content)
+            if not v.allowed:
+                return v
+            guarded.append(" ".join(v.text.split()))
+            events.extend(v.events)
+    out: list[str] = []
+    for (prefix, _), content in zip(parts, guarded, strict=True):
+        if prefix in _LABEL_PREFIXES and not content.strip():
+            content = "(not set)"
+        elif prefix == "# " and not content.strip():
+            content = "Report"
+        out.append(prefix if prefix.startswith("## ") else prefix + content)
+    return OutputVerdict(True, "\n".join(out), tuple(events))
+
+
+def _with_stored_preferences(ctx: TurnContext, memory: SessionMemory) -> SessionMemory:
+    """Iteration 39: the user's stored preferences and notes replace the session's (the store
+    is the source of truth, so a ``/prefs`` change applies from the next turn and in new
+    sessions). A read failure gives no preferences and no notes (fail closed); the turn goes on.
+    Restatements and a pending clarification stay session-only."""
+    store = ctx.services.preferences
+    if store is None:
+        return memory
+    try:
+        stored = store.load(ctx.profile.user_id)
+    except Exception as exc:  # store unavailable: answer without preferences
+        logger.error("preference load failed: %s", type(exc).__name__)
+        stored = SessionMemory()
+    return replace(memory, preferences=dict(stored.preferences), notes=stored.notes)
 
 
 def _build_report(
@@ -948,16 +1342,22 @@ def _build_report(
     analysis: str,
     ledger: list[dict[str, Any]],
     figures: list[dict[str, Any]],
+    extra_notes: tuple[str, ...] = (),
+    preferences: str | None = None,
 ) -> dict[str, Any] | None:
     """Writer + verifier (bounded, budgeted), then the output guard on the rendered body.
-    None when no draft passes: the caller falls back to the analysis answer; nothing is saved."""
+    None when no draft passes: the caller falls back to the analysis answer; nothing is saved.
+    ``preferences`` overrides the rendered preferences of load_context (a retry has none)."""
     sv = ctx.services
+    if preferences is None:
+        preferences = render_preferences(ctx.assembled.memory) if ctx.assembled else ""
     res = produce_report(
         question=question, analysis=analysis, sql_ledger=ledger, figures=figures,
         scope_label=ctx.profile.scope_label, window=sv.window(), llm=ctx.llm,
         invoke=sv.analyst_invoke,
         models={r: model_ids_from_settings(sv.settings, r) for r in (WRITER_ROLE, VERIFIER_ROLE)},
-        persona=ctx.persona, deadline_hit=ctx.budget.deadline_hit,
+        persona=ctx.persona, deadline_hit=ctx.budget.deadline_hit, extra_notes=extra_notes,
+        preferences=preferences,
     )  # fmt: skip
     if not res.ok or res.draft is None:
         _record(ctx, "guard", "report", verdict="no_draft")
@@ -1044,7 +1444,7 @@ def _store_report(
         logger.error("report save failed: %s", type(exc).__name__)
         return {"final_text": SAVE_FAILED_TEXT, "outcome": "report_unsaved"}
     verb = "Saved" if created else "Already saved"
-    text = f'{verb} report "{rec.title}" (id {rec.report_id}).'
+    text = f'{verb} report "{rec.title}" (id {display_id(rec.report_id)}).'
     return {"final_text": text, "outcome": "report_saved"}
 
 
@@ -1076,22 +1476,95 @@ def _collect_figures(ctx: TurnContext, name: str, env: dict[str, Any]) -> None:
     ctx.new_figures.append(extract_figures(str(data.get("query_id", "")), names, matrix))
 
 
-def _force_text(ctx: TurnContext, state: TurnState) -> str:
-    """One bounded force_answer LLM call; the deterministic template when it is not possible."""
+def _is_comment(state: TurnState, a: AssembledContext) -> bool:
+    """D-152/D-155: a turn the router labelled ``comment`` that follows an earlier answer in
+    the (scope-covered) history. A first message never qualifies: there is nothing to comment
+    on, so the light path gives the static :data:`COMMENT_FALLBACK_TEXT`."""
+    return (
+        state.get("label") == "comment"
+        and state.get("route") == "light"
+        and not a.resolved_clarification
+        and _previous_answer(a) != ""
+    )
+
+
+def _has_answer_history(state: TurnState) -> bool:
+    """True when the session history holds an assistant message (cheap pre-check; the
+    scope filter and the D-156 marker check run in load_context)."""
+    return any(
+        isinstance(m, Mapping) and m.get("role") == "assistant" for m in state.get("history") or []
+    )
+
+
+def _previous_answer(a: AssembledContext) -> str:
+    """The latest assistant answer in the assembled (scope-filtered) history, trimmed.
+    A code-owned static reply (a D-156 marker) is not an answer and is skipped."""
+    for m in reversed(a.history):
+        content = str(m.get("content") or "").strip()
+        if m.get("role") == "assistant" and content and not is_marker(content):
+            return content[:MAX_PREVIOUS_ANSWER_CHARS]
+    return ""
+
+
+def _earlier_answers(state: TurnState, message: str) -> list[str]:
+    """D-156: earlier assistant answers the current answer must not repeat. An answer to the
+    same question (asked again) is left out: repeating it is correct, not an echo."""
+    history = list(state.get("history") or [])[-MAX_HISTORY_MESSAGES:]
+    current = normalise_echo(message)
+    out: list[str] = []
+    asked = ""
+    for m in history:
+        text = str(m.get("text") or "")
+        if m.get("role") == "user":
+            asked = normalise_echo(text)
+        elif m.get("role") == "assistant" and text.strip() and asked != current:
+            out.append(text)
+    return out
+
+
+def _is_echo(state: TurnState, answer: str) -> bool:
+    if contains_marker(answer):  # it quotes the stand-in for a code-owned reply
+        return True
+    message = state.get("context_message") or state.get("message") or ""
+    return is_echo(answer, _earlier_answers(state, message), static_texts())
+
+
+def _force_text(
+    ctx: TurnContext, state: TurnState, previous: str = "", *, comment: bool = False
+) -> str:
+    """One bounded force_answer LLM call; the deterministic template when it is not possible.
+
+    ``previous`` is the latest earlier answer (D-152): the force answer and the comment reply
+    see it, so a follow-up cut short can still build on what was already said."""
     ledger = ctx.sql_turn.ledger
     summary = "\n".join(f"- {q.get('purpose', '')} ({q.get('rows', 0)} rows)" for q in ledger)
-    template = UNAVAILABLE_TEXT + (f"\n\nQueries run:\n{summary}" if summary else "")
-    fa = ctx.budget.force_answer(None, state.get("error_class") or "role_failed")
+    if comment:
+        template = COMMENT_FALLBACK_TEXT
+    elif summary:
+        template = f"{UNAVAILABLE_TEXT}\n\nQueries run:\n{summary}"
+    else:
+        template = PARTIAL_WITH_CONTEXT_TEXT if previous else UNAVAILABLE_TEXT
+    if not comment and not ledger:
+        # No query ran this turn: the model has nothing to report and writes a promise
+        # ("I'll get those figures") that grounding cannot catch, so the template is shown.
+        return template
+    reason ="comment" if comment else state.get("error_class") or "role_failed"
+    fa = ctx.budget.force_answer(None, reason)
     if fa.template_only:
         return template
     sv = ctx.services
     model, fb = model_ids_from_settings(sv.settings, "fallback")
-    system = assemble_prompt(
-        [("Force answer", _FORCE_RULES), ("Queries", summary or "(none)")], ctx.persona
-    )
+    sections = [("Comment reply", _COMMENT_RULES)] if comment else [("Force answer", _FORCE_RULES)]
+    sections.append((PLAIN_LANGUAGE_SECTION, PLAIN_LANGUAGE_RULE))  # D-151
+    if not comment:
+        sections.append(("Queries", summary or "(none)"))
+    system = assemble_prompt(sections, ctx.persona)
+    # The previous answer is the agent's own earlier (guarded) output; it goes as an assistant
+    # message, like history, so the user's text stays the last, untrusted message.
     messages = [
         {"role": "system", "content": system},
-        {"role": "user", "content": state["message"]},
+        *([{"role": "assistant", "content": previous}] if previous else []),
+        {"role": "user", "content": state.get("context_message") or state["message"]},
     ]
     res = ctx.llm.call(
         FORCE_ANSWER_ROLE, model, lambda t: sv.analyst_invoke(model, messages, [], t),
@@ -1101,7 +1574,16 @@ def _force_text(ctx: TurnContext, state: TurnState) -> str:
         value = res.response.value
         text = value.text if isinstance(value, ModelTurn) else value
         if isinstance(text, str) and text.strip() and not getattr(value, "tool_calls", ()):
-            return text.strip()
+            if ctx.sql_turn.aggregate_only and mentions_customer_id(text):
+                # D-159: a ranking turn never shows customer IDs: the template is shown instead
+                _record(ctx, "guard", "customer_id", verdict="block", role=FORCE_ANSWER_ROLE,
+                        rule_hits=[CUSTOMER_ID_REJECTED])  # fmt: skip
+                return template
+            if not _is_echo(state, text):
+                return text.strip()
+            # D-156: a reply that repeats an earlier one is never shown: the template is
+            _record(ctx, "guard", "echo", verdict="block", role=FORCE_ANSWER_ROLE,
+                    rule_hits=[ECHO_REJECTED])  # fmt: skip
     return template
 
 
@@ -1117,19 +1599,93 @@ def _checked_tools(ctx: TurnContext, role: str) -> tuple[str, ...]:
 def _guard(ctx: TurnContext, state: TurnState, draft: str):
     role = state.get("role") or FORCE_ANSWER_ROLE
     label = state.get("label", "")
-    eff_label = "complex" if label in ("report", "library") else label  # TODO 14b/15/17
+    eff_label = "complex" if label == "report" else label  # report: the analyst answers
+    snippets = (
+        library_protected_snippets(ctx.persona) if role == LIBRARY_ROLE
+        else analyst_protected_snippets(ctx.persona)
+    )  # fmt: skip
     return check_output(
         draft, role=role, label=eff_label,
         tool_calls=_checked_tools(ctx, role),
-        protected_snippets=analyst_protected_snippets(ctx.persona),
-        detector=ctx.services.detector,
+        protected_snippets=snippets,
+        detector=_turn_detector(ctx),
     )  # fmt: skip
+
+
+def _assumptions(ctx: TurnContext, state: TurnState, text: str) -> str:
+    """The scope and definitions footer an allowed data answer is missing (live eval 1).
+
+    Only for answers built on data (a query ran this turn, or follow-up context from an
+    earlier one); never for a comment reply or a code-owned template."""
+    if state.get("status") == "comment" or state.get("label") in ("comment", "library"):
+        return ""
+    if not (ctx.sql_turn.ledger or state.get("prior_ledger")) or fixed_kind(text):
+        return ""
+    memory = SessionMemory.from_state(state.get("memory"))
+    return assumptions_footer(
+        text, state.get("message") or "",
+        brands=ctx.profile.brands, all_products=ctx.profile.all_products,
+        churn_restated=memory.churn_definition is not None,
+    )  # fmt: skip
+
+
+def _nl_preference(
+    ctx: TurnContext, message: str, update: dict[str, Any], *, detected: Any = None
+) -> None:
+    """Iteration 39b (D-235..D-238): a standing preference stated in the user's own message
+    of this turn ("from now on answer in tables", "отвечай кратко") is saved through the
+    ``/prefs`` code path. A message that is only a preference gets the code-owned
+    confirmation (route ``preference``, no LLM answer); a message that also asks a data
+    question keeps its route and the confirmation becomes the turn notice (D-237). The
+    graph reloads the store in ``load_context``, so the preference shapes this answer too."""
+    detected = detected or detect_preference(message)
+    if detected is None:
+        return
+    text, saved, rejected = apply_nl_preference(
+        detected, store=ctx.services.preferences, user_id=ctx.profile.user_id,
+        scope=ctx.sql_session.scope, tracer=ctx.tracer,
+    )  # fmt: skip
+    # the /prefs "tool" span (apply_nl_preference) carries the outcome; this one the route
+    _record(ctx, "router", "intent", label="preference",
+            route="notice" if detected.mixed else "preference")  # fmt: skip
+    if detected.mixed:
+        ctx.notice = f"{ctx.notice}\n{text}" if ctx.notice else text
+        return
+    update.update(label="preference", route="preference", final_text=text,
+                  outcome="refused" if rejected and not saved else "answered")  # fmt: skip
+
+
+def _nl_preference_only(ctx: TurnContext, message: str) -> dict[str, Any] | None:
+    """D-236: the enum-only preference of a message the English-only rule refused, or None.
+    No free text of such a message is ever stored (no notes), and no model sees it.
+
+    The heuristic name detector can mask a Russian verb pair as a name ("показывай минимум
+    10 строк"), so the raw text is checked too. That is safe: only allowlisted enum or
+    bounded-int values are stored, never text, and the update keeps the scrubbed message."""
+
+    def _enum_only(text: str) -> Any:
+        got = detect_preference(text)
+        ok = got is not None and not got.mixed and not got.notes and got.settings
+        return got if ok else None
+
+    detected = _enum_only(message) or _enum_only(str(ctx.raw_text or ""))
+    if detected is None:
+        return None
+    update: dict[str, Any] = {"message": message, "pii_notice": ""}
+    _nl_preference(ctx, message, update, detected=detected)
+    return update
+
+
+# routes whose final_text is code-owned and shown as is (iteration 46: the library failure)
+_TEXT_ROUTES: Final = (
+    "refuse", "light", "clarify", "report", "delete", "retry", "library", "preference",
+)  # fmt: skip
 
 
 def _finalize(ctx: TurnContext, state: TurnState) -> dict[str, Any]:
     label = state.get("label", "")
     update: dict[str, Any] = {}
-    if state.get("route") in ("refuse", "light", "clarify", "report", "delete"):
+    if state.get("route") in _TEXT_ROUTES:
         text = state.get("final_text", "")
         if not text:  # e.g. a resumed state without the light/refusal/clarify text: fail closed
             text, update["outcome"] = ERROR_TEXT, "error"
@@ -1142,9 +1698,29 @@ def _finalize(ctx: TurnContext, state: TurnState) -> dict[str, Any]:
     else:
         verdict = _guard(ctx, state, state.get("draft", ""))
         codes = set(verdict.codes())
-        ctx.guard_codes |= codes
         text = verdict.text if verdict.text else REFUSAL_TEXT
+        if verdict.allowed and verdict.text:
+            # D-151: plain-language rewrite of the allowed answer (analyst or force answer).
+            # It runs after the guard, so the guard judged the model's own words, and it only
+            # swaps identifiers for business words: no digit, URL or PII can be introduced.
+            # D-151a: SQL is removed first, so the rewrite never turns it into prose.
+            text = strip_sql(verdict.text)
+            if text != verdict.text:
+                codes.add(SQL_STRIPPED)
+            humanized = humanize_identifiers(text)
+            if humanized != text:
+                codes.add(SCHEMA_TERMS_REWRITTEN)
+            text = humanized
+            footer = _assumptions(ctx, state, text)
+            if footer:
+                text = f"{text.rstrip()}\n\n{footer}"
+                codes.add(ASSUMPTIONS_ADDED)
+        ctx.guard_codes |= codes
         update["outcome"] = "answered" if verdict.allowed else "blocked"
+        if ctx.report_failed and verdict.allowed:  # iteration 33: the analysis stays shown
+            if ctx.can_confirm:  # a retry needs the session checkpoint for its marker
+                text = f"{text.rstrip()}\n\n{RETRY_HINT_TEXT}"
+            update["outcome"] = "report_failed"
         _record(ctx, "guard", "output", verdict="allow" if verdict.allowed else "block",
                 rule_hits=sorted(codes))  # fmt: skip
     outcome = update.get("outcome") or state.get("outcome") or "answered"
@@ -1154,6 +1730,11 @@ def _finalize(ctx: TurnContext, state: TurnState) -> dict[str, Any]:
             llm_calls_total=ctx.budget.calls, sql_queries_total=ctx.budget.sql_queries,
             **ctx.persona.trace_fields,
         )  # fmt: skip
+    # D-151a: no route shows SQL (light, clarify, report and resumed text included).
+    stripped = strip_sql(text)
+    if stripped != text:
+        ctx.guard_codes.add(SQL_STRIPPED)
+        text = stripped
     update["final_text"] = text
     update["outcome"] = outcome
     if state.get("route") != "clarify" and state.get("memory"):
@@ -1164,15 +1745,75 @@ def _finalize(ctx: TurnContext, state: TurnState) -> dict[str, Any]:
     if state.get("message") and state.get("route") != "refuse":
         snap = snapshot_of(ctx.sql_session.scope)
         # iteration 17: a report turn keeps the draft (not "Saved ...") as the assistant answer
-        answer = (state.get("report") or {}).get("markdown") or text
-        update["history"] = [
-            {"role": "user", "text": state["message"], "scope": snap},
-            {"role": "assistant", "text": answer[:MAX_HISTORY_CHARS], "scope": snap},
-        ]
+        answer = strip_sql((state.get("report") or {}).get("markdown") or text)
+        reply: dict[str, Any] = {
+            "role": "assistant", "text": answer[:MAX_HISTORY_CHARS], "scope": snap,
+        }  # fmt: skip
+        # D-156: a code-owned static reply is flagged at write time; prompts show a marker
+        kind = state.get("fixed_reply") or fixed_kind(answer)
+        if kind:
+            reply[FIXED_KEY] = kind
+        update["history"] = [{"role": "user", "text": state["message"], "scope": snap}, reply]
         if ctx.sql_turn.ledger:  # prior-turn grounding set for follow-ups (AC-07.1/07.2)
             scope = ctx.sql_session.scope
             update["prior_ledger"] = [ledger_entry_for_state(e, scope) for e in ctx.sql_turn.ledger]
+    marker = _next_retry_marker(ctx, state, label, outcome)
+    if marker is not None:
+        update["failed_report"] = marker
     return update
+
+
+def _next_retry_marker(
+    ctx: TurnContext, state: TurnState, label: str, outcome: str
+) -> dict[str, Any] | None:
+    """Iteration 33: the "retry report" marker after this turn, or None to leave it as is.
+
+    Saved or cancelled clears it (a cancelled draft is never retried, m5). A report turn
+    whose writer failed, or whose save failed, records its question, analysis and scrubbed
+    ledger. Any other analysis turn (one that ran SQL) clears it; a light, clarify or
+    refused turn, and a retry turn (retry_writer keeps the attempt count), leave it."""
+    if outcome in ("report_saved", "report_cancelled"):
+        return {}
+    if ctx.retry or not ctx.sql_turn.ledger:
+        return None
+    if label != "report" or outcome not in ("report_failed", "report_unsaved"):
+        return {}
+    scope = ctx.sql_session.scope
+    ledger = [
+        {k: v for k, v in ledger_entry_for_state(e, scope).items() if k != "scope"}
+        for e in ctx.sql_turn.ledger
+    ][-MAX_PRIOR_LEDGER:]
+    return {
+        "question": str(state.get("context_message") or state.get("message") or ""),
+        "analysis": str(state.get("draft") or "")[:MAX_RETRY_ANALYSIS_CHARS],
+        "partial": state.get("status") == "partial",
+        "scope": snapshot_of(scope),
+        "ledger": ledger,
+        "turn_id": ctx.turn_id,
+        "attempts": 0,
+    }
+
+
+def _retry_marker(obj: Any, scope: ProductScope) -> dict[str, Any] | None:
+    """The stored retry marker when it is well formed, covered by the current scope and not
+    out of attempts; None otherwise (fail closed: "nothing to retry")."""
+    if not isinstance(obj, dict) or not obj or not covers(scope, obj.get("scope")):
+        return None
+    ledger, attempts = obj.get("ledger"), obj.get("attempts")
+    if (
+        not isinstance(ledger, list)
+        or not 0 < len(ledger) <= MAX_PRIOR_LEDGER
+        or not all(isinstance(e, dict) and isinstance(e.get("sql"), str) for e in ledger)
+        or not isinstance(obj.get("question"), str)
+        or not obj["question"].strip()
+        or not isinstance(obj.get("analysis"), str)
+        or not obj["analysis"].strip()
+        or not isinstance(attempts, int)
+        or isinstance(attempts, bool)
+        or not 0 <= attempts < RETRY_LIMIT
+    ):
+        return None
+    return {**obj, "partial": obj.get("partial") is True}
 
 
 # --- supervisor ---------------------------------------------------------------------------------
@@ -1206,23 +1847,39 @@ def _errored(state: TurnState) -> bool:
 def _after_guard(state: TurnState) -> str:
     if _errored(state):
         return "finalize"
-    if state.get("route") == "refuse":
+    if state.get("route") in ("refuse", "preference"):
         return "finalize"
     if state.get("route") == "light":
         # R2-M1(a): a reply to a pending clarification ("1") must reach load_context even when
         # the router calls it light; load_context sends it back to light if it does not resolve.
         pending = SessionMemory.from_state(state.get("memory")).pending_clarification
-        return "load_context" if pending is not None else "light"
+        if pending is not None:
+            return "load_context"
+        # D-155: a `comment` after an answer needs the history for its brief reply (D-152).
+        if state.get("label") == "comment" and _has_answer_history(state):
+            return "load_context"
+        return "light"
     return "load_context"
 
 
 def _after_context(state: TurnState) -> str:
-    # TODO(14b/15/17): report -> writer/verifier/confirm_save, library -> library agent.
     if _errored(state) or state.get("route") == "clarify":
         return "finalize"
-    if state.get("route") == "light":  # pending clarification not resolved (R2-M1)
-        return "light"
+    if state.get("route") == "light":  # pending clarification not resolved (R2-M1), or a
+        return "light"  # `comment` with no previous answer in the scope-covered history
+    if state.get("status") == "comment":  # D-152: one brief reply, no analyst loop
+        return "force_answer"
+    if state.get("label") == "library":  # iteration 46: no analyst, no SQL
+        return "library"
     return "quick" if state.get("label") == "simple" else "deep"
+
+
+def _after_library(state: TurnState, ctx: TurnContext) -> str:
+    # D-197: the agent asked for a delete -> the same preview + confirm_delete interrupt as a
+    # parsed request; the user's next message is the only thing that can confirm it
+    if not _errored(state) and state.get("route") != "library" and ctx.delete_request is not None:
+        return "delete_preview"
+    return "finalize"
 
 
 def _after_quick(state: TurnState) -> str:
@@ -1262,26 +1919,39 @@ def _build(ctx: TurnContext, checkpointer: Any) -> Any:
     # iteration 22a: only code (a parsed user request) routes a turn into the delete flow
     g.add_conditional_edges(
         START,
-        lambda _s: "delete_preview" if ctx.delete_request is not None else "input_guard",
-        ["delete_preview", "input_guard"],
+        lambda _s: (
+            "delete_preview" if ctx.delete_request is not None
+            else RETRY_NODE if ctx.retry  # iteration 33: only code (a parsed "retry report")
+            else "input_guard"
+        ),  # fmt: skip
+        ["delete_preview", RETRY_NODE, "input_guard"],
     )
+    g.add_conditional_edges(RETRY_NODE, _after_writer, [CONFIRM_NODE, "finalize"])
     g.add_conditional_edges(
         "delete_preview",
-        lambda s: DELETE_CONFIRM_NODE
-        if not _errored(s) and ctx.can_confirm and _pending_step(s) == "preview"
-        else "finalize",
+        lambda s: (
+            DELETE_CONFIRM_NODE
+            if not _errored(s) and ctx.can_confirm and _pending_step(s) == "preview"
+            else "finalize"
+        ),
         [DELETE_CONFIRM_NODE, "finalize"],
     )
     g.add_conditional_edges(
         DELETE_CONFIRM_NODE,
-        lambda s: "execute_delete"
-        if not _errored(s) and _pending_step(s) == "confirmed"
-        else "finalize",
+        lambda s: (
+            "execute_delete" if not _errored(s) and _pending_step(s) == "confirmed" else "finalize"
+        ),
         ["execute_delete", "finalize"],
     )
     g.add_edge("execute_delete", "finalize")
     g.add_conditional_edges("input_guard", _after_guard, ["finalize", "light", "load_context"])
-    g.add_conditional_edges("load_context", _after_context, ["quick", "deep", "light", "finalize"])
+    g.add_conditional_edges(
+        "load_context", _after_context,
+        ["quick", "deep", "light", "force_answer", "library", "finalize"],
+    )  # fmt: skip
+    g.add_conditional_edges(
+        "library", lambda s: _after_library(s, ctx), ["delete_preview", "finalize"]
+    )
     g.add_conditional_edges("quick", _after_quick, ["deep", "force_answer", "finalize"])
     g.add_conditional_edges("deep", _after_role, ["force_answer", "finalize"])
     g.add_edge("light", "finalize")
@@ -1365,6 +2035,8 @@ class AgentGraph:
                     # M1: another user's session is refused before any graph write, so its
                     # history, ledger and pending draft stay exactly as they were
                     return TurnResult(OTHER_OWNER_TEXT, outcome="refused")
+                if values.get("aggregate_only"):  # D-162: survives a process restart
+                    sql_session.aggregate_only = True
                 # iteration 22a: a confirmed delete stranded before execute_delete (a crash
                 # or Ctrl-C) is closed first, re-verified, never silently dropped (OD-10)
                 if check_pending and DELETE_EXECUTE_NODE in tuple(st.next):
@@ -1382,10 +2054,18 @@ class AgentGraph:
                     return self._answer_draft(ctx, graph, values, raw_text, session, tid)
                 if check_pending and _SAVE_LAST_RE.match(_reply_forms(raw_text)[0]):
                     return self._save_last(ctx, values, session, tid)
+                # iteration 33: "retry report" (or /retry) re-runs writer + verifier only
+                if check_pending and delete_req is None and _RETRY_RE.match(raw_text):
+                    return self._start_retry(ctx, graph, values, session, tid)
+            elif check_pending and delete_req is None and _RETRY_RE.match(raw_text):
+                return TurnResult(NO_RETRY_TEXT, label="report", route="report",
+                                  outcome="refused")  # fmt: skip
             if delete_req is None and check_pending:  # deterministic: never the model
                 delete_req = delete_flow.parse_delete_request(raw_text)
             if delete_req is not None:
                 return self._start_delete(ctx, graph, delete_req, session, tid)
+            # iteration 46: a library turn may start a delete preview (confirm = this + 1)
+            ctx.delete_turn = self._turn_seq.get(session.session_id, 0)
             start = {
                 **_TURN_RESET,
                 "turn_id": tid,
@@ -1529,6 +2209,38 @@ class AgentGraph:
         res = self._run(raw, session, tid, check_pending=False)
         return dataclasses.replace(res, text=f"{NOT_SAVED_TEXT}\n\n{res.text}")
 
+    def start_retry(self, *, session: Session, turn_id: str | None = None) -> TurnResult:
+        """``/retry`` (iteration 33): the same as saying "retry report". Never raises."""
+        return self.run_turn(RETRY_MESSAGE, session=session, turn_id=turn_id)
+
+    def _start_retry(
+        self, ctx: TurnContext, graph: Any, values: dict[str, Any], session: Session, tid: str
+    ) -> TurnResult:
+        """AC-21.15: one bounded writer + verifier attempt (RETRY_REPORT caps: 8 LLM calls,
+        0 SQL) on the stored ledger of this session's last failed or unsaved report, then the
+        usual Save / Revise / Cancel. No analyst and no SQL; the raw text never enters state."""
+        if values.get("owner") != session.profile.user_id:  # M1: defence in depth
+            return TurnResult(NO_RETRY_TEXT, label="report", route="report", outcome="refused")
+        marker = _retry_marker(values.get("failed_report"), ctx.sql_session.scope)
+        if marker is None:
+            return TurnResult(NO_RETRY_TEXT, label="report", route="report", outcome="refused")
+        ctx.retry = True
+        _switch_budget(ctx, TurnKind.RETRY_REPORT)
+        start = {
+            **_TURN_RESET,
+            "turn_id": tid,
+            "scope_snapshot": scope_snapshot(ctx.sql_session.scope),
+            "owner": session.profile.user_id,
+            "turn_ctx": {},
+            "pending_action": {},
+            "message": RETRY_MESSAGE,
+            "label": "report",
+            "context_message": marker["question"],  # Revise rebuilds from the question
+        }
+        config, durable = self._config(session.session_id), self._durability()
+        out = run_with_recursion_guard(lambda: graph.invoke(start, config, **durable))
+        return _result(ctx, out)
+
     def _save_last(
         self, ctx: TurnContext, values: dict[str, Any], session: Session, tid: str
     ) -> TurnResult:
@@ -1568,7 +2280,7 @@ class AgentGraph:
         key = hashlib.sha256(f"last:{session.session_id}:{owner}:{answer}".encode()).hexdigest()
         found = sv.reports.get_by_key(key, owner)
         if found is not None:
-            text = f'Already saved report "{found.title}" (id {found.report_id}).'
+            text = f'Already saved report "{found.title}" (id {display_id(found.report_id)}).'
             return TurnResult(text, label="report", route="report", outcome="report_saved")
         _promote_report(ctx)
         rep = _build_report(
@@ -1599,7 +2311,12 @@ class AgentGraph:
         ctx = _new_context(self.services, "", session, self._sql_session(session), "")
         graph = _build(ctx, self.checkpointer)
         snap = graph.get_state(self._config(session.session_id))
-        return PendingTurn(self, session, (ctx, graph), tuple(snap.next), dict(snap.values))
+        values = dict(snap.values)
+        if values.get("aggregate_only") and values.get("owner") in (
+            None, "", session.profile.user_id
+        ):  # D-162: a resumed turn keeps the session's aggregate-only mode
+            ctx.sql_session.aggregate_only = True
+        return PendingTurn(self, session, (ctx, graph), tuple(snap.next), values)
 
 
 @dataclass
@@ -1707,7 +2424,7 @@ class PendingTurn:
             found = reports.get_by_key(key, self.session.profile.user_id)
             if found is None:
                 return None
-            text = f'Already saved report "{found.title}" (id {found.report_id}).'
+            text = f'Already saved report "{found.title}" (id {display_id(found.report_id)}).'
             self._built[1].update_state(
                 self.agent._config(self.session.session_id),
                 {"outcome": "report_saved", "final_text": text},

@@ -293,6 +293,8 @@ def test_router_prompt_file_defines_all_labels() -> None:
         ("library", "full"),
         ("meta", "light"),
         ("smalltalk", "light"),
+        ("memory", "light"),  # D-155
+        ("comment", "light"),  # D-155: the graph sends it on to force_answer with history
         ("off_topic", "refuse"),
         ("injection", "refuse"),
     ],
@@ -478,6 +480,17 @@ def test_light_path_no_sql_no_embedding(detector) -> None:
     [turn_span] = tracer.of("turn")
     assert turn_span["path"] == "light" and turn_span["label"] == "smalltalk"
     assert turn_span["llm_calls_total"] == 2
+
+
+@pytest.mark.parametrize("label", ["memory", "comment"])
+def test_light_path_label_texts_are_static(detector, label) -> None:
+    # D-155: the router labels memory and comment turns; the light path answers each with its
+    # code-owned text, with no model call and no scope suffix.
+    fake, llm = FakeInvoke("unused"), make_llm()
+    r = _light(label, "anything", detector, fake=fake, llm=llm)
+    assert fake.calls == [] and llm.budget.calls == 0
+    assert (r.text, r.source, r.label) == (lp.LABEL_TEXTS[label], "static", label)
+    assert PROFILE.scope_label not in r.text
 
 
 def test_light_path_runs_guards(detector, monkeypatch) -> None:

@@ -25,7 +25,9 @@ from datetime import date
 from typing import Any, Final
 
 from opsfleet_agent.graph.context import KIND_REPORT, _one_line, fence_untrusted
+from opsfleet_agent.guards.plain_language import strip_sql
 from opsfleet_agent.guards.scope import ProductScope
+from opsfleet_agent.reports import fts
 from opsfleet_agent.reports.matcher import (
     MatchError,
     in_scope,
@@ -34,11 +36,13 @@ from opsfleet_agent.reports.matcher import (
     owner_matches,
     owner_rows,
 )
+from opsfleet_agent.reports.semantic import rrf_fuse
 from opsfleet_agent.store.reports import MAX_BODY_CHARS, MAX_LIST, SavedReport
 
 __all__ = [
     "DRIFT_LABEL",
     "MAX_RESULTS",
+    "SEARCH_MODES",
     "NOT_FOUND_TEXT",
     "NO_ROW_TEXT",
     "LibraryError",
@@ -47,15 +51,21 @@ __all__ = [
     "OpenResult",
     "ViewResult",
     "count_text",
+    "display_id",
     "list_reports",
     "open_report",
     "parse_search_args",
     "render_list",
     "search_reports",
+    "strip_display_prefix",
     "view_report",
 ]
 
 MAX_RESULTS: Final = 20
+# iteration 38: "semantic" = hybrid (FTS bm25 ranks fused with cosine ranks by RRF, D-211)
+SEARCH_MODES: Final = ("substring", "ranked", "semantic")
+# paths that are ordered best match first (the rest are newest first)
+RANKED_PATHS: Final = frozenset({"ranked", "hybrid", "hybrid_substring"})
 MAX_TAGS: Final = 5
 MAX_ID_CHARS: Final = 64
 TITLE_CHARS: Final = 120
@@ -67,6 +77,19 @@ DRIFT_VIEW_TEXT: Final = (
 )
 _DATE_RE: Final = re.compile(r"\d{4}-\d{2}-\d{2}", re.ASCII)
 _ROW_RE: Final = re.compile(r"\d{1,2}", re.ASCII)
+# live1: a saved report is announced as "R-<id>"; the stored id stays the bare hex
+DISPLAY_PREFIX: Final = "R-"
+_DISPLAY_RE: Final = re.compile(r"^[Rr]-(?=[0-9a-f]{32}$)", re.ASCII)
+
+
+def display_id(report_id: str) -> str:
+    """The id as shown when a report is saved ("R-" + the stored hex id)."""
+    return f"{DISPLAY_PREFIX}{report_id}"
+
+
+def strip_display_prefix(ref: str) -> str:
+    """A shown id ("R-<hex>") back to the stored id; anything else unchanged."""
+    return _DISPLAY_RE.sub("", ref)
 
 
 class LibraryError(ValueError):
@@ -81,6 +104,9 @@ class ListEntry:
     title: str | None  # None: masked (scope drift)
     tags: tuple[str, ...]
     masked: bool
+    # D-232: why a hybrid (semantic) search returned it: "words" (the lexical list), "similar"
+    # (the cosine list only) or "words+similar"; None outside a semantic search
+    match: str | None = None
 
 
 @dataclass(frozen=True)
@@ -88,6 +114,12 @@ class ListResult:
     entries: tuple[ListEntry, ...]  # at most the requested limit
     total: int  # matches among the scanned reports (the owner's own only)
     truncated_scan: bool  # the owner has more reports than were scanned
+    # iteration 37: "ranked" (FTS5 bm25), "substring", or "substring_fallback" (ranked was
+    # asked for but the index is missing or refused the query); iteration 38: "hybrid" (FTS
+    # + semantic, RRF) or "hybrid_substring" (word match + semantic, no FTS index)
+    path: str = "substring"
+    # iteration 38: semantic was asked for but the embedding was unavailable (degraded)
+    semantic_unavailable: bool = False
 
 
 @dataclass(frozen=True)
@@ -100,12 +132,17 @@ def _line(text: str, n: int = TITLE_CHARS) -> str:
     return _one_line(text, n)
 
 
-def _entry(r: SavedReport, scope: ProductScope | None) -> ListEntry:
+MATCH_WORDS: Final = "words"
+MATCH_SIMILAR: Final = "similar"
+MATCH_BOTH: Final = "words+similar"
+
+
+def _entry(r: SavedReport, scope: ProductScope | None, match: str | None = None) -> ListEntry:
     if not in_scope(r, scope):
         return ListEntry(r.report_id, r.created_at, r.session_id, None, (), True)
     return ListEntry(
         r.report_id, r.created_at, r.session_id, _line(r.title),
-        tuple(_line(t, 40) for t in r.tags), False,
+        tuple(_line(t, 40) for t in r.tags), False, match,
     )  # fmt: skip
 
 
@@ -174,10 +211,25 @@ def search_reports(
     date_from: str | None = None,
     date_to: str | None = None,
     limit: int = MAX_RESULTS,
+    mode: str = "substring",
 ) -> ListResult:
     """AC-21.10: all given filters must match (case-insensitive substring over title and body,
     exact tag, creation date within the inclusive range), newest first, at most 20 and a total.
-    Drifted reports are never searched. Raises :class:`LibraryError` for an unusable request."""
+    Drifted reports are never searched. Raises :class:`LibraryError` for an unusable request.
+
+    Iteration 37 (AC-21.13): ``mode="ranked"`` with text uses the FTS5 index (every word must
+    match, stemmed, over title, body and tags), best bm25 first, over the same owner rows; the
+    scope, tag and date filters apply before the limit. Without an index it falls back to the
+    substring search (``path="substring_fallback"``).
+
+    Iteration 38 (AC-21.13/14): ``mode="semantic"`` with text is the hybrid search. The
+    lexical list (FTS ranked, or word match without an index) and a cosine list are fused by
+    Reciprocal Rank Fusion (k=60). The cosine list is computed only over the owner's rows that
+    already passed the scope, tag and date filters (scope is filtered before scoring, never
+    after). When the embedding is unavailable it degrades to the ranked / word-match result
+    with ``semantic_unavailable=True``; ``path`` says which ran (never the query text)."""
+    if mode not in SEARCH_MODES:
+        raise LibraryError("unknown search mode")
     try:
         needle = normalize_query(text) if text is not None else None
     except MatchError as exc:
@@ -191,24 +243,85 @@ def search_reports(
         raise LibraryError("the from: date is after the to: date")
     if needle is None and not want_tags and date_from is None and date_to is None:
         raise LibraryError("give some search text, a tag or a date range")
-    rows, truncated = owner_rows(store, owner)
+    path, ranked = "substring", None
+    if mode in ("ranked", "semantic") and needle is not None:
+        try:
+            match = fts.build_match(needle)
+        except fts.FtsQueryError as exc:
+            raise LibraryError(str(exc)) from None
+        search = getattr(store, "ranked_search", None)
+        ranked = search(owner, match) if callable(search) else None
+        path = "ranked" if ranked is not None else "substring_fallback"
+    if ranked is not None:
+        rows, truncated = ranked, store.count(owner) > MAX_LIST
+    else:
+        rows, truncated = owner_rows(store, owner)
     hits = [
         r
         for r in rows
         if in_scope(r, scope)
-        and (needle is None or matches_text(r, needle))
+        and (ranked is not None or needle is None or matches_text(r, needle))
         and want_tags <= {t.casefold() for t in r.tags}
         and (date_from is None or r.created_at[:10] >= date_from)
         and (date_to is None or r.created_at[:10] <= date_to)
     ]
     limit = max(1, min(int(limit), MAX_RESULTS))
-    return ListResult(tuple(_entry(r, scope) for r in hits[:limit]), len(hits), truncated)
+    unavailable = False
+    why: dict[str, str] = {}
+    if mode == "semantic" and needle is not None:
+        lexical_ids = {r.report_id for r in hits}
+        hits, path, unavailable, truncated, similar = _hybrid(
+            store, owner, scope, needle, hits, path, want_tags, date_from, date_to, truncated
+        )
+        for r in hits:  # D-232: say per entry which list found it
+            word, sim = r.report_id in lexical_ids, r.report_id in similar
+            why[r.report_id] = (
+                MATCH_BOTH if word and sim else MATCH_WORDS if word else MATCH_SIMILAR
+            )
+    entries = tuple(_entry(r, scope, why.get(r.report_id)) for r in hits[:limit])
+    return ListResult(entries, len(hits), truncated, path, unavailable)
+
+
+def _hybrid(
+    store: Any,
+    owner: str,
+    scope: ProductScope | None,
+    needle: str,
+    lexical: list[SavedReport],
+    lexical_path: str,
+    want_tags: set[str],
+    date_from: str | None,
+    date_to: str | None,
+    truncated: bool,
+) -> tuple[list[SavedReport], str, bool, bool, frozenset[str]]:
+    """RRF of the lexical hits and the cosine hits over the filtered, in-scope owner rows.
+    The last item is the ids the cosine list returned (empty when degraded)."""
+    rows, more = owner_rows(store, owner)
+    candidates = [
+        r
+        for r in rows
+        if r.owner_user_id == owner
+        and in_scope(r, scope)
+        and want_tags <= {t.casefold() for t in r.tags}
+        and (date_from is None or r.created_at[:10] >= date_from)
+        and (date_to is None or r.created_at[:10] <= date_to)
+    ]
+    search = getattr(store, "semantic_search", None)
+    sem = search(owner, candidates, needle) if callable(search) else None
+    if sem is None:  # degrade: FTS ranked, or word match without an index
+        return lexical, lexical_path, True, truncated, frozenset()
+    by_id = {r.report_id: r for r in candidates}
+    by_id.update((r.report_id, r) for r in lexical)
+    semantic_ids = [rid for rid, _score in sem if rid in by_id]
+    fused = rrf_fuse([r.report_id for r in lexical], semantic_ids)
+    path = "hybrid" if lexical_path == "ranked" else "hybrid_substring"
+    return [by_id[rid] for rid in fused], path, False, truncated or more, frozenset(semantic_ids)
 
 
 def view_report(store, owner: str, scope: ProductScope | None, report_id: str) -> ViewResult:
     """AC-21.3 / AC-21.5: the owner's own in-scope report, fenced, with its date and data
     window. Another user's id, a missing id and a malformed id all give :data:`NOT_FOUND_TEXT`."""
-    rid = str(report_id).strip()
+    rid = strip_display_prefix(str(report_id).strip())
     rec = store.get(rid, owner) if rid and len(rid) <= MAX_ID_CHARS else None
     if rec is None:
         return ViewResult("not_found", NOT_FOUND_TEXT)
@@ -219,8 +332,9 @@ def view_report(store, owner: str, scope: ProductScope | None, report_id: str) -
         f"{_line(rec.title)}\n"
         f"created {rec.created_at[:10]}, data window {_line(rec.data_window, 80)}"
     )
+    # D-151a: SQL is never shown, also in reports saved before the "Data used" section
     body = fence_untrusted(
-        KIND_REPORT, rec.body_markdown, item_id=rec.report_id, max_chars=MAX_BODY_CHARS
+        KIND_REPORT, strip_sql(rec.body_markdown), item_id=rec.report_id, max_chars=MAX_BODY_CHARS
     )
     return ViewResult("ok", f"{head}\n{body}")
 
@@ -246,8 +360,10 @@ def render_list(result: ListResult, *, header: str, empty: str) -> str:
             lines.append(f"  {e.report_id}  {e.created_at[:10]}  ({DRIFT_LABEL})")
             continue
         tags = f"  [{', '.join(e.tags)}]" if e.tags else ""
+        why = f"  (match: {e.match})" if e.match else ""
         lines.append(
-            f"  {e.report_id}  {e.created_at[:10]}  {e.title}{tags}  session {e.session_id[:12]}"
+            f"  {e.report_id}  {e.created_at[:10]}  {e.title}{tags}  "
+            f"session {e.session_id[:12]}{why}"
         )
     if result.total > len(result.entries):
         more = result.total - len(result.entries)
@@ -281,7 +397,7 @@ def open_report(
     """AC-21.3 / AC-21.11: open by id, by a bare row number of the last listing, or by a phrase
     (the matcher over the owner's in-scope reports). Owner and scope are re-checked here on
     every path; a number only picks an id from the listing, it never bypasses ``view_report``."""
-    ref = " ".join(str(ref).split())
+    ref = strip_display_prefix(" ".join(str(ref).split()))
     if _ROW_RE.fullmatch(ref):
         n = int(ref)
         if not 1 <= n <= len(listing):

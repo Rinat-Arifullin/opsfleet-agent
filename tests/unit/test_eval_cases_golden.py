@@ -17,6 +17,8 @@ from evals import run as eval_run  # noqa: E402
 from opsfleet_agent.roles.router import LABELS  # noqa: E402
 
 CASES_DIR = ROOT / "evals" / "cases"
+# report turns end as report_pending (draft shown) or report_saved (graph.py outcomes)
+GOLDEN_OUTCOMES = {"answered", "refused", "clarify", "degraded", "report_pending", "report_saved"}
 
 REQUIRED_GOLDEN = {
     "top_customers", "aov_by_traffic_source", "compare_brands_why", "show_sql",
@@ -27,7 +29,18 @@ REQUIRED_GOLDEN = {
     "q1_report", "report_save_confirm", "save_this", "report_search", "roadmap_actions_unsupported",
     "my_scope", "smalltalk_light_path", "smalltalk_then_task",
 }
-OPTIONAL_GOLDEN = {"persona_tone_change", "preference_table_vs_bullets"}
+OPTIONAL_GOLDEN = {
+    "persona_tone_change", "preference_table_vs_bullets", "retry_report_without_ledger",
+    "library_agent", "preference_from_chat",
+}
+# Live-1 set 2: more topics, so live runs do not repeat the same questions
+SET2_GOLDEN = {
+    "revenue_by_category_last_quarter", "return_rate_by_category", "revenue_by_country",
+    "delivery_time_trend", "customer_age_gender_mix", "order_status_breakdown",
+    "margin_by_department", "best_sellers_last_month", "new_vs_returning_customers",
+    "repeat_purchase_cohorts", "followup_filter_department", "customer_contact_request",
+    "off_topic_question", "non_english_question",
+}
 
 PII = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+|\+?\d[\d\s().-]{8,}\d")
 
@@ -50,7 +63,16 @@ def test_all_named_golden_cases_exist(cases):
     names = set(_golden(cases))
     assert REQUIRED_GOLDEN <= names
     assert OPTIONAL_GOLDEN <= names
-    assert names == REQUIRED_GOLDEN | OPTIONAL_GOLDEN
+    assert names == REQUIRED_GOLDEN | OPTIONAL_GOLDEN | SET2_GOLDEN
+
+
+def test_set2_cases_tagged_and_refusals_run_no_sql(cases):
+    g = _golden(cases)
+    for name in SET2_GOLDEN:
+        c = g[name]
+        assert "set2" in c.tags, name
+        if c.expect["outcome"] == "refused":
+            assert c.expect.get("no_sql") and c.estimate == {"llm": {"router": 1}, "bq": 0}, name
 
 
 def test_ids_unique(cases):
@@ -63,7 +85,7 @@ def test_golden_cases_shape(cases):
     for name, c in _golden(cases).items():
         assert c.fake, name
         exp = c.expect
-        assert exp["outcome"] in {"answered", "refused", "clarify", "degraded"}, name
+        assert exp["outcome"] in GOLDEN_OUTCOMES, name
         # golden cases stay out of the router report and the pii gate
         assert "label" not in exp and "detect" not in exp, name
         assert c.fake.get("outcome") == exp["outcome"], name
@@ -71,9 +93,13 @@ def test_golden_cases_shape(cases):
 
 def test_optional_cases_marked(cases):
     g = _golden(cases)
-    assert g["preference_table_vs_bullets"].skip
-    assert "iteration 39" in g["preference_table_vs_bullets"].skip
+    # the live seeder applies session.preferences since iteration 39b (D-239)
+    assert not g["preference_table_vs_bullets"].skip
+    assert g["preference_table_vs_bullets"].session["preferences"] == {"format": "table"}
     assert not g["persona_tone_change"].skip
+    chat = g["preference_from_chat"]
+    assert not chat.skip and "preferences" not in chat.session  # set by the first turn
+    assert len(chat.turns) == 2
 
 
 def test_golden_profiles_are_synthetic(cases):
@@ -98,7 +124,7 @@ def test_golden_brands_only_from_profiles(cases):
 
 def test_router_set(cases):
     router = _router(cases)
-    assert 45 <= len(router) <= 60
+    assert 45 <= len(router) <= 80
     labels = Counter(c.expect["label"] for c in router.values())
     assert set(labels) == set(LABELS)
     for cid, c in router.items():
@@ -108,6 +134,16 @@ def test_router_set(cases):
     tags = Counter(t for c in router.values() for t in c.tags)
     assert tags["borderline"] >= 3
     assert tags["keyword_trap"] >= 2
+    # D-155: memory and comment have English and at least two non-English cases each
+    for label in ("memory", "comment"):
+        of_label = [c for c in router.values() if c.expect["label"] == label]
+        assert sum("non_english" in c.tags for c in of_label) >= 2, label
+        assert any("non_english" not in c.tags for c in of_label), label
+    # negatives: a comment with a question, and "remember" about data, are data questions
+    # iter-live1: questions about data the dataset lacks are data questions, not meta/off_topic
+    for tag in ("comment_question", "memory_trap", "unavailable_data"):
+        negatives = [c for c in router.values() if tag in c.tags]
+        assert negatives and all(c.expect["label"] in {"simple", "complex"} for c in negatives)
     # keyword traps are normal data questions, never injection
     for c in router.values():
         if "keyword_trap" in c.tags:

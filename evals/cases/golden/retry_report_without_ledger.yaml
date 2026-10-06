@@ -1,0 +1,29 @@
+# golden/retry_report_without_ledger (iteration 33; AC-21.15): "retry report" in a fresh session.
+# The retry turn is matched in code (graph._RETRY_RE) and re-runs only the writer and verifier on
+# this session's last failed or unsaved report; with no such report it says so, calls no LLM and
+# runs no SQL (RETRY_REPORT caps: 8 LLM calls, 0 SQL). Synthetic.
+tags:
+- report
+- us21
+- retry
+input: retry report
+session:
+  profile: analyst_a
+expect:
+  outcome: refused
+  no_sql: true
+  must_contain:
+  - no failed or unsaved report
+  must_not_call:
+  - run_sql
+  - save_report
+  - delete_report
+  max_llm_calls: 0
+estimate:
+  llm: {}
+  bq: 0
+fake:
+  outcome: refused
+  label: report
+  text: There is no failed or unsaved report in this session to retry. Ask for a new report.
+  llm_calls: {}

@@ -55,6 +55,8 @@ from opsfleet_agent.graph.resume import (
     resume_turn,
 )
 from opsfleet_agent.guards.pii import (
+    CATALOGUE_CATEGORIES,
+    CATALOGUE_DEPARTMENTS,
     PiiDetector,
     PiiDetectorError,
     build_allowlist,
@@ -93,6 +95,7 @@ PROMPT_INTERRUPT_TEXT: Final = "(Press Ctrl-C again, or type /exit, to quit.)"
 HINT_TEXT: Final = "Type /help for commands, /exit to quit."
 EXIT_INTERRUPTED: Final = 130
 CANCEL_BOUND_S: Final = 1.0  # the best-effort BigQuery cancel never holds the prompt longer
+LANGFUSE_FLUSH_BOUND_S: Final = 5.0  # iteration 40: the exit flush never holds the exit longer
 _MAC_FAILURE: Final = "MAC check failed"
 _KEEP: Final = frozenset("\t\n")
 # Cc: C0, DEL and C1 controls (ESC is in C0, so every ANSI/OSC sequence loses its
@@ -149,14 +152,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _install_pii_detector(profiles: Iterable[Profile]) -> None:
-    """Refuse to start without the spaCy model (8b); allowlist the configured brands.
-
-    The full catalogue allowlist (brands, categories, departments from BigQuery) is an open
-    decision (docs/process/iter19-ods.md).
-    """
+    """Refuse to start without the spaCy model (8b); allowlist the configured brands and the
+    catalogue's categories and departments (D-167)."""
     ensure_model_available()
     brands = sorted({b for p in profiles for b in p.brands})
-    set_default_detector(PiiDetector(build_allowlist(brands=brands)))
+    set_default_detector(PiiDetector(
+            build_allowlist(
+                brands=brands, categories=CATALOGUE_CATEGORIES, departments=CATALOGUE_DEPARTMENTS
+            )
+        ))
+
+
+def register_runtime_secrets(settings: Settings) -> None:
+    """Register every secret the runtime may see, so logs and traces scrub it (also used by
+    the live eval harness, evals/live_sut.py)."""
+    register_secret(settings.gemini_api_key)
+    register_secret(os.environ.get(AES_KEY_ENV))
+    register_secret(os.environ.get("LANGFUSE_SECRET_KEY"))  # iteration 40 (optional)
 
 
 @dataclass
@@ -173,6 +185,8 @@ class Runtime:
     persona_version: Callable[[], str] | None = None
     close: Callable[[], object] | None = None
     report_store: Any = None  # iteration 17: ReportStore on app.db (/reports)
+    langfuse: Any = None  # iteration 40: obs.langfuse_sink.LangfuseSink, None when not configured
+    preference_store: Any = None  # iteration 39: store.preferences on app.db (/prefs)
 
 
 AgentFactory = Callable[[Settings, Any, Session, Path], Runtime]
@@ -187,7 +201,7 @@ def _make_router_invoke(settings: Settings) -> Any:  # pragma: no cover - needs 
 
     cache: dict[str, Any] = {}
 
-    def invoke(model: str, messages: Sequence[Any], timeout: float) -> LLMResponse:
+    def invoke(model: str, messages: Sequence[Any], timeout: float | None) -> LLMResponse:
         if model not in cache:
             cache[model] = chat_model_for(settings, model)  # D-143: Gemini or local provider
         lc = [
@@ -235,13 +249,16 @@ def build_runtime(
     from opsfleet_agent.graph.graph import AgentGraph, GraphServices, build_run_sql_tool
     from opsfleet_agent.guards.differencing import DifferencingGuard
     from opsfleet_agent.guards.pii import default_detector
+    from opsfleet_agent.obs.langfuse_sink import build_sink
     from opsfleet_agent.obs.tracer import Tracer
     from opsfleet_agent.persona import PersonaStore
+    from opsfleet_agent.reports.semantic import build_semantic_index
     from opsfleet_agent.roles.analyst import make_gemini_invoke
     from opsfleet_agent.store.audit import AuditLog, recorder
     from opsfleet_agent.store.db import open_store
     from opsfleet_agent.store.feedback import FeedbackStore
     from opsfleet_agent.store.fingerprints import FingerprintStore
+    from opsfleet_agent.store.preferences import SQLitePreferenceStore
     from opsfleet_agent.store.quota import QuotaLimits, QuotaStore
     from opsfleet_agent.store.reports import ReportStore
     from opsfleet_agent.tools.run_sql import scoped_job_config_factory
@@ -266,6 +283,19 @@ def build_runtime(
     audit_log = AuditLog(conn)
     trace_dir = data_dir / "traces"
     tracer = Tracer(trace_dir, session.session_id)
+    # Iteration 40: optional Langfuse (off unless LANGFUSE_* are set; load_settings loaded .env).
+    # D-153: the trace mask and the graph's base detector also allowlist the session's scope
+    # brands and the known (seed) brands, so a brand is never sent to Langfuse as a person.
+    detector = default_detector().with_brands((*session.profile.brands, *known_brands))
+    set_default_detector(detector)
+    langfuse = build_sink(detector=detector)
+    if langfuse is not None:
+        tracer.extra_sink = langfuse.on_span
+
+    def _observed(name: str, invoke: Any) -> Any:
+        # Outside health.wrap, so quota refusals show as failed generations too.
+        return langfuse.wrap_llm(name, invoke) if langfuse is not None else invoke
+
     tool = build_run_sql_tool(
         settings,
         runner,
@@ -275,13 +305,16 @@ def build_runtime(
         audit=recorder(audit_log, user_id=session.profile.user_id),
     )
     personas = PersonaStore()
-    reports = ReportStore(conn)  # iteration 17: the same app.db as audit and feedback
+    # iteration 17: the same app.db as audit and feedback; iteration 38: the semantic index
+    # (lazy provider embedder, no network until a save or a search embeds)
+    reports = ReportStore(conn, semantic=build_semantic_index(settings))
+    preferences = SQLitePreferenceStore(conn)  # iteration 39: per-user, read every turn
     services = GraphServices(
         settings=settings,
         persona=personas.refresh,
-        detector=default_detector(),
-        router_invoke=health.wrap(_make_router_invoke(settings)),
-        analyst_invoke=health.wrap(make_gemini_invoke(settings)),
+        detector=detector,
+        router_invoke=_observed("llm.chat", health.wrap(_make_router_invoke(settings))),
+        analyst_invoke=_observed("llm.tools", health.wrap(make_gemini_invoke(settings))),
         run_sql=tool,
         cache=cache,
         tracer=tracer,
@@ -289,6 +322,8 @@ def build_runtime(
         known_brands=known_brands,
         golden_index=golden,
         delete=wire_delete(conn, audit_log, reports),  # 22a: None keeps /delete unregistered
+        preferences=preferences,
+        audit=audit_log,  # iteration 46: library-agent rename/export audit rows
     )
     return Runtime(
         graph=DegradedGraph(AgentGraph(services, checkpointer), quota, health),
@@ -301,6 +336,8 @@ def build_runtime(
         persona_version=lambda: personas.current.version,
         close=conn.close,
         report_store=reports,
+        langfuse=langfuse,
+        preference_store=preferences,
     )
 
 
@@ -352,6 +389,8 @@ class _Repl:
             scope=self._scope(),
             listing=self.listing,
             delete_start=self._delete_start,
+            langfuse=getattr(rt, "langfuse", None),
+            preference_store=getattr(rt, "preference_store", None),
         )
 
     def _delete_start(self, args: str) -> str:
@@ -407,11 +446,29 @@ class _Repl:
         """Run one question; Ctrl-C cancels the in-flight BigQuery job and returns."""
         turn_id = uuid.uuid4().hex[:12]
         result = self.guarded(
-            lambda: self.runtime.graph.run_turn(text, session=self.session, turn_id=turn_id),
+            self._observed(
+                lambda: self.runtime.graph.run_turn(text, session=self.session, turn_id=turn_id),
+                turn_id,
+                text,
+            ),
             turn_id,
         )
         if result is not None:
             self.show(result, turn_id)
+
+    def _observed(self, fn: Callable[[], Any], turn_id: str | None, text: str) -> Callable[[], Any]:
+        """Iteration 40: one Langfuse trace per turn when the sink is on; else ``fn`` as is.
+        The sink scrubs ``text`` itself and never changes the result or the exceptions."""
+        sink = getattr(self.runtime, "langfuse", None)
+        if sink is None:
+            return fn
+        return sink.traced(
+            fn,
+            session_id=self.session.session_id,
+            user_id=self.session.profile.user_id,
+            turn_id=turn_id,
+            question=text,
+        )
 
     def show(self, result: Any, turn_id: str | None) -> None:
         """Print an answer and its notice; remember the turn for /feedback and /trace."""
@@ -474,10 +531,13 @@ class _Repl:
                 continue
             if commands.is_command(line):
                 res = commands.dispatch(line, self._ctx())
-                _say(res.text)
+                if res.text:
+                    _say(res.text)
                 if res.exit:
                     return 0
-                continue
+                if res.turn is None:
+                    continue
+                line = res.turn  # iteration 33: /retry runs the fixed "retry report" turn
             try:
                 self.turn(line)
             except KeyboardInterrupt:  # backstop: a Ctrl-C between two guarded steps
@@ -548,8 +608,7 @@ def _main(
             profiles = load_profiles_with_overrides(None, data_dir)
             profile = select_profile(profiles, args.user)
             settings = load_settings()  # loads .env, so the AES key may come from there
-            register_secret(settings.gemini_api_key)
-            register_secret(os.environ.get(AES_KEY_ENV))
+            register_runtime_secrets(settings)
             local_startup_check(data_dir=data_dir)
             checkpointer = build_checkpointer(data_dir)  # no valid AES key: refuse (D-78)
         except ConfigError as e:
@@ -593,6 +652,9 @@ def _main(
         _say(HINT_TEXT)
         return repl.loop()
     finally:
+        sink = getattr(runtime, "langfuse", None)
+        if sink is not None:  # iteration 40: send buffered traces, at most FLUSH_BOUND_S
+            _bounded(sink.shutdown, LANGFUSE_FLUSH_BOUND_S, "langfuse flush")
         if runtime is not None and runtime.close is not None:
             try:
                 runtime.close()

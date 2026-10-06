@@ -49,14 +49,18 @@ Contract:
   and the dicts built by :func:`from_input`, :func:`from_router`, :func:`from_refusal` and
   :func:`from_output` for guard refusals (iterations 6, 7, 9, 10, 11, 12).
 
-Erasure seam (iterations 23 and 35; HLD §7 retention/erasure): the audit trail outlives a
-user's data (1 year), but on an erasure request ``actor_user_id`` must be pseudonymised. That
-is the ONE permitted mutation and is deliberately not implemented here: :func:`erase_actor`
-raises ``NotImplementedError``. The intended design is a single audited transaction that
-writes ``erase.executed`` first, drops ``audit_event_no_update``, rewrites only
-``actor_user_id`` for that user to a keyed pseudonym, and recreates the trigger before COMMIT
+Erasure (iteration 35; SEC-18, AC-28.6, FR-59; D-223/D-224; HLD §7 retention/erasure): the
+audit trail outlives a user's data (1 year), so on an erasure request the user's audit rows are
+pseudonymised, never deleted. :func:`audited_erase` first appends ``erase.attempted`` in its
+own transaction (D-230; the erase is aborted if that write fails), then runs ONE
+``BEGIN IMMEDIATE`` transaction: it writes ``erase.executed`` first (actor = the maintainer,
+``details.target_user`` = a fresh random ``erased-<16 hex>`` pseudonym, no erased content),
+deletes the user's rows in every per-user app.db table (FTS rows verified gone and optimized),
+drops ``audit_event_no_update``,
+rewrites only ``actor_user_id`` and ``details.target_user`` for that user to the pseudonym,
+recreates the trigger from the canonical DDL and checks the exact audit schema before COMMIT
 (DDL is transactional in SQLite), so no other column can change and a failure leaves the
-trigger in place.
+trigger in place. That rewrite is the ONE permitted mutation of ``audit_event``.
 
 Schema: created idempotently by :func:`ensure_schema`. ``AUDIT_MIGRATION`` and
 ``AUDIT_MARKER_SQL`` live in the leaf module ``store.audit_schema`` so that ``store.db.MIGRATIONS``
@@ -64,10 +68,12 @@ can import them verbatim at integration (never re-typed: the layout check compar
 TEMP objects on ``audit_event`` (``sqlite_temp_master``) are refused at open and before every
 insert, and all statements qualify ``main.``.
 
-Delete outcomes are not forgeable: ``delete.executed`` and ``delete.failed`` are refused by the
-public :meth:`AuditLog.build`/:meth:`AuditLog.record` and by :func:`recorder`
-(:class:`DeleteEventRefusedError`); only :func:`audited_delete` writes them, through the
-private ``_build``/``_append`` path. Otherwise a forged executed row would make the next real
+Delete and erase outcomes are not forgeable: ``delete.executed``, ``delete.failed``,
+``erase.executed`` and ``erase.failed`` are refused by the public
+:meth:`AuditLog.build`/:meth:`AuditLog.record` and by :func:`recorder`
+(:class:`DeleteEventRefusedError`); only :func:`audited_delete` and :func:`audited_erase` (and
+:func:`record_erase_failure`, which needs a recorded ``erase.executed``) write them, through
+the private ``_build``/``_append`` path. Otherwise a forged executed row would make the next real
 delete for that ``pending_action_id`` a replay that deletes nothing.
 
 Schema scanning (``_verify_kind``) is token-aware: ``COLLATE`` in a table's DDL and ``DELETE``
@@ -78,8 +84,10 @@ that is exactly one of those words is refused (fail closed).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import secrets
 import sqlite3
 import time
 import uuid
@@ -102,6 +110,12 @@ from opsfleet_agent.store.audit_schema import (
     DELETE_FAILED_EVENT,
 )
 from opsfleet_agent.store.db import StoreError, write_tx
+from opsfleet_agent.store.feedback import (
+    DISMISS_REASONS,
+    ROOT_CAUSES,
+    TRIAGE_GATES,
+    TRIAGE_STATES,
+)
 
 # --- event types -------------------------------------------------------------------------
 
@@ -115,6 +129,11 @@ GUARDRAIL_REFUSED: Final = input_guard.AUDIT_REFUSED
 GUARDRAIL_INJECTION: Final = input_guard.AUDIT_INJECTION
 GUARDRAIL_PII_BLOCK: Final = input_guard.AUDIT_PII_BLOCK
 TOOL_RUN_SQL: Final = "tool.run_sql"
+ERASE_EXECUTED: Final = "erase.executed"  # iteration 35: user erasure (SEC-18, D-223)
+ERASE_FAILED: Final = "erase.failed"
+# D-230: written in its own transaction BEFORE the erase transaction, so a rolled-back erase
+# (its erase.executed row gone with it) still leaves a start row that its erase.failed matches.
+ERASE_ATTEMPTED: Final = "erase.attempted"
 
 EVENT_TYPES: Final = frozenset(
     {
@@ -128,10 +147,15 @@ EVENT_TYPES: Final = frozenset(
         GUARDRAIL_INJECTION,
         GUARDRAIL_PII_BLOCK,
         TOOL_RUN_SQL,
-        "erase.executed",
+        ERASE_EXECUTED,
+        ERASE_FAILED,
+        ERASE_ATTEMPTED,
         "scope.changed",
         "persona.changed",
         "golden.promoted",
+        "feedback.triaged",  # iteration 36: triage CLI state changes (D-218)
+        "feedback.dismissed",
+        "eval.case_added",
         "report.renamed",
         "report.exported",
         "differencing.suspected",
@@ -220,7 +244,9 @@ _BUDGET_CODES: Final = frozenset(
 OUTCOMES: Final = frozenset(
     {"ok", "error", "refused", "failed", "cancelled", "expired", "previewed", "confirmed"}
 )
-SOURCES: Final = frozenset({"input", "router", "sql", "output", "delete"})
+SOURCES: Final = frozenset({"input", "router", "sql", "output", "delete", "erase"})
+# iteration 35: the store an erasure step failed on (erase.failed details.store)
+ERASE_STORES: Final = frozenset({"app_db", "checkpoints", "traces", "exports", "golden_candidates"})
 
 # --- validators --------------------------------------------------------------------------
 
@@ -362,6 +388,12 @@ DETAIL_FIELDS: Final[Mapping[str, Callable[[str, object], Any]]] = {
     "to_version": _id(VERSION_RE),
     "smoke": _member(frozenset({"pass", "fail", "skipped"})),
     "reason": _member(PERSONA_REASONS),
+    # iteration 36: triage CLI (D-217/D-218); enum members only, never free text
+    "root_cause": _member(frozenset(ROOT_CAUSES)),
+    "dismiss_reason": _member(frozenset(DISMISS_REASONS)),
+    "gate": _member(frozenset(TRIAGE_GATES)),
+    "triage_state": _member(frozenset(TRIAGE_STATES)),
+    "store": _member(ERASE_STORES),  # iteration 35 (D-223)
 }
 
 
@@ -550,8 +582,8 @@ def _decode(row: tuple) -> AuditEvent:
 class AuditLog:
     """Append-only audit store on the app DB. Public methods raise only :class:`AuditError`.
 
-    There is intentionally no update or delete method (AC-28.4); see the module docstring
-    for the erasure seam.
+    There is intentionally no update or delete method (AC-28.4); the only audit mutation is
+    the pseudonymisation inside :func:`audited_erase` (module docstring).
 
     Threading: use one connection, and so one ``AuditLog``, per thread. The log holds no lock,
     and :func:`audited_delete` relies on owning the connection's transaction from ``BEGIN
@@ -580,12 +612,15 @@ class AuditLog:
     def build(self, event_type: str, **fields: Any) -> AuditEvent:
         """Validate and build an event (not stored). Raises AuditError on anything off-list.
 
-        ``delete.executed`` and ``delete.failed`` raise :class:`DeleteEventRefusedError`: only
-        :func:`audited_delete` writes them (M-A)."""
+        ``delete.executed``, ``delete.failed``, ``erase.executed`` and ``erase.failed`` raise
+        :class:`DeleteEventRefusedError`: only :func:`audited_delete` and :func:`audited_erase`
+        write them (M-A, D-223)."""
         if type(event_type) is not str:  # no str subclass with a custom __eq__/__hash__
             raise AuditError("event_type must be a str")
         if event_type in _AUDITED_DELETE_ONLY:
-            raise DeleteEventRefusedError(f"{event_type} is written only by audited_delete")
+            raise DeleteEventRefusedError(
+                f"{event_type} is written only by audited_delete or audited_erase"
+            )
         return self._build(event_type, **fields)
 
     def _build(
@@ -703,14 +738,6 @@ class AuditLog:
         return [_decode(r) for r in rows]
 
 
-def erase_actor(log: AuditLog, user_id: str) -> int:
-    """Erasure seam (iterations 23/35): pseudonymise ``actor_user_id``. Not implemented.
-
-    See the module docstring for the intended single-transaction design.
-    """
-    raise NotImplementedError("audit erasure is implemented in iteration 35")
-
-
 # --- audit-first delete ------------------------------------------------------------------
 
 
@@ -725,8 +752,10 @@ class DeleteOutcome:
     deleted: int | None = None  # rows deleted from the target table (None on a replay)
 
 
-# Written only by audited_delete/_record_failure (M-A).
-_AUDITED_DELETE_ONLY: Final = frozenset({DELETE_EXECUTED, DELETE_FAILED})
+# Written only by audited_delete/_record_failure (M-A) and audited_erase (iteration 35, D-223).
+_AUDITED_DELETE_ONLY: Final = frozenset(
+    {DELETE_EXECUTED, DELETE_FAILED, ERASE_EXECUTED, ERASE_FAILED, ERASE_ATTEMPTED}
+)
 MAX_DEPENDENTS: Final = 8
 # Whole-word, case-insensitive (L4): "collated_by" / "deleted_at" do not match.
 _COLLATE_RE: Final = re.compile(r"\bCOLLATE\b", re.IGNORECASE)
@@ -735,6 +764,11 @@ _DELETE_RE: Final = re.compile(r"\bDELETE\b", re.IGNORECASE)
 _PROTECTED_TABLES: Final = frozenset({"audit_event", "meta", "schema_migrations"})
 # FK actions that change rows in another table when a parent row is deleted.
 _CASCADING_ACTIONS: Final = frozenset({"CASCADE", "SET NULL", "SET DEFAULT"})
+# Iteration 37: an FTS5 index dependent must be a regular (not contentless or
+# external-content) FTS5 table; its shadow tables count as touched for the trigger check.
+_FTS5_RE: Final = re.compile(r"^CREATE\s+VIRTUAL\s+TABLE\b.*\bUSING\s+FTS5\s*\(", re.I | re.S)
+_FTS_CONTENT_RE: Final = re.compile(r"\bcontent(_rowid)?\s*=|\bcontentless", re.I)
+_FTS_SHADOWS: Final = ("_data", "_idx", "_content", "_docsize", "_config")
 
 
 def _sql_name(what: str, value: object) -> str:
@@ -764,6 +798,11 @@ class DeletableKind:
     owner column is required; a kind with no owner must say ``unowned=True`` explicitly.
     Static checks run here; the live schema is verified at registration (with ``conn``) and
     again inside every delete transaction (:func:`_verify_kind`).
+
+    ``fts_dependents`` (iteration 37): regular FTS5 tables holding an index row per target in
+    ``(table, column)``. Their rows are deleted in the same transaction, after the exact
+    change-counter check (FTS5 shadow-table writes are not row-for-row), then verified gone,
+    and the index is ``optimize``d before COMMIT so no token of a deleted row survives.
     """
 
     name: str
@@ -772,9 +811,11 @@ class DeletableKind:
     owner_column: str | None = None
     dependents: tuple[tuple[str, str], ...] = ()
     unowned: bool = False
+    fts_dependents: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "dependents", _static_checks(self))
+        object.__setattr__(self, "fts_dependents", _static_fts_checks(self))
 
 
 def _static_checks(kind: DeletableKind) -> tuple[tuple[str, str], ...]:
@@ -816,7 +857,45 @@ def _static_checks(kind: DeletableKind) -> tuple[tuple[str, str], ...]:
     return deps  # type: ignore[return-value]
 
 
-# Empty in production until iterations 22a/23 register reports and the library.
+def _static_fts_checks(kind: DeletableKind) -> tuple[tuple[str, str], ...]:
+    """The FTS index dependents: (table, column) pairs, bounded, unique, never the kind's own
+    table or one of its plain dependents."""
+    try:
+        deps = tuple(tuple(d) for d in kind.fts_dependents)
+    except TypeError as err:
+        raise AuditError("fts_dependents must be (table, column) pairs") from err
+    if len(deps) > MAX_DEPENDENTS:
+        raise AuditError("too many fts dependents")
+    taken = {str(kind.table).lower(), *(str(t).lower() for t, *_ in kind.dependents)}
+    seen: set[str] = set()
+    for dep in deps:
+        if len(dep) != 2:
+            raise AuditError("fts_dependents must be (table, column) pairs")
+        fts_table = _deletable_table("fts dependent table", dep[0]).lower()
+        _sql_name("fts dependent column", dep[1])
+        if fts_table in taken or fts_table in seen:
+            raise AuditError("an fts dependent must be a distinct table")
+        seen.add(fts_table)
+    return deps  # type: ignore[return-value]
+
+
+def _fts_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    """Verify a regular FTS5 table in ``main``; return its lower-case column names."""
+    row = conn.execute(
+        "SELECT sql FROM main.sqlite_master WHERE type = 'table' AND lower(name) = lower(?)",
+        (table,),
+    ).fetchone()
+    if row is None or not isinstance(row[0], str):
+        raise AuditError("fts dependent table does not exist")
+    if _FTS5_RE.search(row[0].strip()) is None:
+        raise AuditError("fts dependent is not an FTS5 table")
+    if _FTS_CONTENT_RE.search(row[0]):
+        raise AuditError("fts dependent must be a regular FTS5 table")
+    return {str(r[1]).lower() for r in conn.execute(f"PRAGMA main.table_info({_q(table)})")}
+
+
+# Empty until startup registers the deletable kinds (`delete.flow.setup_delete`: saved_report
+# and its index dependents).
 # Each entry keeps the kind and a value fingerprint taken at registration (L1): a frozen
 # dataclass can still be changed through object.__setattr__, even into another valid
 # definition, so every delete compares the live fields against the registered ones.
@@ -926,7 +1005,11 @@ def _verify_kind(conn: sqlite3.Connection, kind: DeletableKind) -> None:
         dependents = _static_checks(kind)
     except AuditError as err:
         raise AuditError("registered deletable kind was modified") from err
-    if dependents != kind.dependents:
+    try:
+        fts_dependents = _static_fts_checks(kind)
+    except AuditError as err:
+        raise AuditError("registered deletable kind was modified") from err
+    if dependents != kind.dependents or fts_dependents != kind.fts_dependents:
         raise AuditError("registered deletable kind was modified")
     main_cols = _table_columns(conn, kind.table)
     _text_column(main_cols, kind.key_column)
@@ -936,8 +1019,13 @@ def _verify_kind(conn: sqlite3.Connection, kind: DeletableKind) -> None:
         raise AuditError("delete key column is not unique")
     for dep_table, dep_col in kind.dependents:
         _text_column(_table_columns(conn, dep_table), dep_col)
+    for fts_table, fts_col in kind.fts_dependents:
+        if fts_col.lower() not in _fts_columns(conn, fts_table):
+            raise AuditError("fts dependent column does not exist")
 
     touched = {kind.table.lower(), *(t.lower() for t, _ in kind.dependents)}
+    for fts_table, _col in kind.fts_dependents:
+        touched |= {fts_table.lower(), *(fts_table.lower() + s for s in _FTS_SHADOWS)}
     # L2: no trigger that could run on these deletes (fail closed: any mention of DELETE).
     for schema in ("main.sqlite_master", "sqlite_temp_master"):
         for tbl, sql in conn.execute(f"SELECT tbl_name, sql FROM {schema} WHERE type = 'trigger'"):
@@ -1061,6 +1149,18 @@ def audited_delete(
                 raise DeleteMismatchError(
                     "delete changed rows outside the declared kind; rolled back"
                 )
+            # Iteration 37: FTS index rows go in the same transaction, after the exact counter
+            # check (shadow-table writes are not row-for-row), are verified gone, and the index
+            # is optimized so the deleted tokens leave no residue in the shadow tables.
+            for fts_table, fts_col in spec.fts_dependents:
+                fts = f"main.{_q(fts_table)}"
+                conn.execute(f"DELETE FROM {fts} WHERE {_q(fts_col)} IN ({marks})", targets)
+                left = conn.execute(
+                    f"SELECT COUNT(*) FROM {fts} WHERE {_q(fts_col)} IN ({marks})", targets
+                ).fetchone()[0]
+                if left:
+                    raise DeleteMismatchError("full-text index rows remained; rolled back")
+                conn.execute(f"INSERT INTO {fts}({_q(fts_table)}) VALUES('optimize')")
             row = conn.execute(
                 "SELECT event_type FROM main.audit_event WHERE event_id = ?", (event.event_id,)
             ).fetchone()
@@ -1100,7 +1200,7 @@ def _committed(conn: sqlite3.Connection, event: AuditEvent) -> bool:
         ).fetchone()
     except Exception:  # noqa: BLE001 - closed or broken connection
         return False
-    return row is not None and row[0] == DELETE_EXECUTED
+    return row is not None and row[0] == event.event_type
 
 
 def _replayed(log: AuditLog, attempt: AuditEvent) -> AuditEvent:
@@ -1160,6 +1260,397 @@ def _record_failure(
         )
     except Exception:  # noqa: BLE001, S110 - best effort; the original error propagates
         pass
+
+
+# --- user erasure (iteration 35; SEC-18, AC-28.6, FR-59; D-223/D-224) --------------------
+
+#: Per-user app.db tables and their user column, in delete order (vectors before reports).
+#: A table that was never created is skipped. ``report_fts`` is cleared by report id first.
+ERASE_USER_TABLES: Final[tuple[tuple[str, str], ...]] = (
+    ("report_vector", "owner_user_id"),
+    ("saved_report", "owner_user_id"),
+    ("user_preferences", "user_id"),
+    ("feedback", "user_id"),
+    ("user_quota", "user_id"),
+    ("aggregate_fingerprint", "user_id"),
+)
+ERASE_FTS_TABLE: Final = "report_fts"
+ERASE_FTS_KEY: Final = "report_id"
+#: Bound on every id list an erasure collects; over it the erase is refused, not truncated.
+MAX_ERASE_IDS: Final = 50_000
+PSEUDONYM_RE: Final = re.compile(r"erased-[0-9a-f]{16}")
+_IN_JSON: Final = "IN (SELECT value FROM json_each(?))"
+
+
+class EraseError(AuditError):
+    """An erasure was refused or did not match its plan; nothing was deleted."""
+
+
+class EraseRolledBackError(EraseError):
+    """A step inside the erase transaction failed after ``erase.executed`` was inserted; the
+    whole transaction was rolled back and ``erase.failed`` appended (D-230). Not a refusal."""
+
+
+@dataclass(frozen=True)
+class ErasePlan:
+    """What an erasure of one user would remove (read-only scan; ids are never printed)."""
+
+    user_id: str
+    counts: Mapping[str, int]  # table -> rows to delete; "audit_event" -> rows to pseudonymise
+    report_ids: tuple[str, ...]  # owned reports plus reports named by the user's audit rows
+    session_ids: tuple[str, ...]
+    feedback_ids: tuple[str, ...]
+
+    @property
+    def total(self) -> int:
+        """Rows to delete (audit rows are pseudonymised, not deleted)."""
+        return sum(n for t, n in self.counts.items() if t != "audit_event")
+
+    def digest(self) -> str:
+        """Stable hash of the plan, bound into the CLI's confirmation token (D-222)."""
+        doc = {
+            "counts": dict(sorted(self.counts.items())),
+            "reports": sorted(self.report_ids),
+            "sessions": sorted(self.session_ids),
+            "feedback": sorted(self.feedback_ids),
+        }
+        return hashlib.sha256(json.dumps(doc, sort_keys=True).encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class EraseOutcome:
+    event: AuditEvent  # the erase.executed row (actor = maintainer, target_user = pseudonym)
+    pseudonym: str
+    plan: ErasePlan
+    deleted: Mapping[str, int]
+    audit_rows: int  # audit rows rewritten to the pseudonym
+
+
+def _bounded(rows: Iterable[tuple], what: str) -> list[str]:
+    out = [str(r[0]) for r in rows]
+    if len(out) > MAX_ERASE_IDS:
+        raise EraseError(f"too many {what} to erase in one run")
+    return out
+
+
+def _ids(conn: sqlite3.Connection, sql: str, params: tuple, what: str) -> list[str]:
+    return _bounded(conn.execute(sql + " LIMIT ?", (*params, MAX_ERASE_IDS + 1)), what)
+
+
+def _erase_scan(conn: sqlite3.Connection, user_id: str) -> ErasePlan:
+    """Collect the plan inside the caller's read (or write) transaction."""
+    has = {t: _has_table(conn, t) for t, _ in ERASE_USER_TABLES}
+    has_fts = _has_table(conn, ERASE_FTS_TABLE)
+    reports: set[str] = set()
+    sessions: set[str] = set()
+    feedback: list[str] = []
+    if has["saved_report"]:
+        for rid, sid in conn.execute(
+            "SELECT report_id, session_id FROM main.saved_report WHERE owner_user_id = ? LIMIT ?",
+            (user_id, MAX_ERASE_IDS + 1),
+        ):
+            reports.add(str(rid))
+            sessions.add(str(sid))
+    if has["report_vector"]:
+        reports.update(
+            _ids(conn, "SELECT report_id FROM main.report_vector WHERE owner_user_id = ?",
+                 (user_id,), "vectors")
+        )  # fmt: skip
+    # Reports the user once deleted or exported: their ids name export files left on disk.
+    audit_reports = _ids(
+        conn,
+        "SELECT DISTINCT j.value FROM main.audit_event a, json_each(a.target_ids) j "
+        "WHERE a.actor_user_id = ? AND a.target_ids IS NOT NULL "
+        "AND (a.event_type LIKE 'delete.%' OR a.event_type LIKE 'report.%')",
+        (user_id,),
+        "audit targets",
+    )
+    if audit_reports and has["saved_report"]:
+        foreign = set(
+            _ids(
+                conn,
+                f"SELECT report_id FROM main.saved_report WHERE report_id {_IN_JSON} "
+                "AND owner_user_id <> ?",
+                (json.dumps(audit_reports), user_id),
+                "audit targets",
+            )
+        )
+        audit_reports = [r for r in audit_reports if r not in foreign]
+    reports.update(audit_reports)
+    if has["feedback"]:
+        for fid, sid in conn.execute(
+            "SELECT feedback_id, session_id FROM main.feedback WHERE user_id = ? LIMIT ?",
+            (user_id, MAX_ERASE_IDS + 1),
+        ):
+            feedback.append(str(fid))
+            sessions.add(str(sid))
+    if has["aggregate_fingerprint"]:
+        sessions.update(
+            _ids(conn, "SELECT DISTINCT session_id FROM main.aggregate_fingerprint "
+                 "WHERE user_id = ?", (user_id,), "sessions")
+        )  # fmt: skip
+    sessions.update(
+        _ids(conn, "SELECT DISTINCT session_id FROM main.audit_event WHERE actor_user_id = ?",
+             (user_id,), "sessions")
+    )  # fmt: skip
+    for what, ids in (("reports", reports), ("sessions", sessions), ("feedback", feedback)):
+        if len(ids) > MAX_ERASE_IDS:
+            raise EraseError(f"too many {what} to erase in one run")
+    report_ids = tuple(sorted(reports))
+    counts: dict[str, int] = {}
+    if has_fts:
+        counts[ERASE_FTS_TABLE] = conn.execute(
+            f"SELECT COUNT(*) FROM main.{ERASE_FTS_TABLE} WHERE {ERASE_FTS_KEY} {_IN_JSON}",
+            (json.dumps(list(report_ids)),),
+        ).fetchone()[0]
+    for table, col in ERASE_USER_TABLES:
+        if has[table]:
+            counts[table] = conn.execute(
+                f"SELECT COUNT(*) FROM main.{table} WHERE {col} = ?", (user_id,)
+            ).fetchone()[0]
+    counts["audit_event"] = conn.execute(
+        "SELECT COUNT(*) FROM main.audit_event WHERE actor_user_id = ? "
+        "OR json_extract(details, '$.target_user') = ?",
+        (user_id, user_id),
+    ).fetchone()[0]
+    return ErasePlan(
+        user_id=user_id,
+        counts=counts,
+        report_ids=report_ids,
+        session_ids=tuple(sorted(sessions)),
+        feedback_ids=tuple(sorted(feedback)),
+    )
+
+
+def erase_plan(log: AuditLog, user_id: str) -> ErasePlan:
+    """Read-only preview of :func:`audited_erase` (one consistent read transaction)."""
+    user = _actor_id("user_id", user_id)
+    conn = log.conn
+    if conn.in_transaction:
+        raise EraseError("connection already has an open transaction")
+    try:
+        conn.execute("BEGIN")
+        try:
+            return _erase_scan(conn, user)
+        finally:
+            _rollback(conn)
+    except AuditError:
+        raise
+    except Exception as err:  # noqa: BLE001
+        raise AuditError("audit store unavailable; erase preview failed") from err
+
+
+def _no_update_trigger() -> str:
+    (stmt,) = [s for s in AUDIT_MIGRATION if "audit_event_no_update" in s]
+    return stmt
+
+
+def _pseudonymise(conn: sqlite3.Connection, user_id: str, pseudonym: str) -> int:
+    """The ONE permitted audit mutation (D-223): inside the caller's transaction, drop the
+    no-update trigger, rewrite only ``actor_user_id`` and ``details.target_user`` for this user,
+    recreate the trigger from the canonical DDL and verify the exact schema before COMMIT."""
+    if _schema_objects(conn) != _EXPECTED:
+        raise AuditError("audit store layout does not match the expected schema")
+    conn.execute("DROP TRIGGER main.audit_event_no_update")
+    n = conn.execute(
+        "UPDATE main.audit_event SET actor_user_id = ? WHERE actor_user_id = ?",
+        (pseudonym, user_id),
+    ).rowcount
+    n += conn.execute(
+        "UPDATE main.audit_event SET details = json_set(details, '$.target_user', ?) "
+        "WHERE json_extract(details, '$.target_user') = ?",
+        (pseudonym, user_id),
+    ).rowcount
+    conn.execute(_no_update_trigger())
+    if _schema_objects(conn) != _EXPECTED:
+        raise AuditError("audit trigger was not restored; erase aborted")
+    left = conn.execute(
+        "SELECT COUNT(*) FROM main.audit_event WHERE actor_user_id = ? "
+        "OR json_extract(details, '$.target_user') = ?",
+        (user_id, user_id),
+    ).fetchone()[0]
+    if left:
+        raise EraseError("audit rows still name the user; rolled back")
+    return n
+
+
+def audited_erase(
+    log: AuditLog,
+    *,
+    actor_user_id: str,
+    user_id: str,
+    expected_digest: str | None = None,
+    checkpoint: bool = True,
+) -> EraseOutcome:
+    """Erase every app.db row of ``user_id`` in ONE transaction, audit first (SEC-18, D-224).
+
+    Before the transaction, ``erase.attempted`` is appended on its own (D-230): actor, session,
+    turn and pseudonym are the ones the ``erase.executed`` / ``erase.failed`` rows reuse, so a
+    rolled-back erase still has a durable start row matched by its ``erase.failed``. If that
+    write fails, nothing else happens (``AuditError``).
+
+    Order inside ``BEGIN IMMEDIATE``: scan the plan (refused if ``expected_digest`` differs),
+    insert ``erase.executed`` (actor = the maintainer, ``details.target_user`` = a fresh random
+    pseudonym, ``count`` = rows to delete), delete the FTS rows of the user's reports (verified
+    gone, then ``optimize``), delete the per-user tables in :data:`ERASE_USER_TABLES` (each
+    count checked against the plan, then verified zero), pseudonymise the user's audit rows,
+    re-read the executed row, COMMIT, then ``wal_checkpoint(TRUNCATE)``.
+
+    * Audit insert failure (or anything before it): rollback, nothing deleted, ``AuditError``.
+    * Any failure after ``erase.attempted`` (including a refused plan digest): rollback,
+      ``erase.failed`` appended best effort, re-raised.
+    * A second erase of the same user deletes nothing and still writes ``erase.executed``
+      (count 0, a new pseudonym): idempotent and audited.
+    """
+    actor = _actor_id("actor_user_id", actor_user_id)
+    user = _actor_id("user_id", user_id)
+    if actor == user:
+        raise EraseError("the erasing maintainer cannot be the erased user")
+    pseudonym = "erased-" + secrets.token_hex(8)
+    conn = log.conn
+    try:
+        open_tx = conn.in_transaction
+    except Exception as err:  # noqa: BLE001 - closed connection
+        raise AuditError("audit store unavailable; erase aborted") from err
+    if open_tx:
+        raise AuditError("connection already has an open transaction; erase aborted")
+
+    try:  # D-230: the attempt is durable before anything can be deleted
+        attempted = log._append(  # private path: public record refuses erase.attempted
+            log._build(
+                ERASE_ATTEMPTED,
+                actor_user_id=actor,
+                session_id=uuid.uuid4().hex,
+                turn_id=uuid.uuid4().hex[:12],
+                details={"source": "erase", "target_user": pseudonym},
+            )
+        )
+    except AuditError:
+        raise
+    except Exception as err:  # noqa: BLE001 - bad clock / validation
+        raise AuditError("audit write failed; erase aborted") from err
+    if attempted is None:
+        raise AuditError("audit write ignored; erase aborted")
+
+    stage = "begin"  # begin -> insert -> delete -> committing -> committed
+    event: AuditEvent | None = None
+    result: EraseOutcome | None = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        stage = "insert"
+        plan = _erase_scan(conn, user)
+        if expected_digest is not None and plan.digest() != expected_digest:
+            raise EraseError("the data changed since the preview; preview again")
+        event = log._build(  # private path: public build refuses erase.executed (D-223)
+            ERASE_EXECUTED,
+            actor_user_id=actor,
+            session_id=attempted.session_id,
+            turn_id=attempted.turn_id,
+            count=plan.total,
+            outcome="ok",
+            details={"source": "erase", "target_user": pseudonym},
+        )
+        stored = log._insert(event)
+        if stored is None:
+            raise AuditError("audit write ignored; erase aborted")
+        stage = "delete"
+        deleted: dict[str, int] = {}
+        if ERASE_FTS_TABLE in plan.counts:
+            fts, ids = f"main.{ERASE_FTS_TABLE}", json.dumps(list(plan.report_ids))
+            conn.execute(f"DELETE FROM {fts} WHERE {ERASE_FTS_KEY} {_IN_JSON}", (ids,))
+            left = conn.execute(
+                f"SELECT COUNT(*) FROM {fts} WHERE {ERASE_FTS_KEY} {_IN_JSON}", (ids,)
+            ).fetchone()[0]
+            if left:
+                raise EraseError("full-text index rows remained; rolled back")
+            conn.execute(f"INSERT INTO {fts}({ERASE_FTS_TABLE}) VALUES('optimize')")
+            deleted[ERASE_FTS_TABLE] = plan.counts[ERASE_FTS_TABLE]
+        for table, col in ERASE_USER_TABLES:
+            if table not in plan.counts:
+                continue
+            n = conn.execute(f"DELETE FROM main.{table} WHERE {col} = ?", (user,)).rowcount
+            left = conn.execute(
+                f"SELECT COUNT(*) FROM main.{table} WHERE {col} = ?", (user,)
+            ).fetchone()[0]
+            if n != plan.counts[table] or left:
+                raise EraseError(f"{table} did not match the erase plan; rolled back")
+            deleted[table] = n
+        audit_rows = _pseudonymise(conn, user, pseudonym)
+        row = conn.execute(
+            "SELECT event_type FROM main.audit_event WHERE event_id = ?", (event.event_id,)
+        ).fetchone()
+        if row is None or row[0] != ERASE_EXECUTED or not conn.in_transaction:
+            raise AuditError("audit row lost before commit; erase aborted")
+        stage = "committing"
+        conn.execute("COMMIT")
+        stage = "committed"
+        result = EraseOutcome(stored, pseudonym, plan, deleted, audit_rows)
+    except BaseException as err:
+        if stage == "committed" or (
+            stage == "committing" and event is not None and _committed(conn, event)
+        ):
+            raise
+        _rollback(conn)
+        # D-230: every attempt gets an outcome row (erase.executed rolled back with the deletes)
+        _append_erase_failure(log, attempted, store="app_db", error_type=type(err).__name__)
+        if stage in ("delete", "committing") and event is not None:
+            if isinstance(err, AuditError) or not isinstance(err, Exception):
+                raise
+            raise EraseRolledBackError("a delete failed; rolled back") from err
+        if isinstance(err, AuditError) or not isinstance(err, Exception):
+            raise
+        if stage == "begin":
+            raise AuditError("audit store unavailable; erase aborted") from err
+        raise AuditError("audit write failed; erase aborted") from err
+    if checkpoint:
+        try:  # fold the WAL so no deleted page survives in it (D-224); best effort after COMMIT
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception:  # noqa: BLE001, S110 - the erase is durable; the next checkpoint folds it
+            pass
+    return result
+
+
+def record_erase_failure(
+    log: AuditLog, executed: AuditEvent, *, store: str, error_type: str
+) -> AuditEvent | None:
+    """Append ``erase.failed`` for a step of an erasure (a file store after COMMIT, D-226).
+
+    Only for a durable ``erase.executed`` row (checked by ``event_id``; ``AuditError``
+    otherwise), so it cannot be used to forge erasure history. The write itself is best
+    effort: None if it fails."""
+    try:
+        row = log.conn.execute(
+            "SELECT event_type FROM main.audit_event WHERE event_id = ?", (executed.event_id,)
+        ).fetchone()
+    except Exception as err:  # noqa: BLE001
+        raise AuditError("audit read failed") from err
+    if row is None or row[0] != ERASE_EXECUTED:
+        raise AuditError("erase.failed needs a recorded erase.executed")
+    return _append_erase_failure(log, executed, store=store, error_type=error_type)
+
+
+def _append_erase_failure(
+    log: AuditLog, executed: AuditEvent, *, store: str, error_type: str
+) -> AuditEvent | None:
+    try:
+        return log._append(  # private path: public record refuses erase.failed (D-223)
+            log._build(
+                ERASE_FAILED,
+                actor_user_id=executed.actor_user_id,
+                session_id=executed.session_id,
+                turn_id=executed.turn_id,
+                count=0,
+                outcome="failed",
+                details={
+                    "source": "erase",
+                    "store": store,
+                    "error_type": error_type,
+                    "target_user": executed.details.get("target_user"),
+                },
+            )
+        )
+    except Exception:  # noqa: BLE001 - best effort; the original error propagates
+        return None
 
 
 # --- recorder and guard adapters ---------------------------------------------------------
