@@ -1,5 +1,7 @@
 # OpsFleet Data Agent
 
+[![ci](https://github.com/Rinat-Arifullin/opsfleet-agent/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Rinat-Arifullin/opsfleet-agent/actions/workflows/ci.yml)
+
 A command-line chat assistant that answers business questions about an e-commerce shop. It
 writes and runs SQL against Google BigQuery's public dataset
 [`bigquery-public-data.thelook_ecommerce`](https://console.cloud.google.com/marketplace/product/bigquery-public-data/thelook-ecommerce)
