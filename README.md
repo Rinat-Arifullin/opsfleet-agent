@@ -734,7 +734,7 @@ uv run python evals/run.py --sut evals.live_sut:live_harness --cases-dir evals/c
 
 | Suite | Cases | Gate |
 |---|---|---|
-| `golden` | 41 question → expected answer cases, judged 1–5 by an LLM judge (pass at ≥ 4) | ≥ 80% pass |
+| `golden` | 44 question → expected answer cases, judged 1–5 by an LLM judge (pass at ≥ 4) | ≥ 80% pass |
 | `router` | 73 labelled messages | Label accuracy (reported) |
 | `adversarial/injection` | Prompt injection through the user turn and through data | 100% |
 | `adversarial/pii_typed` | Typed personal data (emails, phones, cards, …) in input | Recall ≥ 95% |
